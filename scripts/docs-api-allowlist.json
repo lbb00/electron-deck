@@ -1,0 +1,32 @@
+{
+  "_comment": "Words that the docs may name inside backticks that are NOT electron-deck exports. Each entry must be justified — a reviewer should be able to sanity-check why a documented symbol is allowed despite not appearing in the package export surface. Adding a name here is an explicit decision, not a silencer. See scripts/check-docs-api-sync.mjs.",
+
+  "_ts_builtins_and_globals": "TypeScript / JS built-ins and standard globals used in type positions inside code spans.",
+  "Awaited": true,
+  "Parameters": true,
+  "ReturnType": true,
+  "Record": true,
+  "Promise": true,
+  "Error": true,
+  "Date": true,
+  "Map": true,
+  "Set": true,
+  "URL": true,
+
+  "_electron_types": "Electron runtime types referenced by the host-integration docs.",
+  "BrowserWindow": true,
+  "WebContentsView": true,
+
+  "_electron_apis": "Electron runtime methods/APIs called in example code, not electron-deck exports.",
+  "exposeInMainWorld": true,
+  "isVisible": true,
+
+  "_host_example_types": "Host-authored example type aliases in the docs' sample config (e.g. `export type HostServices = typeof hostServices`) — illustrative, defined by the downstream host, not exported by this package.",
+  "HostServices": true,
+  "SimulatorApis": true,
+
+  "_doc_local_type_params": "Single/short type-parameter and example identifiers local to a code snippet (generics, example component names, app name literals) — not package exports.",
+  "HS": true,
+  "EV": true,
+  "My": true
+}

@@ -1,0 +1,13 @@
+# pnpm 12 refuses to run a dependency's install script unless it is listed here,
+# and fails the whole install (ERR_PNPM_IGNORED_BUILDS) when an unlisted one has
+# a script — so every such dependency needs an explicit decision.
+allowBuilds:
+  # postinstall links/downloads the platform esbuild binary; vite's library
+  # build does not work without it.
+  esbuild: true
+
+# view-anchor is our own sibling package, published from this repo's release
+# pipeline moments before electron-deck is installed; the default
+# minimum-release-age policy would block fresh installs for 24h. Exclude it.
+minimumReleaseAgeExclude:
+  - view-anchor
