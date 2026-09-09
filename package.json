@@ -1,0 +1,119 @@
+{
+  "name": "electron-deck",
+  "version": "0.2.1",
+  "description": "Layout-as-data deck framework for Electron: dockable panels whose native WebContentsViews follow the DOM, behind a single `electronDeck(config)` entry.",
+  "keywords": [
+    "electron",
+    "webcontentsview",
+    "dock",
+    "layout",
+    "react"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT",
+  "author": "lbb00",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lbb00/electron-deck.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lbb00/electron-deck/issues"
+  },
+  "homepage": "https://github.com/lbb00/electron-deck#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./main": {
+      "types": "./dist/main/index.d.ts",
+      "default": "./dist/main/index.js"
+    },
+    "./preload": {
+      "types": "./dist/preload/index.d.ts",
+      "default": "./dist/preload/index.cjs"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./client/browser": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./host": {
+      "types": "./dist/host/index.d.ts",
+      "default": "./dist/host/index.js"
+    },
+    "./layout": {
+      "types": "./dist/layout/index.d.ts",
+      "default": "./dist/layout/index.js"
+    },
+    "./dock-react": {
+      "types": "./dist/dock-react/index.d.ts",
+      "default": "./dist/dock-react/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "vite build --config vite.config.ts && vite build --config vite.config.preload-cjs.ts && tsc -p tsconfig.build.json",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "check:trust-seal": "node scripts/check-trust-seal.mjs",
+    "check:docs-api-sync": "node scripts/check-docs-api-sync.mjs",
+    "check:browser-purity": "node scripts/check-browser-purity.mjs",
+    "test": "node scripts/check-trust-seal.mjs && node scripts/check-docs-api-sync.mjs && node scripts/check-browser-purity.mjs && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
+    "test:dev": "vitest",
+    "test:coverage": "vitest run --coverage && vitest run --config vitest.dock-react.config.ts --coverage --coverage.reportsDirectory=./coverage/dock-react",
+    "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
+    "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.mjs && electron examples/dockable-demo/main.mjs",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "react-resizable-panels": "^4.10.0",
+    "view-anchor": "^0.1.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.15.3",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^6.0.1",
+    "@vitest/coverage-v8": "^4.1.4",
+    "electron": "^43.2.0",
+    "eslint": "^10.2.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-only-warn": "^1.2.1",
+    "jsdom": "^29.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "5.9.2",
+    "typescript-eslint": "^8.58.2",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.4"
+  },
+  "peerDependencies": {
+    "electron": "^43.2.0",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@12.3.4"
+}
