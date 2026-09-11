@@ -84,24 +84,6 @@ function classifyOutOfRectDropZone(width: number, height: number, x: number, y: 
 	return outY < 0 ? 'top' : 'bottom'
 }
 
-/** Edge-band membership for an in-rect point, plus the per-axis "is the point
- *  in SOME band on this axis" summary the zone decision branches on. */
-interface BandMembership {
-	inLeft: boolean
-	inTop: boolean
-	activeHoriz: boolean
-	activeVert: boolean
-}
-
-function computeBandMembership(width: number, height: number, x: number, y: number, ef: number): BandMembership {
-	const band = ef * Math.min(width, height)
-	const inLeft = x < band
-	const inRight = x > width - band
-	const inTop = y < band
-	const inBottom = y > height - band
-	return { inLeft, inTop, activeHoriz: inLeft || inRight, activeVert: inTop || inBottom }
-}
-
 /**
  * Corner tie-break (both axes active): pick the edge with the SMALLER
  * normalized distance. Only the ACTIVE horizontal edge and ACTIVE vertical
@@ -122,7 +104,13 @@ function cornerTieBreak(width: number, height: number, x: number, y: number, inL
  * axes active (a corner) => {@link cornerTieBreak}.
  */
 function classifyInRectDropZone(width: number, height: number, x: number, y: number, ef: number): DropZone {
-	const { inLeft, inTop, activeHoriz, activeVert } = computeBandMembership(width, height, x, y, ef)
+	const band = ef * Math.min(width, height)
+	const inLeft = x < band
+	const inRight = x > width - band
+	const inTop = y < band
+	const inBottom = y > height - band
+	const activeHoriz = inLeft || inRight
+	const activeVert = inTop || inBottom
 
 	if (!activeHoriz && !activeVert) return 'center'
 	if (activeHoriz && !activeVert) return inLeft ? 'left' : 'right'
@@ -263,15 +251,22 @@ export function resolveReorderInsertIndex(
 ): number {
 	const draggedVisibleIndex = visibleTabIds.indexOf(draggedPanelId)
 	const passedOwnMidpoint = draggedVisibleIndex >= 0 && stripInsertIndex > draggedVisibleIndex
-	const filteredVisible = visibleTabIds.filter((id) => id !== draggedPanelId)
-	const filteredPanels = panels.filter((id) => id !== draggedPanelId)
+	const filteredVisibleLength = draggedVisibleIndex >= 0 ? visibleTabIds.length - 1 : visibleTabIds.length
+	const draggedPanelIndex = panels.indexOf(draggedPanelId)
+	const filteredPanelsLength = draggedPanelIndex >= 0 ? panels.length - 1 : panels.length
 
 	let visibleInsert = passedOwnMidpoint ? stripInsertIndex - 1 : stripInsertIndex
 	if (visibleInsert < 0) visibleInsert = 0
-	if (visibleInsert > filteredVisible.length) visibleInsert = filteredVisible.length
+	if (visibleInsert > filteredVisibleLength) visibleInsert = filteredVisibleLength
 
-	if (visibleInsert >= filteredVisible.length) return filteredPanels.length
-	const anchor = filteredVisible[visibleInsert]!
-	const anchorIndex = filteredPanels.indexOf(anchor)
-	return anchorIndex >= 0 ? anchorIndex : filteredPanels.length
+	if (visibleInsert >= filteredVisibleLength) return filteredPanelsLength
+	const anchor =
+		draggedVisibleIndex >= 0 && visibleInsert >= draggedVisibleIndex
+			? visibleTabIds[visibleInsert + 1]!
+			: visibleTabIds[visibleInsert]!
+	const rawAnchorIndex = panels.indexOf(anchor)
+	if (rawAnchorIndex < 0) return filteredPanelsLength
+	return draggedPanelIndex >= 0 && rawAnchorIndex > draggedPanelIndex
+		? rawAnchorIndex - 1
+		: rawAnchorIndex
 }

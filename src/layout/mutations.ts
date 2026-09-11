@@ -89,7 +89,13 @@ function collectPanelIds(root: LayoutNode): Set<string> {
 
 /** True if `panelId` exists in any tabgroup of the tree. */
 function hasPanel(root: LayoutNode, id: string): boolean {
-	return collectPanelIds(root).has(id)
+	if (root.kind === 'tabs') {
+		return root.panels.includes(id)
+	}
+	for (let i = 0; i < root.children.length; i++) {
+		if (hasPanel(root.children[i]!, id)) return true
+	}
+	return false
 }
 
 /** Collect every node id present anywhere in the tree (splits + tabgroups). */
@@ -120,16 +126,14 @@ function freshId(taken: Set<string>, base: string): string {
 }
 
 function findSplitById(root: LayoutNode, splitId: string): SplitNode | null {
-	let found: SplitNode | null = null
-	const walk = (n: LayoutNode): void => {
-		if (found) return
-		if (n.kind === 'split') {
-			if (n.id === splitId) found = n
-			n.children.forEach(walk)
+	if (root.kind === 'split') {
+		if (root.id === splitId) return root
+		for (let i = 0; i < root.children.length; i++) {
+			const found = findSplitById(root.children[i]!, splitId)
+			if (found !== null) return found
 		}
 	}
-	walk(root)
-	return found
+	return null
 }
 
 /**

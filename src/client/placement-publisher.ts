@@ -63,10 +63,16 @@ export function createPlacementPublisher<Extra = unknown>(
     // nothing — coalescing means only a real change reaches the wire.
     if (disposed || !dirty) return
     dirty = false
+    const count = views.size
+    const viewList: DesiredView<Extra>[] = new Array(count)
+    let idx = 0
+    for (const v of views.values()) {
+      viewList[idx++] = v
+    }
     deps.publish({
       generation: readGeneration(),
       epoch: epoch++,
-      views: [...views.values()],
+      views: viewList,
     })
   }
 

@@ -16,7 +16,7 @@
  * is a preserved-but-unused placeholder — so they are left untouched. The
  * function is pure (clone-on-write, never mutates the input).
  */
-import type { LayoutNode, LayoutTree, SizeConstraint, SplitNode } from './types.js'
+import type { LayoutNode, LayoutTree, SplitNode } from './types.js'
 
 /** The healed-up value for a collapsed flexible child. A small positive weight:
  * enough to make the panel visible without stealing meaningful space from its
@@ -32,7 +32,21 @@ function sanitizeNode(node: LayoutNode): LayoutNode {
 	if (node.kind === 'tabs') return node
 
 	// Recurse first so nested splits are healed regardless of this level.
-	const children = node.children.map(sanitizeNode)
+	const originalChildren = node.children
+	const childCount = originalChildren.length
+	let children: LayoutNode[] | undefined
+	for (let i = 0; i < childCount; i++) {
+		const child = originalChildren[i]!
+		const sanitized = sanitizeNode(child)
+		if (sanitized !== child) {
+			if (children === undefined) {
+				children = originalChildren.slice(0, i)
+			}
+			children.push(sanitized)
+		} else if (children !== undefined) {
+			children.push(child)
+		}
+	}
 
 	// Heal this split's FLEXIBLE child weights. ONLY a NON-POSITIVE weight (≤ 0 or
 	// non-finite — the "dragged to 0 / negative" collapse) is healed; every
@@ -40,26 +54,42 @@ function sanitizeNode(node: LayoutNode): LayoutNode {
 	// (any positive scale is valid — `[0.001, 0.006]` is the same layout as
 	// `[1, 6]`), so a small-but-positive weight is healthy and must not be rewritten
 	// (that would crush the ratio). Px children are never touched.
-	let changed = children.some((c, i) => c !== node.children[i])
-	const sizes = node.sizes.map((w, i) => {
-		if (!isFlexibleAt(node, i)) return w
-		if (typeof w === 'number' && Number.isFinite(w) && w > 0) return w
-		changed = true
-		return HEALED_FLEX_WEIGHT
-	})
-
-	if (!changed) return node
-	const rebuilt: SplitNode = {
-		kind: 'split',
-		id: node.id,
-		orientation: node.orientation,
-		children,
-		sizes,
+	let sizes: number[] | undefined
+	const originalSizes = node.sizes
+	const sizeCount = originalSizes.length
+	for (let i = 0; i < sizeCount; i++) {
+		const w = originalSizes[i]!
+		if (!isFlexibleAt(node, i) || (typeof w === 'number' && Number.isFinite(w) && w > 0)) {
+			if (sizes !== undefined) sizes.push(w)
+		} else {
+			if (sizes === undefined) {
+				sizes = originalSizes.slice(0, i)
+			}
+			sizes.push(HEALED_FLEX_WEIGHT)
+		}
 	}
+
+	if (children === undefined && sizes === undefined) return node
+	const resolvedChildren = children ?? originalChildren
+	const resolvedSizes = sizes ?? originalSizes
+	const constraints = node.constraints
 	// Preserve the constraints array verbatim (only weights are touched).
-	return node.constraints !== undefined
-		? { ...rebuilt, constraints: node.constraints as readonly (SizeConstraint | null)[] }
-		: rebuilt
+	return constraints !== undefined
+		? {
+				kind: 'split',
+				id: node.id,
+				orientation: node.orientation,
+				children: resolvedChildren,
+				sizes: resolvedSizes,
+				constraints,
+			}
+		: {
+				kind: 'split',
+				id: node.id,
+				orientation: node.orientation,
+				children: resolvedChildren,
+				sizes: resolvedSizes,
+			}
 }
 
 /**

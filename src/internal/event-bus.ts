@@ -15,7 +15,9 @@ import type { Disposable, HostEvent, JsonValue } from '../types.js'
  */
 export class EventBus {
 	private readonly subscribers = new Map<string, Set<(payload: JsonValue) => void>>()
+	private readonly subscribersCache = new Map<string, readonly ((payload: JsonValue) => void)[]>()
 	private readonly allSubscribers = new Set<(name: string, payload: JsonValue) => void>()
+	private allSubscribersCache: readonly ((name: string, payload: JsonValue) => void)[] | null = null
 	private readonly inFlight = new Set<string>()
 	private boundEvents: HostEvent<JsonValue>[] = []
 
@@ -38,11 +40,15 @@ export class EventBus {
 		try {
 			const subs = this.subscribers.get(name)
 			if (subs && subs.size > 0) {
-				// snapshot 防止 listener 中 dispose 影响迭代
-				const snapshot = Array.from(subs)
-				for (const l of snapshot) {
+				// snapshot 防止 listener 中 dispose 影响迭代；使用缓存避免每次 publish 分配新数组
+				let snapshot = this.subscribersCache.get(name)
+				if (snapshot === undefined) {
+					snapshot = Array.from(subs)
+					this.subscribersCache.set(name, snapshot)
+				}
+				for (let i = 0; i < snapshot.length; i++) {
 					try {
-						l(payload)
+						snapshot[i]!(payload)
 					}
 					catch (e) {
 						console.error(`[electron-deck] subscriber for "${name}" threw:`, e)
@@ -50,10 +56,14 @@ export class EventBus {
 				}
 			}
 			if (this.allSubscribers.size > 0) {
-				const snapshot = Array.from(this.allSubscribers)
-				for (const l of snapshot) {
+				let snapshot = this.allSubscribersCache
+				if (snapshot === null) {
+					snapshot = Array.from(this.allSubscribers)
+					this.allSubscribersCache = snapshot
+				}
+				for (let i = 0; i < snapshot.length; i++) {
 					try {
-						l(name, payload)
+						snapshot[i]!(name, payload)
 					}
 					catch (e) {
 						console.error(`[electron-deck] catch-all subscriber threw on "${name}":`, e)
@@ -73,10 +83,12 @@ export class EventBus {
 			this.subscribers.set(name, subs)
 		}
 		subs.add(listener)
+		this.subscribersCache.delete(name)
 		const set = subs
 		return {
 			dispose: () => {
 				set.delete(listener)
+				this.subscribersCache.delete(name)
 			},
 		}
 	}
@@ -87,9 +99,11 @@ export class EventBus {
 	 */
 	subscribeAll(listener: (name: string, payload: JsonValue) => void): Disposable {
 		this.allSubscribers.add(listener)
+		this.allSubscribersCache = null
 		return {
 			dispose: () => {
 				this.allSubscribers.delete(listener)
+				this.allSubscribersCache = null
 			},
 		}
 	}
@@ -98,6 +112,8 @@ export class EventBus {
 		for (const ev of this.boundEvents) unbindHostEvent(ev)
 		this.boundEvents = []
 		this.subscribers.clear()
+		this.subscribersCache.clear()
 		this.allSubscribers.clear()
+		this.allSubscribersCache = null
 	}
 }

@@ -117,16 +117,15 @@ export function cleanSnapshot(raw: unknown, authorize: Authorizer): CleanSnapsho
   if (!Array.isArray(snap.views)) return null
 
   const rawViews = snap.views
+
   const views: CleanView[] = []
   const seen = new Set<string>()
-  for (const rawView of rawViews) {
-    const cleaned = cleanOneView(rawView, authorize, seen)
+  for (let i = 0; i < rawViews.length; i++) {
+    const cleaned = cleanOneView(rawViews[i], authorize, seen)
     if (cleaned) views.push(cleaned)
   }
-
   // A non-empty raw that fully fails authorization is rejected wholesale.
   if (rawViews.length > 0 && views.length === 0) return null
-
   return { generation: snap.generation, epoch: snap.epoch, views }
 }
 
@@ -145,11 +144,15 @@ export function dispatchOps(
   state: ReconcilerState,
   resolveApply: (viewId: string) => ((p: Placement) => void) | null,
 ): void {
+  if (ops.length === 0) return
   const touched = new Set<string>()
-  for (const op of ops) {
-    if (op.kind === 'reorder') continue
-    touched.add(op.viewId)
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]!
+    if (op.kind !== 'reorder') {
+      touched.add(op.viewId)
+    }
   }
+  if (touched.size === 0) return
   for (const viewId of touched) {
     const apply = resolveApply(viewId)
     if (!apply) continue

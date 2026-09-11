@@ -14,7 +14,9 @@
 //
 // Proves (with explicit ✅/❌ trace lines):
 //   1. DOM tab switch — clicking [data-deck-tab="logs"] flips g-right active to
-//      'logs' in the model AND swaps the DOM body.
+//      'logs' in the model, shows the logs body, and leaves the editor body
+//      mounted-but-hidden (DockView keeps inactive panel DOM around to
+//      preserve React state/scroll — see panel-body.tsx).
 //   2. Native slot following — resizing the dock host (renderer-driven) moves
 //      the native simulator WebContentsView to track its slot rect.
 //   3. Serialize/restore — serialize (after tab switch + movePanel), teardown,
@@ -245,25 +247,27 @@ async function runVerification(mainWin) {
 	await shot(mainWin, '1-initial.png')
 
 	// ── PROOF 1: DOM tab switch ───────────────────────────────────────────────
-	// Click the logs tab in g-right; assert model g-right active === 'logs' AND
-	// the DOM body swapped (logs body present, editor body gone).
+	// Click the logs tab in g-right; assert model g-right active === 'logs',
+	// the logs body is visible, and the editor body is still mounted but
+	// hidden (DockView leaves inactive panel DOM in place — see
+	// panel-body.tsx — rather than removing it).
 	log('── PROOF 1: DOM tab switch (g-right editor → logs) ──')
 	const beforeActive = await js(`window.__deck.activeOf('g-right')`)
 	await js(`document.querySelector('[data-deck-tab="logs"]').click()`)
 	await sleep(300)
 	const afterActive = await js(`window.__deck.activeOf('g-right')`)
-	const logsBodyPresent = await js(
-		`!!document.querySelector('[data-deck-panel-body="logs"] [data-test-dom-content="logs"]')`,
+	const logsBodyVisible = await js(
+		`!!document.querySelector('[data-deck-panel-body="logs"] [data-test-dom-content="logs"]') && getComputedStyle(document.querySelector('[data-deck-panel-body="logs"]')).display !== 'none'`,
 	)
-	const editorBodyGone = await js(
-		`!document.querySelector('[data-deck-panel-body="editor"]')`,
+	const editorBodyHidden = await js(
+		`!!document.querySelector('[data-deck-panel-body="editor"]') && getComputedStyle(document.querySelector('[data-deck-panel-body="editor"]')).display === 'none'`,
 	)
 	const tabActive = await js(
 		`document.querySelector('[data-deck-tab="logs"]').getAttribute('data-active') === 'true'`,
 	)
-	log('PROOF1: g-right active', beforeActive, '→', afterActive, '| logsBody', String(logsBodyPresent), '| editorGone', String(editorBodyGone), '| tabActive', String(tabActive))
-	if (afterActive === 'logs' && logsBodyPresent && editorBodyGone && tabActive) {
-		log('✅ DOM tab switch: clicking [data-deck-tab="logs"] flipped the model AND swapped the DOM body.')
+	log('PROOF1: g-right active', beforeActive, '→', afterActive, '| logsVisible', String(logsBodyVisible), '| editorHidden', String(editorBodyHidden), '| tabActive', String(tabActive))
+	if (afterActive === 'logs' && logsBodyVisible && editorBodyHidden && tabActive) {
+		log('✅ DOM tab switch: clicking [data-deck-tab="logs"] flipped the model, showed the logs body, and left the editor body mounted-but-hidden.')
 	} else {
 		log('❌ DOM tab switch did NOT propagate to the model/DOM.')
 	}

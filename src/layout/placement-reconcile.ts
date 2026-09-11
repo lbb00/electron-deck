@@ -70,16 +70,19 @@ export function createInitialState<Extra = unknown>(): ReconcilerState<Extra> {
 
 // Integer-snap so sub-pixel jitter (100.4 vs 100.6) never emits a setBounds op.
 function roundBounds(b: Bounds): Bounds {
-  return {
-    x: Math.round(b.x),
-    y: Math.round(b.y),
-    width: Math.round(b.width),
-    height: Math.round(b.height),
+  const x = Math.round(b.x)
+  const y = Math.round(b.y)
+  const width = Math.round(b.width)
+  const height = Math.round(b.height)
+  if (x === b.x && y === b.y && width === b.width && height === b.height) {
+    return b
   }
+  return { x, y, width, height }
 }
 
 function sameBounds(a: Bounds | undefined, b: Bounds | undefined): boolean {
-  if (a === undefined || b === undefined) return a === b
+  if (a === b) return true
+  if (a === undefined || b === undefined) return false
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 }
 
@@ -95,11 +98,19 @@ function visibleBounds<Extra>(dv: DesiredView<Extra>): Bounds {
 }
 
 function setBoundsOp<Extra>(id: string, dv: DesiredView<Extra>): ViewOp<Extra> {
+  const bounds = visibleBounds(dv)
+  if (dv.extra !== undefined) {
+    return {
+      kind: 'setBounds',
+      viewId: id,
+      bounds,
+      extra: dv.extra,
+    }
+  }
   return {
     kind: 'setBounds',
     viewId: id,
-    bounds: visibleBounds(dv),
-    ...(dv.extra !== undefined ? { extra: dv.extra } : {}),
+    bounds,
   }
 }
 
@@ -109,16 +120,21 @@ function computeOrder<Extra>(
   actual: Map<string, ActualView<Extra>>,
   desired: Map<string, DesiredView<Extra>>,
 ): string[] {
-  const attached = [...actual.entries()]
-    .filter(([, a]) => a.attached)
-    .map(([id]) => id)
-  attached.sort((id1, id2) => {
-    const l1 = desired.get(id1)?.layer ?? 0
-    const l2 = desired.get(id2)?.layer ?? 0
-    if (l1 !== l2) return l1 - l2
-    return id1 < id2 ? -1 : id1 > id2 ? 1 : 0
+  const attached: Array<{ id: string; layer: number }> = []
+  for (const [id, a] of actual) {
+    if (a.attached) {
+      attached.push({ id, layer: desired.get(id)?.layer ?? 0 })
+    }
+  }
+  attached.sort((a, b) => {
+    if (a.layer !== b.layer) return a.layer - b.layer
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
   })
-  return attached
+  const order: string[] = new Array(attached.length)
+  for (let i = 0; i < attached.length; i++) {
+    order[i] = attached[i]!.id
+  }
+  return order
 }
 
 // A view declared in the snapshot no longer being present means it must be
@@ -129,9 +145,9 @@ function scanDetached<Extra>(
   ops: ViewOp<Extra>[],
 ): boolean {
   let attachSetChanged = false
-  for (const id of [...actual.keys()]) {
+  for (const [id, a] of actual) {
     if (desired.has(id)) continue
-    if (actual.get(id)?.attached) {
+    if (a.attached) {
       ops.push({ kind: 'detach', viewId: id })
       attachSetChanged = true
     }
@@ -159,6 +175,7 @@ function classifyView<Extra>(
   const a = actual.get(id)
   if (!dv.placement.visible) {
     if (a?.attached && a.visible) buckets.hides.push(id)
+    if (a !== undefined && !a.visible) return false // already hidden; nothing to record
     actual.set(id, { attached: a?.attached ?? false, visible: false, bounds: a?.bounds, extra: a?.extra })
     return false
   }
@@ -169,7 +186,12 @@ function classifyView<Extra>(
     return true
   }
   if (!a.visible) buckets.restores.push(id)
-  if (!sameBounds(a.bounds, bounds) || !sameExtra(a.extra, dv.extra)) buckets.updates.push(id)
+  const boundsChanged = !sameBounds(a.bounds, bounds)
+  const extraChanged = boundsChanged ? false : !sameExtra(a.extra, dv.extra)
+  if (boundsChanged || extraChanged) buckets.updates.push(id)
+  if (a.visible && !boundsChanged && !extraChanged) {
+    return false
+  }
   actual.set(id, { attached: true, visible: true, bounds, extra: dv.extra })
   return false
 }
@@ -222,11 +244,13 @@ export function reconcile<Extra = unknown>(
   // that hasn't gotten around to redeclaring it yet. `scanDetached` below can
   // only emit a `detach` op for an id it can still see in `actual`; wiping the
   // map here would silently strand that view attached forever.
-  const actual = new Map<string, ActualView<Extra>>()
-  for (const [id, a] of prev.actual) actual.set(id, { ...a })
+  const actual = new Map<string, ActualView<Extra>>(prev.actual)
 
   const desired = new Map<string, DesiredView<Extra>>()
-  for (const v of snapshot.views) desired.set(v.viewId, v)
+  for (let i = 0; i < snapshot.views.length; i++) {
+    const v = snapshot.views[i]!
+    desired.set(v.viewId, v)
+  }
 
   const ops: ViewOp<Extra>[] = []
   let attachSetChanged = scanDetached(actual, desired, ops)

@@ -64,6 +64,7 @@
     "README.md",
     "LICENSE"
   ],
+  "sideEffects": false,
   "scripts": {
     "build": "vite build --config vite.config.ts && vite build --config vite.config.preload-cjs.ts && tsc -p tsconfig.build.json",
     "check-types": "tsc --noEmit",
@@ -92,6 +93,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "@vitest/coverage-v8": "^4.1.4",
     "electron": "^43.2.0",
+    "esbuild": "^0.28.2",
     "eslint": "^10.2.1",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-only-warn": "^1.2.1",

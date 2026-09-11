@@ -24,7 +24,7 @@ const src = resolve(__dirname, 'src')
 export default defineConfig({
 	build: {
 		target: 'esnext',
-		minify: false,
+		minify: true,
 		sourcemap: true,
 		emptyOutDir: false,
 		outDir: resolve(__dirname, 'dist'),

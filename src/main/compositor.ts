@@ -198,8 +198,30 @@ function planCommit(
   target: readonly MountedView[],
   host: ContentViewHost,
 ): { removals: NativeViewRef[]; additions: { ref: NativeViewRef; atIndex: number }[] } {
+  const hostChildren = host.children()
+  const targetLen = target.length
+  const hostLen = hostChildren.length
+
+  if (targetLen === 0 && hostLen === 0) {
+    return { removals: [], additions: [] }
+  }
+
+  // Fast path: if host children already match target exactly in length and order,
+  // no host mutations are needed (zero collections allocated for steady state).
+  if (targetLen === hostLen) {
+    let match = true
+    for (let i = 0; i < targetLen; i++) {
+      if (target[i]!.ref.id !== hostChildren[i]!.id) {
+        match = false
+        break
+      }
+    }
+    if (match) {
+      return { removals: [], additions: [] }
+    }
+  }
   const targetIds = target.map((v) => v.ref.id)
-  const current = host.children().map((v) => v.id)
+  const current = hostChildren.map((v) => v.id)
   const targetSet = new Set(targetIds)
   const currentSet = new Set(current)
 
@@ -209,7 +231,7 @@ function planCommit(
   const keepIds = computeKeepIds(shared, currentIndexOf)
 
   return {
-    removals: planRemovals(host.children(), targetSet),
+    removals: planRemovals(hostChildren, targetSet),
     additions: planAdditions(target, currentSet, keepIds),
   }
 }
