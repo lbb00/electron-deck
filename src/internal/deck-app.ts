@@ -1638,6 +1638,8 @@ export class DeckApp {
 		const { state, ops } = reconcile(prev, clean)
 		this.reconcileStates.set(senderId, state)
 
+		if (ops.length === 0) return
+
 		// Resolve a viewId back to its apply sink. Built from ALL of this wc's live
 		// tokens (not just the cleaned snapshot) so a detach op for a view the
 		// renderer dropped can still reach its sink.
@@ -1885,6 +1887,10 @@ export class DeckApp {
 		// dispose self-deletes its empty group, but clear belt-and-suspenders so no
 		// group survives the app's lifetime).
 		this.keepAliveGroups.clear()
+		this.reconcileStates.clear()
+		this.perWcGeneration.clear()
+		this.fwListeners.clear()
+		this.backendTrustDisposables.clear()
 	}
 
 	private buildRuntime(): Runtime {

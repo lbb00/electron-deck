@@ -135,6 +135,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 		const el = resolveSlot(grant.slotId)
 		if (!el) return // new slot not mounted → graceful no-op; old anchor already revoked
 		const token = grant.slotToken
+		const extra = { slotToken: token }
 		const anchor = createAnchor(el, {
 			visible: true,
 			followScroll: true,
@@ -145,7 +146,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 			// cross-talk between slots). layer is 0: z-order is host-controlled
 			// (compositor zone), not renderer-driven.
 			publish: (placement) => {
-				publisher.set({ viewId: grant.viewId, placement, layer: 0, extra: { slotToken: token } })
+				publisher.set({ viewId: grant.viewId, placement, layer: 0, extra })
 			},
 		})
 		byViewId.set(grant.viewId, { token, anchor })

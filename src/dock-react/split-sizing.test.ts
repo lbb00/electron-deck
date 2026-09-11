@@ -131,4 +131,15 @@ describe('split-sizing — untouched exports', () => {
 		})
 		expect(layoutsEquivalent({ a: 50 }, { a: 50.1 }, ['a'])).toBe(true)
 	})
+
+	it('toPercentages agrees bit-for-bit with computeFlexiblePercentages for an all-flexible split', () => {
+		for (const sizes of [[1, 2], [1, 1, 1]]) {
+			const constraints: (SizeConstraint | null)[] = sizes.map(() => null)
+			const flexible = computeFlexiblePercentages(sizes, constraints)
+			const percentages = toPercentages(sizes)
+			for (let i = 0; i < sizes.length; i++) {
+				expect(flexible.get(i)).toBe(percentages[i])
+			}
+		}
+	})
 })

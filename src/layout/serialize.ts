@@ -235,11 +235,11 @@ function visitSplit(
 			)
 		}
 	}
-	const nextPath = new Set(path)
-	nextPath.add(obj)
+	path.add(obj)
 	for (const child of children) {
-		visit(child, depth + 1, nextPath)
+		visit(child, depth + 1, path)
 	}
+	path.delete(obj)
 }
 
 export function validateTree(t: LayoutTree, knownPanelIds: ReadonlySet<string>): string[] {

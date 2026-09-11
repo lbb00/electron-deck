@@ -170,6 +170,8 @@ export function createConnectionRegistry(): ConnectionRegistry {
       byId.delete(id)
       void segment.disposeAll().catch((e) => log.error('close disposeAll threw', e))
       emit('closed')
+      resetListeners.clear()
+      closedListeners.clear()
     }
 
     // Hard destroy — the real terminal hook. `once` auto-removes and the

@@ -55,6 +55,9 @@ export class InMemoryTypedIpcRegistry implements TypedIpcRegistry {
 		return {
 			dispose: () => {
 				ref.delete(cast)
+				if (ref.size === 0 && this.listeners.get(channel) === ref) {
+					this.listeners.delete(channel)
+				}
 			},
 		}
 	}

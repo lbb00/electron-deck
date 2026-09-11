@@ -240,6 +240,9 @@ export function createScope(): Scope {
         inFlight = null
         inFlightKind = null
         emit('closed')
+        resetListeners.clear()
+        closedListeners.clear()
+        childRemovers.clear()
       }
     })()
     inFlight = p

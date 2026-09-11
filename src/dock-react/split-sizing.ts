@@ -42,13 +42,23 @@ export const FLEX_RATIO_TOLERANCE = 0.1
 
 /** Normalize raw split weights to percentages summing ~100 for `defaultSize`. */
 export function toPercentages(sizes: readonly number[]): number[] {
-	const total = sizes.reduce((a, b) => a + (b > 0 ? b : 0), 0)
-	if (total <= 0) {
-		// Degenerate weights → distribute evenly.
-		const even = sizes.length > 0 ? 100 / sizes.length : 100
-		return sizes.map(() => even)
+	let total = 0
+	const len = sizes.length
+	for (let i = 0; i < len; i++) {
+		const s = sizes[i]!
+		if (s > 0) total += s
 	}
-	return sizes.map((s) => ((s > 0 ? s : 0) / total) * 100)
+	const out = new Array<number>(len)
+	if (total <= 0) {
+		const even = len > 0 ? 100 / len : 100
+		for (let i = 0; i < len; i++) out[i] = even
+		return out
+	}
+	for (let i = 0; i < len; i++) {
+		const s = sizes[i]!
+		out[i] = ((s > 0 ? s : 0) / total) * 100
+	}
+	return out
 }
 
 /**
@@ -62,14 +72,31 @@ export function computeFlexiblePercentages(
 	sizes: readonly number[],
 	constraints: readonly (SizeConstraint | null)[] | undefined,
 ): Map<number, number> {
-	const flexibleIndices = sizes
-		.map((_, i) => i)
-		.filter((i) => (constraints?.[i] ?? null) === null)
-	const pct = toPercentages(flexibleIndices.map((i) => sizes[i] ?? 0))
+	const flexibleIndices: number[] = []
+	let total = 0
+	for (let i = 0; i < sizes.length; i++) {
+		if ((constraints?.[i] ?? null) === null) {
+			flexibleIndices.push(i)
+			const s = sizes[i] ?? 0
+			total += s > 0 ? s : 0
+		}
+	}
 	const out = new Map<number, number>()
-	flexibleIndices.forEach((origIndex, j) => {
-		out.set(origIndex, pct[j]!)
-	})
+	const flexLen = flexibleIndices.length
+	if (flexLen === 0) return out
+
+	if (total <= 0) {
+		const even = 100 / flexLen
+		for (let j = 0; j < flexLen; j++) {
+			out.set(flexibleIndices[j]!, even)
+		}
+	} else {
+		for (let j = 0; j < flexLen; j++) {
+			const idx = flexibleIndices[j]!
+			const s = sizes[idx] ?? 0
+			out.set(idx, ((s > 0 ? s : 0) / total) * 100)
+		}
+	}
 	return out
 }
 
@@ -105,12 +132,23 @@ export function clampFlexibleWeights(
 	weights: readonly number[],
 	constraints: readonly (SizeConstraint | null)[] | undefined,
 ): number[] {
-	const flexCount = weights.filter((_, i) => (constraints?.[i] ?? null) === null).length
+	let flexCount = 0
+	for (let i = 0; i < weights.length; i++) {
+		if ((constraints?.[i] ?? null) === null) {
+			flexCount++
+		}
+	}
 	const floor = flexibleFloor(flexCount)
-	return weights.map((w, i) => {
-		if ((constraints?.[i] ?? null) !== null) return w // px child — leave as-is
-		return Number.isFinite(w) && w >= floor ? w : floor
-	})
+	const out = new Array<number>(weights.length)
+	for (let i = 0; i < weights.length; i++) {
+		const w = weights[i]!
+		if ((constraints?.[i] ?? null) !== null) {
+			out[i] = w
+		} else {
+			out[i] = Number.isFinite(w) && w >= floor ? w : floor
+		}
+	}
+	return out
 }
 
 /** Are two panelId→percentage maps equivalent within `epsilon` percentage
@@ -132,7 +170,8 @@ export function layoutsEquivalent(
 	const idSet = new Set(ids)
 	for (const k of Object.keys(a)) if (!idSet.has(k)) return false
 	for (const k of Object.keys(b)) if (!idSet.has(k)) return false
-	for (const id of ids) {
+	for (let i = 0; i < ids.length; i++) {
+		const id = ids[i]!
 		const av = a[id]
 		const bv = b[id]
 		if (!Number.isFinite(av) || !Number.isFinite(bv)) return false

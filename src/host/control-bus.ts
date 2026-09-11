@@ -101,9 +101,11 @@ export function createControlBus(deps: CreateControlBusDeps): ControlBus {
 	const { bus, trustSet, policy } = deps
 	// The facade owns the single command table + declared-event set. The wire
 	// resolves invokes through `dispatch()` and reads the allowlist through
-	// `declaredEvents()` — no shared mutable Map handed across the boundary.
+	// `declaredEvents()`, which returns a readonly, lazily-rebuilt cache array
+	// — callers must not mutate it.
 	const commandRegistry = new Map<string, CommandHandler>()
 	const declaredEventSet = new Set<string>()
+	let declaredEventsCache: readonly string[] | null = null
 
 	return {
 		command(name: string, handler: CommandHandler): Disposable {
@@ -124,6 +126,7 @@ export function createControlBus(deps: CreateControlBusDeps): ControlBus {
 
 		event<P extends JsonValue>(name: string): ControlBusEventHandle<P> {
 			declaredEventSet.add(name)
+			declaredEventsCache = null
 			let disposed = false
 			return {
 				publish: (payload: P) => {
@@ -135,6 +138,7 @@ export function createControlBus(deps: CreateControlBusDeps): ControlBus {
 					if (disposed) return
 					disposed = true
 					declaredEventSet.delete(name)
+					declaredEventsCache = null
 				},
 			}
 		},
@@ -158,7 +162,10 @@ export function createControlBus(deps: CreateControlBusDeps): ControlBus {
 		},
 
 		declaredEvents(): readonly string[] {
-			return Array.from(declaredEventSet)
+			if (declaredEventsCache === null) {
+				declaredEventsCache = Array.from(declaredEventSet)
+			}
+			return declaredEventsCache
 		},
 	}
 }

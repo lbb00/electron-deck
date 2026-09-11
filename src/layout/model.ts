@@ -22,6 +22,7 @@ export function createLayoutModel(initial: LayoutTree): LayoutModel {
 	let current: LayoutTree = structuredClone(initial)
 	let revision = 0
 	const subscribers = new Set<(snap: LayoutSnapshot) => void>()
+	let subscribersCache: readonly ((snap: LayoutSnapshot) => void)[] | null = null
 
 	// Re-entrancy guard: a subscriber may call apply() during notification. We
 	// must not re-enter and bump `revision` mid-delivery (subscribers would then
@@ -43,15 +44,23 @@ export function createLayoutModel(initial: LayoutTree): LayoutModel {
 		revision += 1
 		const snap: LayoutSnapshot = { tree: current, revision }
 		// Snapshot the subscriber set so unsubscribe during delivery is safe.
+		// Cached across commits to eliminate garbage creation on frequent updates.
 		// Isolate subscriber errors: a throw from one must not abort delivery to
 		// the rest, nor make apply() throw after a committed state. The model's
 		// job is delivery, not subscriber correctness — swallow and continue.
-		for (const fn of [...subscribers]) {
-			try {
-				fn(snap)
+		if (subscribers.size > 0) {
+			let snapshot = subscribersCache
+			if (snapshot === null) {
+				snapshot = Array.from(subscribers)
+				subscribersCache = snapshot
 			}
-			catch {
-				// intentionally swallowed — see above.
+			for (let i = 0; i < snapshot.length; i++) {
+				try {
+					snapshot[i]!(snap)
+				}
+				catch {
+					// intentionally swallowed — see above.
+				}
 			}
 		}
 	}
@@ -100,8 +109,10 @@ export function createLayoutModel(initial: LayoutTree): LayoutModel {
 		},
 		subscribe(fn: (snap: LayoutSnapshot) => void): () => void {
 			subscribers.add(fn)
+			subscribersCache = null
 			return (): void => {
 				subscribers.delete(fn)
+				subscribersCache = null
 			}
 		},
 	}

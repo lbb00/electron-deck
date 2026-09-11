@@ -384,7 +384,16 @@ export function createViewHandle(deps: ViewHandleDeps): ViewHandle {
         ensureMounted()
         // Track the live on-screen rect for bounds(). Copy so a later caller
         // mutation can't alter the recorded rect.
-        visibleBounds = { x: p.bounds.x, y: p.bounds.y, width: p.bounds.width, height: p.bounds.height }
+        const pb = p.bounds
+        if (
+          visibleBounds === null ||
+          visibleBounds.x !== pb.x ||
+          visibleBounds.y !== pb.y ||
+          visibleBounds.width !== pb.width ||
+          visibleBounds.height !== pb.height
+        ) {
+          visibleBounds = { x: pb.x, y: pb.y, width: pb.width, height: pb.height }
+        }
       } else {
         // Detach-but-keep: remove from the host, do NOT destroy the native view.
         current.compositor.unmount(ref.id)

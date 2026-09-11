@@ -136,6 +136,39 @@ describe('cleanSnapshot', () => {
       // First view wins (layer === 0, not 1).
       expect(result!.views[0]!.layer).toBe(0)
     })
+
+    it('across a raw list of more than 8 views, drops an unauthorized view and keeps the first of a duplicated viewId', () => {
+      const raw = rawSnap({
+        views: [
+          rawView('tok-a', { visible: false }, 'a'),
+          rawView('tok-b', { visible: false }, 'b'),
+          rawView('tok-bad', { visible: false }, 'bad'),
+          rawView('tok-c', { visible: false }, 'c'),
+          rawView('tok-d', { visible: false }, 'd'),
+          rawView('tok-a2', { visible: false }, 'a2'), // resolves to the same viewId as tok-a
+          rawView('tok-e', { visible: false }, 'e'),
+          rawView('tok-f', { visible: false }, 'f'),
+          rawView('tok-g', { visible: false }, 'g'),
+          rawView('tok-h', { visible: false }, 'h'),
+          rawView('tok-i', { visible: false }, 'i'),
+        ],
+      })
+      const auth: Authorizer = (token) => {
+        if (token === 'tok-bad') return null // unknown/unauthorized token
+        if (token === 'tok-a') return { viewId: 'shared-a', layer: 0 }
+        if (token === 'tok-a2') return { viewId: 'shared-a', layer: 1 }
+        return { viewId: token, layer: 0 }
+      }
+      const result = cleanSnapshot(raw, auth)
+      expect(result).not.toBeNull()
+      // 11 raw views: 1 unauthorized dropped, tok-a2's duplicate viewId collapsed onto tok-a → 9.
+      expect(result!.views).toHaveLength(9)
+      const viewIds = result!.views.map((v) => v.viewId)
+      expect(viewIds).not.toContain('bad')
+      expect(viewIds.filter((id) => id === 'shared-a')).toHaveLength(1)
+      // The first occurrence (tok-a, layer 0) wins over the later duplicate (tok-a2, layer 1).
+      expect(result!.views.find((v) => v.viewId === 'shared-a')!.layer).toBe(0)
+    })
   })
 
   describe('generation and epoch pass-through', () => {
