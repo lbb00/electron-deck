@@ -45,3 +45,25 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      # Both gates read dist/, so they must follow Build. Running them here (not
+      # only in prepack) means a size regression or a tree-shaking leak fails
+      # the PR instead of surfacing at publish time.
+      - name: Check bundle size
+        run: pnpm run check:bundle-size
+
+      - name: Check tree shaking
+        run: pnpm run check:tree-shaking
+
+      - name: Check dockable interactions
+        run: xvfb-run --auto-servernum pnpm run check:e2e
+        env:
+          DECK_E2E_OUTPUT_DIR: ${{ runner.temp }}/dockable-e2e
+
+      - name: Upload dockable interaction diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dockable-e2e-diagnostics
+          path: ${{ runner.temp }}/dockable-e2e
+          if-no-files-found: ignore

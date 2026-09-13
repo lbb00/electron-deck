@@ -72,12 +72,16 @@
     "check:trust-seal": "node scripts/check-trust-seal.mjs",
     "check:docs-api-sync": "node scripts/check-docs-api-sync.mjs",
     "check:browser-purity": "node scripts/check-browser-purity.mjs",
+    "check:bundle-size": "node --test scripts/check-bundle-size.test.mjs && node scripts/check-bundle-size.mjs",
+    "check:tree-shaking": "node --test scripts/check-tree-shaking.test.mjs && node scripts/check-tree-shaking.mjs",
+    "check:e2e": "node examples/dockable-demo/bundle.mjs && node --test scripts/check-dockable-e2e.test.mjs && node scripts/check-dockable-e2e.mjs",
     "test": "node scripts/check-trust-seal.mjs && node scripts/check-docs-api-sync.mjs && node scripts/check-browser-purity.mjs && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
     "test:dev": "vitest",
     "test:coverage": "vitest run --coverage && vitest run --config vitest.dock-react.config.ts --coverage --coverage.reportsDirectory=./coverage/dock-react",
     "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
     "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.mjs && electron examples/dockable-demo/main.mjs",
-    "prepack": "pnpm run build"
+    "bench": "node --expose-gc bench/main-frame-path.mjs",
+    "prepack": "pnpm run build && pnpm run check:bundle-size && pnpm run check:tree-shaking"
   },
   "dependencies": {
     "react-resizable-panels": "^4.10.0",

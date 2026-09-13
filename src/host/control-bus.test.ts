@@ -428,6 +428,34 @@ describe('ControlBus — event(): declared allowlist', () => {
 		// dispose removed it from the allowlist → no further send
 		expect(wc.send).toHaveBeenCalledTimes(1)
 	})
+
+	// declaredEvents() is a lazily-rebuilt cache array; these pin the
+	// observable contract (membership + immutability of a taken snapshot)
+	// that must hold regardless of that caching.
+	it('declaredEvents() includes a name once event() declares it', async () => {
+		const w = await setup()
+		w.controlBus.event('e1')
+		expect(w.controlBus.declaredEvents()).toContain('e1')
+	})
+
+	it('declaredEvents() drops a name once its event() handle is disposed', async () => {
+		const w = await setup()
+		const ev = w.controlBus.event('e1')
+		expect(w.controlBus.declaredEvents()).toContain('e1')
+		ev.dispose()
+		expect(w.controlBus.declaredEvents()).not.toContain('e1')
+	})
+
+	it('a previously taken declaredEvents() snapshot is never mutated in place', async () => {
+		const w = await setup()
+		w.controlBus.event('e1')
+		const snapshot = w.controlBus.declaredEvents()
+		expect(snapshot).toEqual(['e1'])
+		w.controlBus.event('e2')
+		// the earlier reference must stay exactly as it was when taken.
+		expect(snapshot).toEqual(['e1'])
+		expect(snapshot).toHaveLength(1)
+	})
 })
 
 // ── 5. trust(wc): refcount membership ─────────────────────────────────────

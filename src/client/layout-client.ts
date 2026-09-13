@@ -53,9 +53,11 @@ export interface LayoutClientDeps {
 			guardDisplayNone?: boolean
 		},
 	) => { dispose(): void }
-	/** Frame scheduler for the internal placement publisher. Default:
-	 *  requestAnimationFrame / cancelAnimationFrame. Injected in tests to drive
-	 *  coalesced publishes deterministically. */
+	/** Task scheduler for the internal placement publisher. Default: a
+	 *  MessageChannel-based post-task (see placement-publisher.ts), which runs
+	 *  right after the current render step instead of waiting for the next
+	 *  animation frame. Injected in tests to drive coalesced publishes
+	 *  deterministically. */
 	requestFrame?: (cb: () => void) => number
 	cancelFrame?: (id: number) => void
 }
@@ -67,7 +69,7 @@ export interface LayoutClientDeps {
  * hardening opts (followScroll / followGeometry / guardDisplayNone). Each anchor's
  * measured `Placement` is written into a CENTRAL placement publisher keyed by
  * `viewId` — NOT sent per-view. The publisher coalesces every anchor's writes into
- * ONE window-level snapshot per animation frame, so a transient relayout that
+ * ONE window-level snapshot per render step, so a transient relayout that
  * momentarily measures 0×0 is overwritten before it is ever published. This is the
  * producer half of the level-triggered reconcile design (see
  * ../layout/placement-reconcile.ts); a per-view edge stream cannot self-correct a

@@ -2,8 +2,9 @@ import type { DesiredView, PlacementSnapshot } from '../layout/index.js'
 
 // Renderer-side single source of truth for native-view placement. Every anchor
 // writes its view's desired placement here instead of invoking IPC directly; a
-// central scheduler reads the WHOLE table once per animation frame and publishes
-// one window-level snapshot (a monotonic epoch shared by all views in the tick).
+// central scheduler reads the WHOLE table once after the current render step
+// and publishes one window-level snapshot (a monotonic epoch shared by all
+// views in the tick).
 //
 // Coalescing a level stream is safe: many set()/remove() calls in one frame
 // collapse to the latest level, so a transient (e.g. a relayout that momentarily
@@ -20,7 +21,8 @@ export interface PlacementPublisherDeps<Extra = unknown> {
   // have later snapshots pick up the newer value.
   generation: number | (() => number)
   publish: (snapshot: PlacementSnapshot<Extra>) => void
-  // Injectable for tests; default to requestAnimationFrame / cancelAnimationFrame.
+  // Injectable for tests; default to a MessageChannel-based post-task (see
+  // createDefaultScheduler below).
   requestFrame?: (cb: () => void) => number
   cancelFrame?: (id: number) => void
 }
@@ -40,24 +42,50 @@ export interface PlacementPublisher<Extra = unknown> {
 export function createPlacementPublisher<Extra = unknown>(
   deps: PlacementPublisherDeps<Extra>,
 ): PlacementPublisher<Extra> {
-  const requestFrame =
-    deps.requestFrame ?? ((cb: () => void): number => requestAnimationFrame(cb))
-  const cancelFrame = deps.cancelFrame ?? ((id: number): void => cancelAnimationFrame(id))
+  // Frame ids belong to the scheduler that generated them. A custom request
+  // without its matching cancel must keep its custom scheduling semantics, but
+  // cannot be cancelled through the default scheduler: identical numeric ids
+  // could otherwise cancel another publisher's task. dispose()'s guard makes
+  // a later callback harmless, so a no-op cancel is the safe fallback. A
+  // cancel-only injection is ignored because its scheduler did not issue the id.
+  const defaultScheduler = getDefaultScheduler()
+  const requestFrame = deps.requestFrame ?? defaultScheduler.request
+  const cancelFrame = deps.requestFrame === undefined ? defaultScheduler.cancel : (deps.cancelFrame ?? ((): void => {}))
   const readGeneration =
     typeof deps.generation === 'function' ? deps.generation : (): number => deps.generation as number
 
   const views = new Map<string, DesiredView<Extra>>()
   let dirty = false
   let frameId: number | null = null
+  // `armed` is set the instant a frame is requested, before requestFrame()
+  // returns — so a requestFrame that invokes its callback SYNCHRONOUSLY
+  // (as an injected test double may) still sees the schedule as taken and
+  // won't recurse. `frameId` alone can't do this: flush() clears it to null
+  // BEFORE schedule()'s `frameId = requestFrame(flush)` assignment lands,
+  // so that assignment would stomp it back to non-null forever, silently
+  // wedging every future set()/remove() as "already scheduled".
+  let armed = false
   let epoch = 0
   let disposed = false
 
   function schedule(): void {
-    if (disposed || frameId !== null) return
-    frameId = requestFrame(flush)
+    if (disposed || armed) return
+    armed = true
+    let id: number
+    try {
+      id = requestFrame(flush)
+    } catch (error) {
+      // A scheduler failure must leave the dirty level available for retry.
+      if (frameId === null) armed = false
+      throw error
+    }
+    // flush() may already have run synchronously and cleared `armed`; only
+    // record the frame id if the frame is still actually pending.
+    if (armed && frameId === null) frameId = id
   }
 
   function flush(): void {
+    armed = false
     frameId = null
     // A frame that fires with nothing dirty (or after dispose) publishes
     // nothing — coalescing means only a real change reaches the wire.
@@ -93,8 +121,9 @@ export function createPlacementPublisher<Extra = unknown>(
     dispose(): void {
       if (disposed) return
       disposed = true
-      if (frameId !== null) {
-        cancelFrame(frameId)
+      if (armed) {
+        if (frameId !== null) cancelFrame(frameId)
+        armed = false
         frameId = null
       }
       // The publisher is the renderer-side source of truth for desired
@@ -115,4 +144,79 @@ export function createPlacementPublisher<Extra = unknown>(
       })
     },
   }
+}
+
+// Default scheduler: a MessageChannel-based post-task, not rAF.
+//
+// set()/remove() are called from view-anchor's ResizeObserver callback, which
+// the browser runs inside the "update the rendering" steps of the current
+// frame. A rAF callback requested from there belongs to the NEXT frame, so
+// rAF coalescing delays the publish by a whole frame — measured as ~17 ms of
+// native-view lag behind the DOM slot during a split drag. A message posted
+// from inside the rendering steps runs as the next task, right after this
+// frame's rendering steps finish: every set()/remove() of the step is still
+// coalesced into one publish, but nothing waits for another frame (measured
+// lag ~1 ms).
+//
+// One scheduler instance is shared by every publisher using the default; ids
+// are namespaced by this scheduler, not by caller.
+function createDefaultScheduler(): {
+  request: (cb: () => void) => number
+  cancel: (id: number) => void
+} {
+  if (typeof globalThis.MessageChannel === 'function') {
+    const channel = new MessageChannel()
+    const queue: number[] = []
+    const callbacks = new Map<number, () => void>()
+    let nextId = 1
+    channel.port1.onmessage = (): void => {
+      const id = queue.shift()
+      if (id === undefined) return
+      const cb = callbacks.get(id)
+      // Absent means cancel() already ran for this id — skip, don't throw.
+      if (cb === undefined) return
+      callbacks.delete(id)
+      cb()
+    }
+    // Assigning onmessage automatically refs a Node port, so unref afterward.
+    ;(channel.port1 as { unref?: () => void }).unref?.()
+    return {
+      request(cb: () => void): number {
+        const id = nextId++
+        callbacks.set(id, cb)
+        queue.push(id)
+        channel.port2.postMessage(null)
+        return id
+      },
+      cancel(id: number): void {
+        callbacks.delete(id)
+      },
+    }
+  }
+  // Environments with no MessageChannel (unusual; some minimal test/SSR
+  // runtimes) fall back to a plain macrotask.
+  const timers = new Map<number, ReturnType<typeof setTimeout>>()
+  let nextId = 1
+  return {
+    request(cb: () => void): number {
+      const id = nextId++
+      timers.set(id, setTimeout(() => {
+        timers.delete(id)
+        cb()
+      }, 0))
+      return id
+    },
+    cancel(id: number): void {
+      const timer = timers.get(id)
+      if (timer === undefined) return
+      clearTimeout(timer)
+      timers.delete(id)
+    },
+  }
+}
+
+let defaultScheduler: ReturnType<typeof createDefaultScheduler> | undefined
+function getDefaultScheduler(): ReturnType<typeof createDefaultScheduler> {
+  defaultScheduler ??= createDefaultScheduler()
+  return defaultScheduler
 }
