@@ -59,6 +59,7 @@ jobs:
         run: xvfb-run --auto-servernum pnpm run check:e2e
         env:
           DECK_E2E_OUTPUT_DIR: ${{ runner.temp }}/dockable-e2e
+          DECK_E2E_NO_SANDBOX: '1'
 
       - name: Upload dockable interaction diagnostics
         if: failure()

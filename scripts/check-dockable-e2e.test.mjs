@@ -114,6 +114,32 @@ echo '[e2e] result ready'
 	}
 })
 
+test('passes the testing-only no-sandbox flag to Electron when requested', { skip: process.platform === 'win32' }, async () => {
+	const fixture = await writeFixture({
+		electronSource: `#!/bin/sh
+[ "$1" = "$EXPECTED_MAIN" ] || { echo "unexpected main: $1" >&2; exit 17; }
+[ "$2" = "--no-sandbox" ] || { echo "missing no-sandbox flag: $2" >&2; exit 18; }
+printf '{"success":true}' > "$DECK_DEMO_SHOTS_DIR/e2e-result.json"
+`,
+	})
+	const output = join(fixture, 'output')
+	const { child, getOutput } = runNode(join(fixture, 'scripts/check-dockable-e2e.mjs'), {
+		cwd: fixture,
+		env: {
+			DECK_E2E_OUTPUT_DIR: output,
+			DECK_E2E_NO_SANDBOX: '1',
+			EXPECTED_MAIN: await realpath(join(fixture, 'examples/dockable-demo/main.mjs')),
+		},
+	})
+	try {
+		const [code] = await once(child, 'close')
+		assert.equal(code, 0, getOutput())
+	} finally {
+		await closeProcessTree(child)
+		await rm(fixture, { recursive: true, force: true })
+	}
+})
+
 test('accepts a successful result file without a log readiness marker', async () => {
 	const fixture = await writeFixture({
 		electronSource: `#!/bin/sh

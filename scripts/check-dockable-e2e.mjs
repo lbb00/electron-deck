@@ -50,7 +50,10 @@ const exitAfterLogFlush = (code) => {
 const electron = process.platform === 'win32'
 	? createRequire(import.meta.url)('electron')
 	: fileURLToPath(fromRoot('node_modules/.bin/electron'))
-const child = spawn(electron, [fileURLToPath(main)], {
+const electronArgs = [fileURLToPath(main)]
+// Only this test wrapper opts out of Chromium's sandbox on restricted CI hosts.
+if (process.env.DECK_E2E_NO_SANDBOX === '1') electronArgs.push('--no-sandbox')
+const child = spawn(electron, electronArgs, {
 	cwd: fileURLToPath(root),
 	env: {
 		...process.env,
