@@ -270,7 +270,10 @@ test('fails when E2E deliberately starts without a main window', { timeout: 20_0
 		assert.notEqual(code, 0, getOutput())
 		const runs = await readdir(output)
 		assert.equal(runs.length, 1, getOutput())
-		const report = JSON.parse(await readFile(join(output, runs[0], 'e2e-result.json'), 'utf8'))
+		const reportText = await readFile(join(output, runs[0], 'e2e-result.json'), 'utf8').catch((error) => {
+			assert.fail(`E2E result unavailable (${error.code}):\n${getOutput()}`)
+		})
+		const report = JSON.parse(reportText)
 		assert.equal(report.success, false)
 	} finally {
 		await closeProcessTree(child)
