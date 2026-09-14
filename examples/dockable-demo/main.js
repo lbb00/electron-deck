@@ -825,15 +825,26 @@ function nativeFollowCheck(mainWin, state, label) {
 
 async function waitForNativeFollow(mainWin, label, timeoutMs = 4_000) {
 	const started = Date.now()
+	const samples = []
 	while (Date.now() - started < timeoutMs) {
 		try {
 			const state = await waitForDeckState(mainWin, `${label} slot`, 250)
 			const bounds = simBounds()
+			samples.push({ at: Date.now() - started, slot: state.slot.width, view: bounds ? bounds.width : null })
 			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8) return { state, bounds }
-		} catch {}
+		} catch (err) {
+			samples.push({ at: Date.now() - started, err: String(err && err.message ? err.message : err) })
+		}
 		await sleep(25)
 	}
-	throw new Error(`${label} native simulator did not follow the slot within ${timeoutMs}ms`)
+	// A bare timeout cannot tell "the view never moved" from "it moved, later
+	// than this window allows", and the two need opposite fixes. Carry the
+	// trajectory into the failure: first samples, last samples, nothing in
+	// between, so the log stays readable.
+	const trail = samples.length <= 8 ? samples : [...samples.slice(0, 3), '...', ...samples.slice(-4)]
+	throw new Error(
+		`${label} native simulator did not follow the slot within ${timeoutMs}ms; samples=${JSON.stringify(trail)}`,
+	)
 }
 
 async function runE2ERecoveryVerification(mainWin) {
