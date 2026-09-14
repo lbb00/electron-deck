@@ -815,7 +815,7 @@ async function waitForDeckState(mainWin, label, timeoutMs = 8_000) {
 	throw new Error(`${label} did not expose a usable window.__deck/native slot within ${timeoutMs}ms`)
 }
 
-function recoveryNativeCheck(mainWin, state, label) {
+function nativeFollowCheck(mainWin, state, label) {
 	const bounds = simBounds()
 	const valid = !!bounds && bounds.width > 0 && state.slot.width > 0 && state.slot.height > 0
 	const follows = valid && Math.abs(bounds.width - state.slot.width) <= 8
@@ -899,7 +899,7 @@ async function runE2ERecoveryVerification(mainWin) {
 
 	const recoveredFollow = await waitForNativeFollow(mainWin, `${mode} recovery`)
 	const recovered = recoveredFollow.state
-	recoveryNativeCheck(mainWin, recovered, mode)
+	nativeFollowCheck(mainWin, recovered, mode)
 	const afterRecovery = await e2eSnapshot(mainWin)
 	const secondDrag = await driveSplitDrag(mainWin, { rounds: 1, returnToStart: false })
 	await sleep(250)
@@ -915,7 +915,7 @@ async function runE2ERecoveryVerification(mainWin) {
 		`${mode} post-recovery drag changes slot size`,
 		JSON.stringify({ before: recovered.slot, after: postDragFollow.state.slot }),
 	)
-	recoveryNativeCheck(mainWin, postDragFollow.state, `${mode} post-recovery drag`)
+	nativeFollowCheck(mainWin, postDragFollow.state, `${mode} post-recovery drag`)
 	log(`✅ E2E recovery PASS (${mode})`)
 	recoveryStatus = 'passed'
 }
@@ -932,19 +932,37 @@ async function runE2EVerification(mainWin) {
 
 	// A completed separator drag must persist a new model split ratio, not merely
 	// resize react-resizable-panels' transient DOM layout.
-	const beforeBounds = simBounds()
+	const beforeFollow = await waitForNativeFollow(mainWin, 'pre-split-drag')
+	const beforeBounds = beforeFollow.bounds
 	const splitDrag = await driveSplitDrag(mainWin, { rounds: 1, returnToStart: false })
 	await sleep(500)
 	const afterSplit = await e2eSnapshot(mainWin)
-	const afterBounds = simBounds()
 	await captureE2EMetrics(mainWin, 'after-drag')
 	assertE2E(
 		!!splitDrag
 			&& initial.serialized !== afterSplit.serialized
 			&& JSON.stringify(initial.rootSizes) !== JSON.stringify(afterSplit.rootSizes),
 		'split drag writes model layout',
-		JSON.stringify({ splitDrag, beforeSizes: initial.rootSizes, afterSizes: afterSplit.rootSizes, beforeBounds, afterBounds }),
+		JSON.stringify({ splitDrag, beforeSizes: initial.rootSizes, afterSizes: afterSplit.rootSizes, beforeBounds }),
 	)
+
+	// The assertion above only proves the model and the DOM moved. Placement's
+	// whole job is that the native view tracks its DOM slot, so gate that on its
+	// own: stop the publisher from sending, make reconcile drop the setBounds, or
+	// break the native apply, and the model still moves — only the three checks
+	// below go red. The drag leaves a net +20px, well outside the 8px tolerance.
+	const afterFollow = await waitForNativeFollow(mainWin, 'split drag')
+	assertE2E(
+		afterFollow.state.slot.width !== beforeFollow.state.slot.width,
+		'split drag resizes the native slot',
+		JSON.stringify({ before: beforeFollow.state.slot, after: afterFollow.state.slot }),
+	)
+	assertE2E(
+		!!beforeBounds && afterFollow.bounds.width !== beforeBounds.width,
+		'split drag moves the native view',
+		JSON.stringify({ before: beforeBounds, after: afterFollow.bounds }),
+	)
+	nativeFollowCheck(mainWin, afterFollow.state, 'split drag')
 
 	if (E2E_METRICS) {
 		// Keep this bounded and use the same sendInputEvent pointer path as the
