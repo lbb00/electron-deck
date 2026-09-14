@@ -113,8 +113,8 @@ importers:
         specifier: ^4.10.0
         version: 4.12.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       view-anchor:
-        specifier: ^0.1.2
-        version: 0.1.2(react@18.3.1)
+        specifier: ^0.2.1
+        version: 0.2.1(react@18.3.1)
     devDependencies:
       '@testing-library/jest-dom':
         specifier: ^6.9.1
@@ -1350,8 +1350,8 @@ packages:
     resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
 
-  view-anchor@0.1.2:
-    resolution: {integrity: sha512-g/W79uc/YqU0UYlkddWfZyOxvcOgfuQd9wMomN1amH72d+AwniBCEA/s421bR5p/OCBehI8jolbhbDTN2esncA==}
+  view-anchor@0.2.1:
+    resolution: {integrity: sha512-JWJ7Xn0t0PINRX+FwuR/3mx0mVR5lu6pgqm2vPQNfVfQHtGG6Nymit5WvBMPk76DYkGrupIaxUSWAcATD9uoZQ==}
     engines: {node: '>=24'}
     peerDependencies:
       react: '>=18'
@@ -2376,7 +2376,7 @@ snapshots:
 
   undici@7.29.1: {}
 
-  view-anchor@0.1.2(react@18.3.1):
+  view-anchor@0.2.1(react@18.3.1):
     optionalDependencies:
       react: 18.3.1
 
