@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["unicorn", "typescript"],
+  "plugins": ["unicorn", "typescript", "import"],
   "categories": { "correctness": "off" },
   "env": { "builtin": true },
   "ignorePatterns": ["examples/**", "dist/**", "coverage/**"],
@@ -92,7 +92,13 @@
     "typescript/no-wrapper-object-types": "warn",
     "typescript/prefer-as-const": "warn",
     "typescript/prefer-namespace-keyword": "warn",
-    "typescript/triple-slash-reference": "warn"
+    "typescript/triple-slash-reference": "warn",
+    // package.json sets "type": "module", so .js is already ESM here and .mjs
+    // is never needed. Electron preloads are the exception, but they are never
+    // imported by other modules, so this rule does not need to exempt them.
+    // Only catches `.mjs` written in an import; scripts/check-file-extensions.js
+    // catches `.mjs` files themselves, including under examples/ which is ignored below.
+    "import/extensions": ["warn", "ignorePackages", { "pattern": { "mjs": "never" } }]
   },
   "overrides": [
     {
