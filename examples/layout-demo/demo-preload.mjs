@@ -7,7 +7,7 @@
 //
 // This preload is ESM (`.mjs`) so it can `import` the helper straight from the
 // framework's preload dist (which is ESM). Electron's ESM preload requires
-// `sandbox: false` (set in main.mjs's mainWindowWebPreferences). The only thing
+// `sandbox: false` (set in main.js's mainWindowWebPreferences). The only thing
 // left here is the demo's OWN control/screenshot plumbing — pure demo glue, not a
 // framework gap.
 

@@ -15,7 +15,7 @@
  * scripts/docs-api-allowlist.json — adding one is an explicit, reviewable choice.
  *
  * Pure Node fs, no deps. Wired into `pnpm test` (so turbo CI runs it) — see
- * package.json. Mirrors the check-trust-seal.mjs guard pattern.
+ * package.json. Mirrors the check-trust-seal.js guard pattern.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'

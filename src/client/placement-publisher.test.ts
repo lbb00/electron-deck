@@ -301,6 +301,43 @@ describe('createPlacementPublisher', () => {
       expect(raf.cancel).toHaveBeenCalled()
     })
 
+    it('does not cancel another publisher\'s default task when only requestFrame is injected', async () => {
+      // Scheduler ids are meaningful only to the scheduler that issued them.
+      // A partial override must therefore not pair its id with the shared
+      // default cancel function: this publisher's dispose used to cancel the
+      // first publisher's pending default task when both happened to use id 1.
+      const defaultPublish = vi.fn()
+      const defaultPublisher = createPlacementPublisher({ generation: 1, publish: defaultPublish })
+      let partialCallback: (() => void) | undefined
+      const partialRequest = vi.fn((callback: () => void) => {
+        partialCallback = callback
+        return 1
+      })
+      const partialPublisher = createPlacementPublisher({
+        generation: 1,
+        publish,
+        requestFrame: partialRequest,
+      })
+
+      defaultPublisher.set(makeView('default'))
+      partialPublisher.set(makeView('partial'))
+      partialPublisher.dispose()
+
+      await vi.waitFor(() => expect(defaultPublish).toHaveBeenCalledOnce())
+      expect(partialRequest).toHaveBeenCalledOnce()
+      partialCallback?.()
+      expect(publish).toHaveBeenCalledOnce()
+    })
+
+    it('does not pass a default task id to an unmatched cancelFrame', () => {
+      const unrelatedCancel = vi.fn()
+      const publisher = createPlacementPublisher({ generation: 1, publish, cancelFrame: unrelatedCancel })
+      publisher.set(makeView('a'))
+      publisher.dispose()
+      expect(unrelatedCancel).not.toHaveBeenCalled()
+      expect(publish).toHaveBeenCalledOnce()
+    })
+
     it('flushes exactly one empty snapshot when disposed, even with no prior set() calls', () => {
       // The renderer-side publisher is the single source of truth for a
       // native view's desired placement; main's reconciler is level-triggered
@@ -494,6 +531,121 @@ describe('createPlacementPublisher', () => {
       publisher.set(makeView('a'))
       raf.flushFrame()
       expect(nthSnapshot(0).generation).toBe(99)
+    })
+  })
+
+  // ── Contract 10: reentrant scheduling (synchronous requestFrame) ────────
+  //
+  // A synchronous requestFrame runs flush() INSIDE the call that requests it.
+  // The scheduler must not treat the frame it just consumed as still pending,
+  // or every later set()/remove() would be dropped as "already scheduled".
+
+  describe('reentrant scheduling with a synchronous requestFrame', () => {
+    it('publishes separately for two set() calls that each synchronously flush', () => {
+      const sync = vi.fn((cb: () => void): number => {
+        cb()
+        return 0
+      })
+      const publisher = createPlacementPublisher({
+        generation: 1,
+        publish,
+        requestFrame: sync,
+        cancelFrame: vi.fn(),
+      })
+
+      publisher.set(makeView('a'))
+      expect(publish).toHaveBeenCalledTimes(1)
+
+      publisher.set(makeView('b'))
+      // The second set() must schedule (and here, immediately run) a new flush.
+      expect(publish).toHaveBeenCalledTimes(2)
+      const ids = nthSnapshot(1).views.map((v) => v.viewId).sort()
+      expect(ids).toEqual(['a', 'b'])
+    })
+  })
+
+  it('retries scheduling after an injected scheduler throws', () => {
+    const request = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('scheduler unavailable') })
+      .mockImplementationOnce(raf.request)
+    const publisher = createPlacementPublisher({
+      generation: 1,
+      publish,
+      requestFrame: request,
+      cancelFrame: raf.cancel,
+    })
+
+    expect(() => publisher.set(makeView('a'))).toThrow('scheduler unavailable')
+    publisher.set(makeView('b'))
+    raf.flushFrame()
+    expect(publish).toHaveBeenCalledOnce()
+    expect(nthSnapshot(0).views.map((v) => v.viewId)).toEqual(['a', 'b'])
+  })
+
+  // ── Contract 11: default scheduler (MessageChannel post-task) ───────────
+  //
+  // With no requestFrame/cancelFrame injected, the publisher falls back to
+  // its own MessageChannel-based scheduler — available in vitest's node
+  // environment — instead of requestAnimationFrame.
+
+  describe('default scheduler', () => {
+    it('does not keep a Node process alive after installing its message handler', async () => {
+      const NativeMessageChannel = globalThis.MessageChannel
+      let receivingPort: { hasRef(): boolean } | undefined
+      class TrackedMessageChannel extends NativeMessageChannel {
+        constructor() {
+          super()
+          receivingPort = this.port1 as unknown as { hasRef(): boolean }
+        }
+      }
+      vi.stubGlobal('MessageChannel', TrackedMessageChannel)
+      vi.resetModules()
+      let publisher: ReturnType<typeof createPlacementPublisher> | undefined
+      try {
+        const { createPlacementPublisher: createFreshPublisher } = await import('./placement-publisher.js')
+        publisher = createFreshPublisher({ generation: 1, publish })
+        publisher.set(makeView('a'))
+        expect(receivingPort?.hasRef()).toBe(false)
+      } finally {
+        publisher?.dispose()
+        vi.unstubAllGlobals()
+      }
+    })
+
+    it('coalesces three same-tick set() calls into exactly one publish after a macrotask', async () => {
+      const publisher = createPlacementPublisher({ generation: 1, publish })
+      publisher.set(makeView('a'))
+      publisher.set(makeView('b'))
+      publisher.set(makeView('c'))
+      expect(publish).not.toHaveBeenCalled()
+
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(publish).toHaveBeenCalledOnce()
+      const ids = nthSnapshot(0).views.map((v) => v.viewId).sort()
+      expect(ids).toEqual(['a', 'b', 'c'])
+    })
+
+    it('delivers only the dispose empty snapshot when disposed right after set()', async () => {
+      const publisher = createPlacementPublisher({ generation: 1, publish })
+      publisher.set(makeView('a'))
+      publisher.dispose()
+
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      // The pending post-task from set() must not also land — dispose()'s
+      // cancel must reach the default scheduler, not just an injected fake.
+      expect(publish).toHaveBeenCalledOnce()
+      expect(nthSnapshot(0).views).toEqual([])
+    })
+
+    it('does not publish when remove() is called for an id that was never set', async () => {
+      const publisher = createPlacementPublisher({ generation: 1, publish })
+      publisher.remove('never-set')
+
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(publish).not.toHaveBeenCalled()
     })
   })
 })

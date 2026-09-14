@@ -1,5 +1,5 @@
 {
-  "_comment": "Words that the docs may name inside backticks that are NOT electron-deck exports. Each entry must be justified — a reviewer should be able to sanity-check why a documented symbol is allowed despite not appearing in the package export surface. Adding a name here is an explicit decision, not a silencer. See scripts/check-docs-api-sync.mjs.",
+  "_comment": "Words that the docs may name inside backticks that are NOT electron-deck exports. Each entry must be justified — a reviewer should be able to sanity-check why a documented symbol is allowed despite not appearing in the package export surface. Adding a name here is an explicit decision, not a silencer. See scripts/check-docs-api-sync.js.",
 
   "_ts_builtins_and_globals": "TypeScript / JS built-ins and standard globals used in type positions inside code spans.",
   "Awaited": true,

@@ -20,6 +20,15 @@ A framework for building a host shell on Electron out of a small set of orthogon
 - **Subpath exports** — dedicated entry points for `main`, `preload`, `host`, `client`, `layout` and `dock-react`.
 - **Graduated APIs** — a stable integration path via `electronDeck()`, plus an explicitly marked experimental declarative surface.
 
+## Performance
+
+Every claim here has a command that reproduces it:
+
+- **Native views track the DOM within about 1 ms** — the placement publisher coalesces every `set`/`remove` of a render step into one IPC publish, scheduled as a post-render task instead of the next animation frame. `DECK_DEMO_LAG=1 pnpm run examples:dockable` drives a real pointer drag of a split handle and reports the lag of the native view behind its DOM slot (median 1.3 ms here; scheduling on `requestAnimationFrame` lagged a full frame, 17 ms).
+- **Bundle size is ratcheted** — `pnpm run check:bundle-size` bundles a consumer for every public entry with esbuild and fails when an entry has no reviewed baseline or its gzip size grows more than 5% past `scripts/bundle-size.baseline.json`. `pnpm run check:tree-shaking` verifies that importing only `createInitialState` from `electron-deck/layout` shakes out its layout siblings, yielding a bundle of about 100 B gzip instead of the whole 5 KB entry; its root-entry case separately checks that `dock-react` stays outside the root dependency graph. Both run in `prepack`.
+- **Window cleanup is regression-tested** — `pnpm exec vitest run src/internal/deck-app.memory-regression.test.ts` cycles windows and views in a fake Electron runtime, forces GC, and checks that the closed objects are collectible and heap growth stays below 1 MB. This tests `DeckApp` retention, not native Electron memory.
+- **The main-process frame path is cheap** — `pnpm bench` measures `cleanSnapshot → reconcile → dispatchOps` per frame; expect a few microseconds per frame for a dozen views, and treat single runs as noisy.
+
 ## Installation
 
 ```bash
@@ -99,7 +108,7 @@ It currently has no production consumers outside this repo's examples — treat 
 
 ## Contributing
 
-Issues and pull requests are welcome. Before submitting, run the checks locally: `pnpm lint`, `pnpm check-types`, `pnpm test`, `pnpm build`.
+Issues and pull requests are welcome. Before submitting, run `pnpm lint`, `pnpm check-types`, `pnpm test`, then `pnpm build`. After the build, run `pnpm check:bundle-size`, `pnpm check:tree-shaking`, and `pnpm check:e2e`. The Electron interaction check needs a graphical session; on headless Linux, run it with `xvfb-run --auto-servernum pnpm check:e2e`.
 
 ## License
 

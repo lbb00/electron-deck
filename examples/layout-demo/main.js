@@ -29,7 +29,7 @@
 //   • A programmatic splitter drag moves the native blocks — renderer-driven
 //     geometry, ZERO host resize code.
 //
-// Run offscreen:  electron examples/layout-demo/main.mjs
+// Run offscreen:  electron examples/layout-demo/main.js
 // Windows are created hidden + showInactive() at x:-3000 so they paint (native
 // child views composite) WITHOUT ever appearing or stealing focus. Each step
 // writes a composite PNG (host page + native blocks blitted in z-order) to
@@ -39,7 +39,7 @@ import { app, ipcMain } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { writeFile } from 'node:fs/promises'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 
 // The REAL framework entry, imported from the built dist (the example lives
 // inside the package and the package is not symlinked for self-import).
@@ -57,11 +57,16 @@ const Z = { SIMULATOR: 0, PANEL: 10 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // Unbuffered trace: Electron's main-process stdout is block-buffered when piped
 // to a file and only flushes on exit; a hung run would show an empty log. Write
-// each line synchronously so the trace survives a hang.
+// each line synchronously so the trace survives a hang. Truncated at the top of
+// each run so trace.log only ever holds THIS run.
 const TRACE = join(HERE, 'shots', 'trace.log')
+mkdirSync(SHOTS, { recursive: true })
+writeFileSync(TRACE, '')
+let failed = false
 const log = (...a) => {
   const line = '[demo] ' + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')
   console.log(line)
+  if (line.includes('❌')) failed = true
   try { appendFileSync(TRACE, line + '\n') } catch {}
 }
 
@@ -113,7 +118,6 @@ async function shot(win, name) {
   log('shot →', name, `(${blocks.length} native blocks:`, blocks.map((b) => `${b.label}@${b.x},${b.width}w`).join(' < ') + ')')
 }
 
-mkdirSync(SHOTS, { recursive: true })
 log('boot: about to call startElectronDeck()')
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -294,7 +298,8 @@ const { ready } = startElectronDeck(
         // ── verification driver (offscreen) ──
         void runVerification(mainWin).then(resolveDone).catch((err) => {
           console.error('[demo] verification failed:', err)
-          log('verification failed: ' + (err && err.stack ? err.stack : String(err)))
+          failed = true
+          log('❌ verification failed: ' + (err && err.stack ? err.stack : String(err)))
           resolveDone()
         })
       },
@@ -306,8 +311,9 @@ const { ready } = startElectronDeck(
 // still surfaces on `ready`. Observe it so a broken boot quits instead of hanging.
 ready.catch((err) => {
   console.error('[demo] startElectronDeck failed:', err)
-  log('startElectronDeck failed: ' + String(err))
-  app.quit()
+  failed = true
+  log('❌ startElectronDeck failed: ' + String(err))
+  app.exit(1)
 })
 
 function enc(color, label) {
@@ -407,8 +413,18 @@ function captureSimBounds() {
 void allDone.then(async () => {
   await sleep(200)
   quitting = true   // tell onClose to STOP vetoing — we are tearing down for real
-  app.quit()
+  // Electron's app.quit() ignores process.exitCode (verified: a forced ❌ still
+  // exited 0), so a failure forces the exit code via app.exit().
+  if (failed) app.exit(1)
+  else app.quit()
 })
 
-app.on('window-all-closed', () => app.quit())
-process.on('uncaughtException', (e) => { console.error('[demo] UNCAUGHT', e); app.quit() })
+app.on('window-all-closed', () => {
+  if (failed) app.exit(1)
+  else app.quit()
+})
+process.on('uncaughtException', (e) => {
+  failed = true
+  console.error('[demo] UNCAUGHT', e)
+  app.exit(1)
+})

@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 
-const source = await readFile(resolve(new URL('./electron-renderer-worker-crossover.mjs', import.meta.url).pathname), 'utf8')
+const source = await readFile(resolve(new URL('./electron-renderer-worker-crossover.js', import.meta.url).pathname), 'utf8')
 
 function rendererSection(start, end) {
 	const from = source.indexOf(start)

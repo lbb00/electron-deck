@@ -170,8 +170,7 @@ export function layoutsEquivalent(
 	const idSet = new Set(ids)
 	for (const k of Object.keys(a)) if (!idSet.has(k)) return false
 	for (const k of Object.keys(b)) if (!idSet.has(k)) return false
-	for (let i = 0; i < ids.length; i++) {
-		const id = ids[i]!
+	for (const id of ids) {
 		const av = a[id]
 		const bv = b[id]
 		if (!Number.isFinite(av) || !Number.isFinite(bv)) return false

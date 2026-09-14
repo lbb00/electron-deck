@@ -4,7 +4,7 @@
 // React `<DockView>` dock-shell adapter (src/dock-react). DockView renders a
 // layout-as-data tree (createLayoutModel) as react-resizable-panels groups +
 // DOM tab strips, and for native panels renders an empty
-// `<div data-deck-native-slot="simulator">`. The host (main.mjs) places a
+// `<div data-deck-native-slot="simulator">`. The host (main.js) places a
 // native WebContentsView anchored to that exact selector via
 // `runtime.view().placeIn(win, { anchor })`; the real createDeckLayoutClient
 // measures the slot and the native view FOLLOWS it — zero host resize code.

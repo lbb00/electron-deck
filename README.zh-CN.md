@@ -20,6 +20,15 @@
 - **子路径导出** —— `main` / `preload` / `host` / `client` / `layout` / `dock-react` 各自独立入口。
 - **渐进式 API** —— `electronDeck()` 是稳定的集成路径，另有一套明确标注 `@experimental` 的声明式装配面。
 
+## 性能
+
+这里的每条结论都有一条可复现的命令：
+
+- **原生视图与 DOM 的偏差约 1 ms** —— placement publisher 把同一渲染步骤内的多次 `set`/`remove` 合并成一次 IPC 发布，调度在渲染步骤之后的任务里，而不是下一动画帧。`DECK_DEMO_LAG=1 pnpm run examples:dockable` 用真实指针拖拽分割条，并报告原生视图落后 DOM 槽位的时间（本机中位 1.3 ms；改用 `requestAnimationFrame` 调度会落后整整一帧，17 ms）。
+- **产物体积有 ratchet 门禁** —— `pnpm run check:bundle-size` 用 esbuild 为每个公开入口打一个消费者包；入口没有经过审阅的 baseline，或 gzip 体积比 `scripts/bundle-size.baseline.json` 增长超过 5%，都会失败。`pnpm run check:tree-shaking` 验证只从 `electron-deck/layout` 导入 `createInitialState` 时，布局入口里的其他代码会被摇掉，产物约 100 B gzip，而不是整个 5 KB 的入口；根入口的用例另行检查 `dock-react` 没有进入根入口的依赖图。两者都在 `prepack` 里运行。
+- **窗口清理有内存回归测试** —— `pnpm exec vitest run src/internal/deck-app.memory-regression.test.ts` 在模拟 Electron 环境中循环开关窗口和视图，强制 GC 后检查已关闭对象可回收，且堆增长小于 1 MB。它验证的是 `DeckApp` 的对象持有，不代表真实 Electron 的原生内存。
+- **主进程每帧路径很便宜** —— `pnpm bench` 测量每帧的 `cleanSnapshot → reconcile → dispatchOps`；十来个视图时预期每帧几微秒，单次运行有噪声。
+
 ## 安装
 
 ```bash
@@ -99,7 +108,7 @@ startElectronDeck({
 
 ## 贡献
 
-欢迎提 issue 和 PR。提交前请在本地跑一遍：`pnpm lint`、`pnpm check-types`、`pnpm test`、`pnpm build`。
+欢迎提 issue 和 PR。提交前请在本地依次运行 `pnpm lint`、`pnpm check-types`、`pnpm test`、`pnpm build`；构建完成后运行 `pnpm check:bundle-size`、`pnpm check:tree-shaking` 和 `pnpm check:e2e`。Electron 交互检查需要图形会话；无界面的 Linux 环境可运行 `xvfb-run --auto-servernum pnpm check:e2e`。
 
 ## License
 
