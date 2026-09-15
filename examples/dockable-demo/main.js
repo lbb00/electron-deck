@@ -823,7 +823,16 @@ function nativeFollowCheck(mainWin, state, label) {
 	assertE2E(follows, `${label} native simulator follows slot`, JSON.stringify({ slot: state.slot, bounds }))
 }
 
-async function waitForNativeFollow(mainWin, label, timeoutMs = 4_000) {
+// The 8px tolerance is the real check; this budget only bounds how long the
+// view may take to get there. Under Xvfb the drag settles in 2.8-4.0s (four
+// measured runs: 2.772, 3.863, 3.930, and one at 4.005 that went red against
+// the 4s budget this used to carry). A deadline sitting on the upper edge of
+// that spread turns a passing check into a coin flip, so the budget is now
+// 5x the slowest observed settle and still a third of the harness's 60s cap.
+// A view that stops tracking never converges, so waiting longer cannot hide
+// it; the elapsed time is logged on success so a real slowdown shows up as a
+// number instead of an intermittent red.
+async function waitForNativeFollow(mainWin, label, timeoutMs = 20_000) {
 	const started = Date.now()
 	const samples = []
 	while (Date.now() - started < timeoutMs) {
@@ -831,7 +840,10 @@ async function waitForNativeFollow(mainWin, label, timeoutMs = 4_000) {
 			const state = await waitForDeckState(mainWin, `${label} slot`, 250)
 			const bounds = simBounds()
 			samples.push({ at: Date.now() - started, slot: state.slot.width, view: bounds ? bounds.width : null })
-			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8) return { state, bounds }
+			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8) {
+				log(`[e2e] ${label} native follow settled in ${Date.now() - started}ms`)
+				return { state, bounds }
+			}
 		} catch (err) {
 			samples.push({ at: Date.now() - started, err: String(err && err.message ? err.message : err) })
 		}
