@@ -53,7 +53,7 @@ v8.setFlagsFromString('--expose_gc')
 const forceGc = vm.runInNewContext('gc') as () => void
 
 async function settleMacrotask(): Promise<void> {
-	await new Promise(resolve => setTimeout(resolve, 0))
+	await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 // Several passes: one GC pass can leave finalization/microtask-scheduled drops
@@ -248,7 +248,7 @@ const VIEWS_PER_WINDOW = 3
 
 interface CycleRefs {
 	winRef: WeakRef<object>
-	viewRefs: Array<{ wcRef: WeakRef<object>, handleRef: WeakRef<object> }>
+	viewRefs: Array<{ wcRef: WeakRef<object>; handleRef: WeakRef<object> }>
 }
 
 // One churn cycle: create a window, place VIEWS_PER_WINDOW views into it,
@@ -258,7 +258,9 @@ interface CycleRefs {
 // reference to any fake created here survives the call.
 async function runWindowLifecycleCycle(app: DeckApp, electron: FakeElectron): Promise<CycleRefs> {
 	const runtime: Runtime = app.runtime
-	const win = runtime.windows.create({ source: { url: 'http://localhost:5173/popout.html' } }).window
+	const win = runtime.windows.create({
+		source: { url: 'http://localhost:5173/popout.html' },
+	}).window
 	const fakeWin = win as unknown as FakeBrowserWindow
 
 	const viewRefs: CycleRefs['viewRefs'] = []
@@ -294,7 +296,7 @@ describe('DeckApp memory regression — repeated window/view churn is fully recl
 		const refs: WeakRef<object>[] = []
 		for (let i = 0; i < CYCLES; i++) {
 			const { winRef, viewRefs } = await runWindowLifecycleCycle(app, electron)
-			refs.push(winRef, ...viewRefs.map(v => v.wcRef), ...viewRefs.map(v => v.handleRef))
+			refs.push(winRef, ...viewRefs.map((v) => v.wcRef), ...viewRefs.map((v) => v.handleRef))
 			// `runWindowLifecycleCycle`'s own locals (win, handle, wcv) are out of
 			// scope here — `refs` holds nothing but WeakRefs.
 		}
@@ -303,7 +305,7 @@ describe('DeckApp memory regression — repeated window/view churn is fully recl
 		// reclaimable without waiting for shutdown() to clear app-level maps.
 		await forceGcRepeatedly()
 
-		const stillAlive = refs.filter(r => r.deref() !== undefined)
+		const stillAlive = refs.filter((r) => r.deref() !== undefined)
 		expect(stillAlive.length).toBe(0)
 		await app.shutdown()
 	})
