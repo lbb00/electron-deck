@@ -1,10 +1,10 @@
 {
-	".": 16659,
+	".": 16913,
 	"./main": 5532,
-	"./preload": 1080,
+	"./preload": 1078,
 	"./client": 2798,
 	"./client/browser": 2798,
 	"./host": 3848,
-	"./layout": 5330,
-	"./dock-react": 6118
+	"./layout": 5593,
+	"./dock-react": 6232
 }
