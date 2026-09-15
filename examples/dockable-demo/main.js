@@ -827,12 +827,18 @@ function nativeFollowCheck(mainWin, state, label) {
 // view may take to get there. Under Xvfb the drag settles in 2.8-4.0s (four
 // measured runs: 2.772, 3.863, 3.930, and one at 4.005 that went red against
 // the 4s budget this used to carry). A deadline sitting on the upper edge of
-// that spread turns a passing check into a coin flip, so the budget is now
-// 5x the slowest observed settle and still a third of the harness's 60s cap.
+// that spread turns a passing check into a coin flip, so the budget is 3x the
+// slowest settle measured.
+// It cannot grow much beyond that: one run reaches this wait twice, and the
+// recovery flow spends up to 8s in waitForDeckState before it gets here, all
+// inside the 45s deadline runVerification races against. Overrun that deadline
+// and the reported failure is a bare "verification timed out after 45s"
+// instead of the samples below, losing exactly the diagnosis this check exists
+// to give.
 // A view that stops tracking never converges, so waiting longer cannot hide
 // it; the elapsed time is logged on success so a real slowdown shows up as a
 // number instead of an intermittent red.
-async function waitForNativeFollow(mainWin, label, timeoutMs = 20_000) {
+async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000) {
 	const started = Date.now()
 	const samples = []
 	while (Date.now() - started < timeoutMs) {
@@ -943,13 +949,58 @@ async function runE2ERecoveryVerification(mainWin) {
 	recoveryStatus = 'passed'
 }
 
+// Chromium only delivers sendInputEvent gestures to a focused window, so focus
+// is a real precondition for every drag below, not a cosmetic check. But asking
+// for it and having it are different things: the window manager grants focus
+// asynchronously, and reading document.hasFocus() once at a fixed delay fails
+// whenever the grant lands late (4 red in 11 local runs, always before any drag
+// ran). Poll instead, re-asking each round, and still fail hard if focus never
+// arrives — an unfocused window cannot produce a meaningful drag result.
+async function waitForWindowFocus(mainWin, timeoutMs = 5_000) {
+	const started = Date.now()
+	let snapshot = await e2eSnapshot(mainWin)
+	while (!snapshot.documentFocused && Date.now() - started < timeoutMs) {
+		app.focus({ steal: true })
+		mainWin.focus()
+		mainWin.webContents.focus()
+		await sleep(100)
+		snapshot = await e2eSnapshot(mainWin)
+	}
+	log(`[e2e] window focus ${snapshot.documentFocused ? 'acquired' : 'NOT acquired'} after ${Date.now() - started}ms`)
+	return snapshot
+}
+
+// A tab drag needs the window focused for the whole gesture, not just at its
+// start: Chromium drops sendInputEvent for an unfocused window, so the drag
+// delivers nothing and the run fails claiming the model did not change, when
+// the real story is that no pointer event ever arrived. Seen once in 8 local
+// runs — the drag reported zero events and the snapshot went focused before to
+// unfocused after, because another desktop app took focus mid-gesture. CI has
+// no competing app and has never hit it.
+// Retry exactly that combination and nothing else: zero events delivered AND
+// focus lost. A dock that is genuinely broken still delivers its events, so it
+// still fails on the first attempt.
+async function driveTabDragFocused(mainWin, options) {
+	await waitForWindowFocus(mainWin, 2_000)
+	const drag = await driveTabDrag(mainWin, options)
+	if (drag && drag.events.length === 0) {
+		const snapshot = await e2eSnapshot(mainWin)
+		if (!snapshot.documentFocused) {
+			log('[e2e] tab drag delivered no events and the window had lost focus; re-focusing and retrying once')
+			await waitForWindowFocus(mainWin, 2_000)
+			return driveTabDrag(mainWin, options)
+		}
+	}
+	return drag
+}
+
 // E2E mode intentionally covers only input-driven behavior. The ordinary demo
 // still proves the broader tab/native/restore showcase without requiring a
 // focused desktop window.
 async function runE2EVerification(mainWin) {
 	await rendererReady
 	await sleep(900)
-	const initial = await e2eSnapshot(mainWin)
+	const initial = await waitForWindowFocus(mainWin)
 	assertE2E(initial.documentFocused, 'window focus', JSON.stringify({ window: mainWin.isFocused(), document: initial.documentFocused }))
 	await captureE2EMetrics(mainWin, 'before-drag')
 
@@ -1000,7 +1051,7 @@ async function runE2EVerification(mainWin) {
 	// Drop logs on the left edge of its sibling group. This is a real HTML DnD
 	// gesture; the resulting extra split demonstrates a structural model and DOM
 	// mutation rather than a visual drop indicator alone.
-	const leftDrag = await driveTabDrag(mainWin, {
+	const leftDrag = await driveTabDragFocused(mainWin, {
 		panelId: 'logs',
 		targetGroupId: 'g-right',
 		zone: 'left',
@@ -1020,7 +1071,7 @@ async function runE2EVerification(mainWin) {
 	// Then join that real tab into the left tab strip (the center-drop path).
 	// Targeting Simulator's visible tab avoids the native view body overlay while
 	// still exercising the tab-strip's browser drag/drop handler.
-	const centerDrag = await driveTabDrag(mainWin, {
+	const centerDrag = await driveTabDragFocused(mainWin, {
 		panelId: 'logs',
 		targetGroupId: 'g-left',
 		targetPanelId: 'simulator',
