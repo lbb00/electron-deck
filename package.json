@@ -77,13 +77,16 @@
     "test:coverage": "vitest run --coverage && vitest run --config vitest.dock-react.config.ts --coverage --coverage.reportsDirectory=./coverage/dock-react",
     "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
     "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.mjs && electron examples/dockable-demo/main.mjs",
-    "prepack": "pnpm run build"
+    "prepack": "pnpm run build",
+    "changeset": "changeset",
+    "release": "pnpm run build && pnpm test && node scripts/release.js"
   },
   "dependencies": {
     "react-resizable-panels": "^4.10.0",
     "view-anchor": "^0.1.2"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.2",
     "@eslint/js": "^10.0.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
