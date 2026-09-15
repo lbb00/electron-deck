@@ -84,13 +84,16 @@
     "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
     "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.js && electron examples/dockable-demo/main.js",
     "bench": "node --expose-gc bench/main-frame-path.js",
-    "prepack": "pnpm run build && pnpm run check:bundle-size && pnpm run check:tree-shaking"
+    "prepack": "pnpm run build && pnpm run check:bundle-size && pnpm run check:tree-shaking",
+    "changeset": "changeset",
+    "release": "pnpm run build && pnpm test && node scripts/release.js"
   },
   "dependencies": {
     "react-resizable-panels": "^4.10.0",
     "view-anchor": "^0.2.1"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^22.15.3",
