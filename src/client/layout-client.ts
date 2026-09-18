@@ -1,4 +1,4 @@
-import { createPlacementAnchor } from 'view-anchor'
+import { createViewAnchor } from 'view-anchor'
 import type { Placement } from 'view-anchor'
 import { createPlacementPublisher } from './placement-publisher.js'
 import type { PlacementSnapshot } from '../layout/index.js'
@@ -41,7 +41,7 @@ export interface LayoutClientDeps {
 	 *  `document.querySelector(slotId)`. Returns `null` when the slot is not
 	 *  mounted (graceful no-op). */
 	resolveSlot?(slotId: string): HTMLElement | null
-	/** Anchor factory. Default: view-anchor's `createPlacementAnchor`. Injected
+	/** Anchor factory. Default: view-anchor's `createViewAnchor`. Injected
 	 *  in tests to capture `(target, opts)` without real RO/IO/RAF. */
 	createAnchor?: (
 		target: HTMLElement,
@@ -50,7 +50,7 @@ export interface LayoutClientDeps {
 			publish: (p: Placement) => void
 			followScroll?: boolean
 			followGeometry?: boolean
-			guardDisplayNone?: boolean
+			treatZeroAreaAsHidden?: boolean
 		},
 	) => { dispose(): void }
 	/** Task scheduler for the internal placement publisher. Default: a
@@ -58,15 +58,15 @@ export interface LayoutClientDeps {
 	 *  right after the current render step instead of waiting for the next
 	 *  animation frame. Injected in tests to drive coalesced publishes
 	 *  deterministically. */
-	requestFrame?: (cb: () => void) => number
-	cancelFrame?: (id: number) => void
+	schedulePublish?: (cb: () => void) => number
+	cancelScheduledPublish?: (id: number) => void
 }
 
 /**
  * Renderer half of the slot-token handshake. Subscribes to main's `slot-grant`
  * pushes FIRST (so a grant replayed synchronously by `subscribe()` cannot be
  * missed), then on each grant anchors the granted DOM slot with this session's
- * hardening opts (followScroll / followGeometry / guardDisplayNone). Each anchor's
+ * hardening opts (followScroll / followGeometry / treatZeroAreaAsHidden). Each anchor's
  * measured `Placement` is written into a CENTRAL placement publisher keyed by
  * `viewId` — NOT sent per-view. The publisher coalesces every anchor's writes into
  * ONE window-level snapshot per render step, so a transient relayout that
@@ -82,7 +82,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	const resolveSlot =
 		deps.resolveSlot ??
 		((id: string): HTMLElement | null => document.querySelector(id))
-	const createAnchor = deps.createAnchor ?? createPlacementAnchor
+	const createAnchor = deps.createAnchor ?? createViewAnchor
 
 	// Max generation seen across all grants. Main assigns strictly-monotonic
 	// generations, so taking the max means a reload's higher-generation grants
@@ -94,8 +94,8 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	const publisher = createPlacementPublisher<SlotExtra>({
 		generation: () => maxGeneration,
 		publish: snapshot => deps.bridge.sendSnapshot(snapshot),
-		requestFrame: deps.requestFrame,
-		cancelFrame: deps.cancelFrame,
+		schedulePublish: deps.schedulePublish,
+		cancelScheduledPublish: deps.cancelScheduledPublish,
 	})
 
 	// One live anchor per `viewId`. Main intentionally re-delivers a grant on
@@ -142,7 +142,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 			visible: true,
 			followScroll: true,
 			followGeometry: true,
-			guardDisplayNone: true,
+			treatZeroAreaAsHidden: true,
 			// Capture THIS grant's viewId + slotToken so the measured placement lands
 			// in the central publisher under the right key with its own token (no
 			// cross-talk between slots). layer is 0: z-order is host-controlled

@@ -20,7 +20,7 @@
  *     channel: string
  *     direction: 'in' | 'out'
  *     connectionId?: number
- *     appSessionId?: string
+ *     sessionId?: string
  *     durationMs?: number
  *     error?: string
  *     summary?: string
@@ -86,7 +86,7 @@ describe('createDebugTap', () => {
       const tap = createDebugTap({ enabled: true })
 
       const a = entry(1, { channel: 'a', direction: 'in', connectionId: 7 })
-      const b = entry(2, { channel: 'b', direction: 'out', appSessionId: 's1' })
+      const b = entry(2, { channel: 'b', direction: 'out', sessionId: 's1' })
       const c = entry(3, { channel: 'c', direction: 'in', durationMs: 12, summary: 'ok' })
 
       tap.record(a)
@@ -98,7 +98,7 @@ describe('createDebugTap', () => {
       // oldest first, newest last
       expect(got.map((e) => e.ts)).toEqual([1, 2, 3])
       expect(got[0]).toMatchObject({ channel: 'a', direction: 'in', connectionId: 7 })
-      expect(got[1]).toMatchObject({ channel: 'b', direction: 'out', appSessionId: 's1' })
+      expect(got[1]).toMatchObject({ channel: 'b', direction: 'out', sessionId: 's1' })
       expect(got[2]).toMatchObject({ channel: 'c', direction: 'in', durationMs: 12, summary: 'ok' })
     })
 

@@ -23,7 +23,7 @@
  * Three verbs, zero capability authorization this wave:
  *  - command : webview → main RPC. Reuses the wire's sender-id + main-frame
  *              gate; the facade maps the domain-neutral `name` onto the wire's
- *              internal `kind` (callers never see 'host'/'simulator').
+ *              internal `kind` (callers never see the wire's kind field).
  *  - event   : main → webview push, default-deny allowlist (only names passed
  *              to event() fan out).
  *  - trust   : refcount trust set membership; gates which webContents can issue
@@ -32,7 +32,7 @@
  * REAL WIRING (Bug C): the facade owns NO new gating logic — it delegates trust
  * to the injected `trustSet` and routing/frame checks to the real
  * `WireTransport`. These tests construct a REAL `WireTransport` whose invoke
- * seams (`invokeHost` / `invokeSimulator`) forward to the live
+ * seam (`invokeHost`) forwards to the live
  * `controlBus.dispatch`, and whose `declaredEvents` seam reads
  * `controlBus.declaredEvents()` — exactly how production assembles them. There is
  * NO shared mutable registry handed across the boundary: a real
@@ -192,8 +192,8 @@ function createFakeTrustSet(): TrustSet & { refs: Map<MinimalWebContents, number
  * event()). The facade must NOT re-implement trust/frame gating: it reuses the
  * wire's `handleInvoke` path entirely.
  *
- * NOTE: the facade hides the wire `kind`. The wire's BOTH invoke seams
- * (`invokeHost` + `invokeSimulator`) forward to the live `controlBus.dispatch`,
+ * NOTE: the facade hides the wire `kind`. The wire's invoke seam
+ * (`invokeHost`) forwards to the live `controlBus.dispatch`,
  * so whichever single kind the facade maps `command` onto reaches the handler
  * through the real `handleInvoke` path.
  */
@@ -237,10 +237,9 @@ async function setup(): Promise<Wiring> {
 		bus,
 		senderPolicy,
 		trustedWebContents: () => trustSet.snapshot(),
-		// The facade hides the wire `kind`; point BOTH kind resolvers at the single
+		// The facade hides the wire `kind`; point the kind resolver at the single
 		// `dispatch` so whichever kind the facade maps `command` onto is exercised.
 		invokeHost: (name, args, ctx) => ref.bus!.dispatch(name, args, ctx),
-		invokeSimulator: (name, args, ctx) => ref.bus!.dispatch(name, args, ctx),
 		declaredEvents: () => ref.bus!.declaredEvents(),
 	})
 
@@ -353,7 +352,7 @@ describe('ControlBus — command(): disposal', () => {
 // ── 3. command is domain-neutral (no kind leakage) ────────────────────────
 
 describe('ControlBus — command(): domain-neutral surface', () => {
-	it('command() takes only (name, handler) — no host/simulator kind in the call', async () => {
+	it('command() takes only (name, handler) — no host kind in the call', async () => {
 		const w = await setup()
 		// The facade signature must be (name, handler); passing a 3rd "kind" arg is
 		// not part of the contract. We assert by registering with just name+handler
@@ -372,11 +371,10 @@ describe('ControlBus — command(): domain-neutral surface', () => {
 		expect(handler).toHaveBeenCalledTimes(1)
 	})
 
-	it('ControlBus surface exposes no host/simulator kind verbs (only command/event/trust)', async () => {
+	it('ControlBus surface exposes no host kind verb (only command/event/trust)', async () => {
 		const w = await setup()
 		const keys = Object.keys(w.controlBus as unknown as Record<string, unknown>)
 		expect(keys).not.toContain('host')
-		expect(keys).not.toContain('simulator')
 		expect(typeof w.controlBus.command).toBe('function')
 		expect(typeof w.controlBus.event).toBe('function')
 		expect(typeof w.controlBus.trust).toBe('function')
@@ -537,7 +535,7 @@ describe('ControlBus — trust(): refcount membership', () => {
 // registers, NOT a private test-only registry. The invoke handler is obtained
 // from `ipcMain.handlers` (whatever the wire actually registered) and driven with
 // a trusted main-frame sender envelope, the same shape Electron delivers. If the
-// facade ever stops feeding the wire's `invokeHost`/`invokeSimulator` seam (the
+// facade ever stops feeding the wire's `invokeHost` seam (the
 // original disconnection), this fails because the handler can't resolve the name.
 
 describe('ControlBus — real wire wiring (Bug C)', () => {

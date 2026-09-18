@@ -13,7 +13,7 @@ import {
 
 // The reconciler is domain-neutral: view ids are opaque strings and per-view
 // host specifics ride on the Extra type parameter. These tests pin an example
-// Extra (a simulator-style zoom) to exercise passthrough.
+// Extra (a zoom value) to exercise passthrough.
 type Zoom = { zoom?: number }
 
 const B = (x: number, y: number, width: number, height: number): Bounds => ({

@@ -21,7 +21,7 @@
     <div class="label" id="label">VIEW</div>
     <div class="counter">tick <span id="tick">0</span></div>
     <script>
-      // color + label come in via URL hash, e.g. #c0392b|SIMULATOR
+      // color + label come in via URL hash, e.g. #c0392b|PREVIEW
       const [color, label] = decodeURIComponent(location.hash.slice(1)).split('|')
       document.body.style.background = color || '#444'
       document.getElementById('label').textContent = label || 'VIEW'

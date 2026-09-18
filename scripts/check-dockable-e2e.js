@@ -184,7 +184,7 @@ if (metricsEnabled) {
 			if (!labels.includes(after)) throw new Error(`missing paired sample for ${before}`)
 		}
 		if (repeatBefore.length === 0) throw new Error('repeated drag samples are missing')
-		const requiredRoles = ['main', 'control-renderer', 'native-simulator']
+		const requiredRoles = ['main', 'control-renderer', 'native-preview']
 		for (const [index, sample] of metrics.samples.entries()) {
 			const refs = Array.isArray(sample.processRoleToPid) ? sample.processRoleToPid : []
 			const processes = Array.isArray(sample.processes) ? sample.processes : []

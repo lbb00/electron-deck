@@ -1,5 +1,5 @@
-// CONTRACT-OBJECTION: `invokeHost` / `invokeSimulator` 是 framework-internal
-// async functions —— 让 WireTransport 自己接 throw 转 InvokeFailure 是合理的，
+// CONTRACT-OBJECTION: `invokeHost` 是 framework-internal
+// async function —— 让 WireTransport 自己接 throw 转 InvokeFailure 是合理的，
 // 但同时上层 deck-app 也可能想统一 error mapping。当前 spec 让
 // WireTransport 兼做 error → wire-failure 序列化，意味着 `DeckRemoteError`
 // 类的 code-preservation 语义被分散到两处实现（deck-app 与 wire-transport），
@@ -75,7 +75,6 @@ interface Harness {
 	trusted: Set<number>
 	wcs: FakeWebContents[]
 	invokeHost: ReturnType<typeof vi.fn>
-	invokeSimulator: ReturnType<typeof vi.fn>
 	getInvokeHandler: () => InvokeHandler
 	getProbeHandler: () => InvokeHandler
 }
@@ -84,7 +83,6 @@ function makeHarness(opts: {
 	trustedIds?: number[]
 	webContents?: FakeWebContents[]
 	invokeHost?: WireTransportDeps['invokeHost']
-	invokeSimulator?: WireTransportDeps['invokeSimulator']
 	declaredEvents?: WireTransportDeps['declaredEvents']
 } = {}): Harness {
 	const ipcMain = createFakeIpcMain()
@@ -95,16 +93,12 @@ function makeHarness(opts: {
 	const invokeHost = vi.fn(
 		opts.invokeHost ?? (async () => null as JsonValue),
 	)
-	const invokeSimulator = vi.fn(
-		opts.invokeSimulator ?? (async () => null as JsonValue),
-	)
 	const transport = new WireTransport({
 		ipcMain,
 		bus,
 		senderPolicy,
 		trustedWebContents: () => wcs,
 		invokeHost: invokeHost as WireTransportDeps['invokeHost'],
-		invokeSimulator: invokeSimulator as WireTransportDeps['invokeSimulator'],
 		// 默认 fanout 测试都 publish 'e1'，统一 allowlist 让既有 case 通过。
 		declaredEvents: opts.declaredEvents ?? (() => ['e1']),
 	})
@@ -116,7 +110,6 @@ function makeHarness(opts: {
 		trusted,
 		wcs,
 		invokeHost,
-		invokeSimulator,
 		getInvokeHandler: () => {
 			const h = ipcMain.handlers.get(DeckChannel.Invoke)
 			if (!h) throw new Error('invoke handler not registered')
@@ -169,7 +162,6 @@ describe('WireTransport — start()', () => {
 				senderPolicy,
 				trustedWebContents: () => [],
 				invokeHost: async () => null as JsonValue,
-				invokeSimulator: async () => null as JsonValue,
 				declaredEvents: () => ['e1'],
 			})
 
@@ -202,7 +194,6 @@ describe('WireTransport — start()', () => {
 				senderPolicy,
 				trustedWebContents: () => [],
 				invokeHost: async () => null as JsonValue,
-				invokeSimulator: async () => null as JsonValue,
 				declaredEvents: () => ['e1'],
 			})
 
@@ -232,7 +223,6 @@ describe('WireTransport — start()', () => {
 				senderPolicy,
 				trustedWebContents: () => [],
 				invokeHost: async () => null as JsonValue,
-				invokeSimulator: async () => null as JsonValue,
 				declaredEvents: () => ['e1'],
 			})
 
@@ -279,7 +269,6 @@ describe('WireTransport — invoke handler: senderPolicy gating', () => {
 		expect(res.error.code).toBe('DECK_UNTRUSTED_SENDER')
 		expect(res.error.remoteName).toBe('doThing')
 		expect(h.invokeHost).not.toHaveBeenCalled()
-		expect(h.invokeSimulator).not.toHaveBeenCalled()
 	})
 
 	it('trusted sender → forwards to invokeHost for kind:host', async () => {
@@ -300,7 +289,7 @@ describe('WireTransport — invoke handler: senderPolicy gating', () => {
 })
 
 describe('WireTransport — invoke handler: kind routing', () => {
-	it('kind: host → calls invokeHost(name, args) and wraps in InvokeSuccess; does NOT call invokeSimulator', async () => {
+	it('kind: host → calls invokeHost(name, args) and wraps in InvokeSuccess', async () => {
 		const h = makeHarness({
 			trustedIds: [1],
 			invokeHost: async () => ({ ok: 'host' } as unknown as JsonValue),
@@ -317,26 +306,6 @@ describe('WireTransport — invoke handler: kind routing', () => {
 		// ctx is threaded as the required 3rd arg (senderId from the gated sender,
 		// senderFrame null for the frame-unaware stub).
 		expect(h.invokeHost).toHaveBeenCalledWith('svc', [10, 20], { senderId: 1, senderFrame: null })
-		expect(h.invokeSimulator).not.toHaveBeenCalled()
-	})
-
-	it('kind: simulator → calls invokeSimulator(name, args); does NOT call invokeHost', async () => {
-		const h = makeHarness({
-			trustedIds: [1],
-			invokeSimulator: async () => 'sim-ok' as JsonValue,
-		})
-		h.transport.start()
-		const invoke = h.getInvokeHandler()
-		const res = (await invoke(
-			{ sender: { id: 1 } },
-			{ kind: 'simulator', name: 'getStorage', args: ['key'] },
-		)) as { ok: true, result: JsonValue }
-		expect(res.ok).toBe(true)
-		expect(res.result).toBe('sim-ok')
-		expect(h.invokeSimulator).toHaveBeenCalledTimes(1)
-		// ctx threaded as the required 3rd arg (see kind:host case above).
-		expect(h.invokeSimulator).toHaveBeenCalledWith('getStorage', ['key'], { senderId: 1, senderFrame: null })
-		expect(h.invokeHost).not.toHaveBeenCalled()
 	})
 
 	it('unknown kind → InvokeFailure with code UNKNOWN_KIND; does NOT dispatch', async () => {
@@ -351,7 +320,6 @@ describe('WireTransport — invoke handler: kind routing', () => {
 		expect(res.error.code).toBe('DECK_UNKNOWN_KIND')
 		expect(res.error.remoteName).toBe('x')
 		expect(h.invokeHost).not.toHaveBeenCalled()
-		expect(h.invokeSimulator).not.toHaveBeenCalled()
 	})
 })
 
@@ -512,7 +480,6 @@ describe('WireTransport — invoke handler: request shape validation', () => {
 		expect(res.error.remoteName).toBe('unknown')
 		const h = (res as unknown as { _h: Harness })._h
 		expect(h.invokeHost).not.toHaveBeenCalled()
-		expect(h.invokeSimulator).not.toHaveBeenCalled()
 	})
 
 	it('request missing kind → BAD_REQUEST', async () => {
@@ -581,7 +548,6 @@ describe('WireTransport — event push', () => {
 			senderPolicy,
 			trustedWebContents,
 			invokeHost: async () => null as JsonValue,
-			invokeSimulator: async () => null as JsonValue,
 			declaredEvents: () => ['e1'],
 		})
 		transport.start()
@@ -616,7 +582,6 @@ describe('WireTransport — event push', () => {
 				senderPolicy,
 				trustedWebContents: () => [wc],
 				invokeHost: async () => null as JsonValue,
-				invokeSimulator: async () => null as JsonValue,
 				declaredEvents: () => ['declared.evt'],
 			})
 			transport.start()

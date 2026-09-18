@@ -222,9 +222,13 @@ export function createOverlayPanel<TShowData = void>(
       }
     },
     reposition(bounds) {
-      if (!view) return
+      // Guarded on `wantsVisible`, not just `view` existing: a view created by
+      // `prepare()` (never shown) or left behind by `hide()` (kept alive for the
+      // next `show()`) has a live `view` but is not currently displayed — updating
+      // its bounds would call `deps.setDesired(bounds)` and make it visible again,
+      // contradicting the "no-op if not currently shown" contract.
+      if (!view || !wantsVisible) return
       pendingBounds = bounds
-      wantsVisible = true
       if ((deps.readyMode ?? 'load') === 'load' || ready) deps.setDesired(bounds)
     },
     hide() {

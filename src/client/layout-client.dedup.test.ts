@@ -23,7 +23,7 @@ interface AnchorOpts {
   publish: (p: Placement) => void
   followScroll?: boolean
   followGeometry?: boolean
-  guardDisplayNone?: boolean
+  treatZeroAreaAsHidden?: boolean
 }
 
 interface CapturedAnchor {
@@ -112,8 +112,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     const grant: SlotGrant = { viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 }
     b.emitGrant(grant)
@@ -134,8 +134,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
@@ -160,8 +160,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok2', generation: 1 })
@@ -181,8 +181,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok2', generation: 1 })
@@ -210,8 +210,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: (id) => (id === '#sim' ? sim : dev),
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v-sim', slotId: '#sim', slotToken: 'tok-sim', generation: 1 })
     b.emitGrant({ viewId: 'v-panel', slotId: '#panel', slotToken: 'tok-panel', generation: 1 })
@@ -242,8 +242,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     // v1 gets replaced (tok1→tok2); v2 stays live.
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
@@ -276,8 +276,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => (mounted ? el : null),
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     // First grant: slot not mounted → no anchor.
     expect(() =>
@@ -308,8 +308,8 @@ describe('createDeckLayoutClient — dedup renderer grants by viewId', () => {
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => (resolves ? el : null),
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
     expect(a.createAnchor).toHaveBeenCalledTimes(1)

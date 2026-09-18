@@ -127,7 +127,9 @@ function createFakeElectron(
 				removeChildView: vi.fn(),
 			}
 			this.contentView = cv as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
@@ -135,15 +137,17 @@ function createFakeElectron(
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
 			this._lastCloseEvent = null
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -186,17 +190,24 @@ function createFakeElectron(
 }
 
 // ── Typed escape hatches ─────────────────────────────────────────────────────
-type Bounds = { x: number, y: number, width: number, height: number }
-type Placement = { visible: true, bounds: Bounds } | { visible: false }
-interface ViewSource { url?: string, file?: string }
-interface KeepAliveSpec { policy: 'lru', max: number }
+type Bounds = { x: number; y: number; width: number; height: number }
+type Placement = { visible: true; bounds: Bounds } | { visible: false }
+interface ViewSource {
+	url?: string
+	file?: string
+}
+interface KeepAliveSpec {
+	policy: 'lru'
+	max: number
+	group: string
+}
 interface HostViewHandle {
 	placeIn(win: unknown, opts: { zone?: number }): HostViewHandle
 	applyPlacement(p: Placement): HostViewHandle
 	dispose(): Promise<void>
 }
 interface RuntimeWithView {
-	view(spec: { source: ViewSource, scope?: unknown, keepAlive?: KeepAliveSpec }): HostViewHandle
+	view(spec: { source: ViewSource; scope?: unknown; keepAlive?: KeepAliveSpec }): HostViewHandle
 }
 function withView(runtime: Runtime): RuntimeWithView {
 	return runtime as unknown as RuntimeWithView
@@ -209,7 +220,7 @@ function lastWcv(electron: FakeElectron): FakeWebContentsView {
 }
 
 const HIDDEN: Placement = { visible: false }
-const flush = (): Promise<void> => new Promise(r => setTimeout(r, 0))
+const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
 
 /** True iff `reason` (an Error, possibly an AggregateError) mentions the boom. */
 function mentionsBoom(reason: unknown): boolean {
@@ -240,7 +251,7 @@ describe('keepAlive LRU eviction — a victim whose dispose rejects is handled, 
 
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1 }
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1, group: 'evict-error-group' }
 		// A: the view that will be evicted first (least-recently-hidden). Make its
 		// native WebContents.close() THROW so its viewScope teardown rejects → the
 		// eviction's fire-and-forget dispose() becomes a rejected floating promise.
@@ -269,9 +280,8 @@ describe('keepAlive LRU eviction — a victim whose dispose rejects is handled, 
 			b.applyPlacement(HIDDEN) // hidden [A,B] > max=1 → evict least-recent = A → A.dispose() rejects
 			await flush()
 			await flush()
-			await new Promise(r => setTimeout(r, 0))
-		}
-		finally {
+			await new Promise((r) => setTimeout(r, 0))
+		} finally {
 			process.removeListener('unhandledRejection', onUnhandled)
 			for (const l of prior) process.on('unhandledRejection', l)
 		}
@@ -279,7 +289,7 @@ describe('keepAlive LRU eviction — a victim whose dispose rejects is handled, 
 		// No unhandled rejection referencing the victim's failure escaped.
 		expect(seen.filter(mentionsBoom)).toHaveLength(0)
 		// The failure was logged instead (console.error carries the boom error).
-		const logged = errorSpy.mock.calls.some(call => call.some(arg => mentionsBoom(arg)))
+		const logged = errorSpy.mock.calls.some((call) => call.some((arg) => mentionsBoom(arg)))
 		expect(logged).toBe(true)
 
 		errorSpy.mockRestore()

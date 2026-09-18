@@ -7,20 +7,20 @@
 // Host wiring mirrors layout-demo/main.js (startElectronDeck, offscreen
 // showInactive at -3000, native block via runtime.view().placeIn, composite
 // screenshots, captureRetry). The KEY DIFFERENCE: the renderer DOM is driven by
-// React <DockView> (not hand-rolled DOM), and the native simulator block is
-// anchored to the dock's native slot selector [data-deck-native-slot="simulator"].
+// React <DockView> (not hand-rolled DOM), and the native preview block is
+// anchored to the dock's native slot selector [data-deck-native-slot="preview"].
 //
 // Run offscreen:  electron examples/dockable-demo/main.js
 //
 // Proves (with explicit ✅/❌ trace lines):
-//   1. DOM tab switch — clicking [data-deck-tab="logs"] flips g-right active to
-//      'logs' in the model, shows the logs body, and leaves the editor body
+//   1. DOM tab switch — clicking [data-deck-tab="output"] flips g-right active to
+//      'output' in the model, shows the output body, and leaves the doc body
 //      mounted-but-hidden (DockView keeps inactive panel DOM around to
 //      preserve React state/scroll — see panel-body.tsx).
 //   2. Native slot following — resizing the dock host (renderer-driven) moves
-//      the native simulator WebContentsView to track its slot rect.
+//      the native preview WebContentsView to track its slot rect.
 //   3. Serialize/restore — serialize (after tab switch + movePanel), teardown,
-//      parseLayout + validateTree, rebuild a fresh model+DockView, assert the
+//      parseLayout + collectTreeProblems, rebuild a fresh model+DockView, assert the
 //      restored DOM reflects the persisted tree.
 
 import { app, ipcMain } from 'electron'
@@ -81,7 +81,7 @@ if (E2E) log('[e2e] isolated output:', SHOTS)
 // ── cold-start timestamps (unconditional, zero-cost, no ✅/❌) ────────────────
 // Four points on the boot timeline, all measured against T0 (process start):
 // app.whenReady() settling, the main BrowserWindow's creation, the renderer's
-// demo:ready (React mounted + client live), and the native simulator view's
+// demo:ready (React mounted + client live), and the native preview view's
 // first non-zero-size bounds. Emitted as ONE combined line once all four land.
 const startupTimes = { ready: null, window: null, mounted: null, firstPlacement: null }
 let startupLogged = false
@@ -138,8 +138,8 @@ async function captureE2EMetrics(mainWin, label) {
 			{ role: 'control-renderer', pid: mainWin.webContents.getOSProcessId() },
 		]
 		for (const block of placedBlocks) {
-			if (block.label !== 'SIMULATOR' || block.handle.webContents.isDestroyed()) continue
-			refs.push({ role: 'native-simulator', pid: block.handle.webContents.getOSProcessId() })
+			if (block.label !== 'PREVIEW' || block.handle.webContents.isDestroyed()) continue
+			refs.push({ role: 'native-preview', pid: block.handle.webContents.getOSProcessId() })
 		}
 		const byPid = new Map()
 		for (const ref of refs) {
@@ -174,7 +174,7 @@ async function captureE2EMetrics(mainWin, label) {
 	}
 }
 
-// 5ms poll for the native simulator view's first non-zero-size bounds — the
+// 5ms poll for the native preview view's first non-zero-size bounds — the
 // last of the four [startup] cold-start points (see maybeEmitStartupLine).
 const firstPlacementPoll = setInterval(() => {
 	if (startupTimes.firstPlacement !== null) {
@@ -182,7 +182,7 @@ const firstPlacementPoll = setInterval(() => {
 		return
 	}
 	for (const blk of placedBlocks) {
-		if (blk.label !== 'SIMULATOR' || blk.handle.webContents.isDestroyed()) continue
+		if (blk.label !== 'PREVIEW' || blk.handle.webContents.isDestroyed()) continue
 		const b = blk.handle.bounds()
 		if (b && b.width > 0 && b.height > 0) {
 			startupTimes.firstPlacement = since()
@@ -329,16 +329,16 @@ const { ready } = startElectronDeck({
 					return
 				}
 				if (placedBlocks.length) {
-					const block = placedBlocks.find((candidate) => candidate.label === 'SIMULATOR')
+					const block = placedBlocks.find((candidate) => candidate.label === 'PREVIEW')
 					if (!block) {
 						failed = true
-						log('❌ open-project recovery: SIMULATOR handle is missing')
+						log('❌ open-project recovery: PREVIEW handle is missing')
 						return
 					}
 					recoveryMove = recoveryMove.then(async () => {
 						log('open-project recovery:', projectId)
-						await block.handle.moveTo(mainWin, { zone: 0, anchor: '[data-deck-native-slot="simulator"]' })
-						log('open-project recovery: SIMULATOR re-anchored')
+						await block.handle.moveTo(mainWin, { zone: 0, anchor: '[data-deck-native-slot="preview"]' })
+						log('open-project recovery: PREVIEW re-anchored')
 					}).catch((error) => {
 						failed = true
 						log('❌ open-project recovery failed:', String(error))
@@ -348,10 +348,10 @@ const { ready } = startElectronDeck({
 				log('open-project:', projectId)
 				session = main.newSession()
 				const handle = runtime
-					.view({ source: { url: `${BLOCK}#${enc('#c0392b', 'SIMULATOR')}` }, scope: session })
-					.placeIn(mainWin, { zone: 0, anchor: '[data-deck-native-slot="simulator"]' })
-				placedBlocks.push({ handle, label: 'SIMULATOR', zone: 0 })
-				log('placed native SIMULATOR view; placedBlocks =', String(placedBlocks.length))
+					.view({ source: { url: `${BLOCK}#${enc('#c0392b', 'PREVIEW')}` }, scope: session })
+					.placeIn(mainWin, { zone: 0, anchor: '[data-deck-native-slot="preview"]' })
+				placedBlocks.push({ handle, label: 'PREVIEW', zone: 0 })
+				log('placed native PREVIEW view; placedBlocks =', String(placedBlocks.length))
 			})
 
 			main.onClose(async () => {
@@ -427,9 +427,9 @@ function enc(color, label) {
 	return encodeURIComponent(`${color}|${label}`)
 }
 
-function simBounds() {
+function previewBounds() {
 	for (const blk of placedBlocks) {
-		if (blk.label !== 'SIMULATOR') continue
+		if (blk.label !== 'PREVIEW') continue
 		if (blk.handle.webContents.isDestroyed()) return null
 		const b = blk.handle.bounds()
 		return b ? { x: b.x, width: b.width } : null
@@ -444,7 +444,7 @@ function simBounds() {
 // dragged); otherwise drives mouseDown → `rounds` × (5×+4px, 5×-4px) →
 // mouseUp and returns the handle's center point. `onPeak` (optional) fires
 // once, right after round 0's forward half (i.e. at +20px peak displacement)
-// — the CPU-profile capture uses it to sample simBounds() at a known
+// — the CPU-profile capture uses it to sample previewBounds() at a known
 // mid-drag point; the lag measurement doesn't need it.
 async function driveSplitDrag(mainWin, { rounds = 40, onPeak, returnToStart = true } = {}) {
 	const js = (code) => mainWin.webContents.executeJavaScript(code)
@@ -623,15 +623,15 @@ async function captureProfiles(mainWin) {
 	await sleep(200)
 
 	// ── scenario B: real pointer drag on a resize handle (driveSplitDrag) ─────
-	const baseline = simBounds()
-	log('[profile] scenario B: simBounds before drag:', JSON.stringify(baseline))
+	const baseline = previewBounds()
+	log('[profile] scenario B: previewBounds before drag:', JSON.stringify(baseline))
 	let peak = null
 	await dbg.sendCommand('Profiler.start')
 	const dragResult = await driveSplitDrag(mainWin, {
 		rounds: 40,
 		onPeak: () => {
-			peak = simBounds()
-			log('[profile] scenario B: simBounds at peak displacement (round 0, +20px from start):', JSON.stringify(peak))
+			peak = previewBounds()
+			log('[profile] scenario B: previewBounds at peak displacement (round 0, +20px from start):', JSON.stringify(peak))
 		},
 	})
 	const profileB = await dbg.sendCommand('Profiler.stop')
@@ -640,8 +640,8 @@ async function captureProfiles(mainWin) {
 	} else {
 		log('[profile] scenario B: pointer drag on resize handle at', JSON.stringify(dragResult.handleRect), '— done')
 		await sleep(50)
-		const after = simBounds()
-		log('[profile] scenario B: simBounds after mouseUp (round-tripped back to start x):', JSON.stringify(after))
+		const after = previewBounds()
+		log('[profile] scenario B: previewBounds after mouseUp (round-tripped back to start x):', JSON.stringify(after))
 		const moved = !!(baseline && peak && baseline.width !== peak.width)
 		log(
 			'[profile] scenario B: drag',
@@ -664,7 +664,7 @@ async function captureProfiles(mainWin) {
 // ── OPTIONAL: DOM-slot vs native-view lag measurement (gated by DECK_DEMO_LAG=1)
 // Samples BOTH sides of the placement pipeline during a real pointer drag
 // (driveSplitDrag): the renderer's DOM slot rect once per rAF, and the main
-// process's native WCV bounds every time simBounds() changes (1-2ms poll).
+// process's native WCV bounds every time previewBounds() changes (1-2ms poll).
 // Both timestamps are wall-clock ms since epoch (renderer: performance.timeOrigin
 // + performance.now(); main: Date.now()), directly comparable within ±1ms.
 function logLagReport(r) {
@@ -696,7 +696,7 @@ async function measureDragLag(mainWin) {
 		(function(){
 			window.__deckLagSamples = [];
 			window.__deckLagRunning = true;
-			const slot = document.querySelector('[data-deck-native-slot="simulator"]');
+			const slot = document.querySelector('[data-deck-native-slot="preview"]');
 			function frame() {
 				if (!window.__deckLagRunning) return;
 				const r = slot.getBoundingClientRect();
@@ -710,12 +710,12 @@ async function measureDragLag(mainWin) {
 		})();
 	`)
 
-	// Main side: poll simBounds() at 2ms, recording only actual changes.
+	// Main side: poll previewBounds() at 2ms, recording only actual changes.
 	const nativeSamples = []
-	let lastB = simBounds()
+	let lastB = previewBounds()
 	if (lastB) nativeSamples.push({ t: Date.now(), width: lastB.width, x: lastB.x })
 	const pollTimer = setInterval(() => {
-		const b = simBounds()
+		const b = previewBounds()
 		if (!b) return
 		if (!lastB || b.width !== lastB.width || b.x !== lastB.x) {
 			nativeSamples.push({ t: Date.now(), width: b.width, x: b.x })
@@ -801,7 +801,7 @@ async function waitForDeckState(mainWin, label, timeoutMs = 8_000) {
 		try {
 			const state = await mainWin.webContents.executeJavaScript(`
 				(() => {
-					const slot = document.querySelector('[data-deck-native-slot="simulator"]')
+					const slot = document.querySelector('[data-deck-native-slot="preview"]')
 					return {
 						deck: !!window.__deck,
 						slot: slot ? (() => { const r = slot.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height } })() : null,
@@ -816,11 +816,11 @@ async function waitForDeckState(mainWin, label, timeoutMs = 8_000) {
 }
 
 function nativeFollowCheck(mainWin, state, label) {
-	const bounds = simBounds()
+	const bounds = previewBounds()
 	const valid = !!bounds && bounds.width > 0 && state.slot.width > 0 && state.slot.height > 0
 	const follows = valid && Math.abs(bounds.width - state.slot.width) <= 8
-	assertE2E(valid, `${label} native simulator bounds`, JSON.stringify({ state, bounds }))
-	assertE2E(follows, `${label} native simulator follows slot`, JSON.stringify({ slot: state.slot, bounds }))
+	assertE2E(valid, `${label} native preview bounds`, JSON.stringify({ state, bounds }))
+	assertE2E(follows, `${label} native preview follows slot`, JSON.stringify({ slot: state.slot, bounds }))
 }
 
 // The 8px tolerance is the real check; this budget only bounds how long the
@@ -844,7 +844,7 @@ async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000) {
 	while (Date.now() - started < timeoutMs) {
 		try {
 			const state = await waitForDeckState(mainWin, `${label} slot`, 250)
-			const bounds = simBounds()
+			const bounds = previewBounds()
 			samples.push({ at: Date.now() - started, slot: state.slot.width, view: bounds ? bounds.width : null })
 			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8) {
 				log(`[e2e] ${label} native follow settled in ${Date.now() - started}ms`)
@@ -861,7 +861,7 @@ async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000) {
 	// between, so the log stays readable.
 	const trail = samples.length <= 8 ? samples : [...samples.slice(0, 3), '...', ...samples.slice(-4)]
 	throw new Error(
-		`${label} native simulator did not follow the slot within ${timeoutMs}ms; samples=${JSON.stringify(trail)}`,
+		`${label} native preview did not follow the slot within ${timeoutMs}ms; samples=${JSON.stringify(trail)}`,
 	)
 }
 
@@ -1048,11 +1048,11 @@ async function runE2EVerification(mainWin) {
 		}
 	}
 
-	// Drop logs on the left edge of its sibling group. This is a real HTML DnD
+	// Drop output on the left edge of its sibling group. This is a real HTML DnD
 	// gesture; the resulting extra split demonstrates a structural model and DOM
 	// mutation rather than a visual drop indicator alone.
 	const leftDrag = await driveTabDragFocused(mainWin, {
-		panelId: 'logs',
+		panelId: 'output',
 		targetGroupId: 'g-right',
 		zone: 'left',
 	})
@@ -1060,31 +1060,31 @@ async function runE2EVerification(mainWin) {
 	const afterLeft = await e2eSnapshot(mainWin)
 	assertE2E(
 		!!leftDrag
-			&& completedTabDrag(leftDrag, 'logs')
+			&& completedTabDrag(leftDrag, 'output')
 			&& afterLeft.serialized !== afterSplit.serialized
 			&& afterLeft.splitCount > afterSplit.splitCount
-			&& documentContains(afterLeft.groups, 'logs'),
+			&& documentContains(afterLeft.groups, 'output'),
 		'tab drag to left mutates DOM and model',
 		JSON.stringify({ leftDrag, before: afterSplit, after: afterLeft }),
 	)
 
 	// Then join that real tab into the left tab strip (the center-drop path).
-	// Targeting Simulator's visible tab avoids the native view body overlay while
+	// Targeting Preview's visible tab avoids the native view body overlay while
 	// still exercising the tab-strip's browser drag/drop handler.
 	const centerDrag = await driveTabDragFocused(mainWin, {
-		panelId: 'logs',
+		panelId: 'output',
 		targetGroupId: 'g-left',
-		targetPanelId: 'simulator',
+		targetPanelId: 'preview',
 		zone: 'center',
 	})
 	await sleep(500)
 	const afterCenter = await e2eSnapshot(mainWin)
 	assertE2E(
 		!!centerDrag
-			&& completedTabDrag(centerDrag, 'logs')
+			&& completedTabDrag(centerDrag, 'output')
 			&& afterCenter.serialized !== afterLeft.serialized
-			&& afterCenter.groups['g-left']?.includes('logs')
-			&& documentContains(afterCenter.groups, 'logs'),
+			&& afterCenter.groups['g-left']?.includes('output')
+			&& documentContains(afterCenter.groups, 'output'),
 		'tab drag to center mutates DOM and model',
 		JSON.stringify({ centerDrag, before: afterLeft, after: afterCenter }),
 	)
@@ -1120,27 +1120,27 @@ async function runVerification(mainWin) {
 	await shot(mainWin, '1-initial.png')
 
 	// ── PROOF 1: DOM tab switch ───────────────────────────────────────────────
-	// Click the logs tab in g-right; assert model g-right active === 'logs',
-	// the logs body is visible, and the editor body is still mounted but
+	// Click the output tab in g-right; assert model g-right active === 'output',
+	// the output body is visible, and the doc body is still mounted but
 	// hidden (DockView leaves inactive panel DOM in place — see
 	// panel-body.tsx — rather than removing it).
-	log('── PROOF 1: DOM tab switch (g-right editor → logs) ──')
+	log('── PROOF 1: DOM tab switch (g-right doc → output) ──')
 	const beforeActive = await js(`window.__deck.activeOf('g-right')`)
-	await js(`document.querySelector('[data-deck-tab="logs"]').click()`)
+	await js(`document.querySelector('[data-deck-tab="output"]').click()`)
 	await sleep(300)
 	const afterActive = await js(`window.__deck.activeOf('g-right')`)
-	const logsBodyVisible = await js(
-		`!!document.querySelector('[data-deck-panel-body="logs"] [data-test-dom-content="logs"]') && getComputedStyle(document.querySelector('[data-deck-panel-body="logs"]')).display !== 'none'`,
+	const outputBodyVisible = await js(
+		`!!document.querySelector('[data-deck-panel-body="output"] [data-test-dom-content="output"]') && getComputedStyle(document.querySelector('[data-deck-panel-body="output"]')).display !== 'none'`,
 	)
-	const editorBodyHidden = await js(
-		`!!document.querySelector('[data-deck-panel-body="editor"]') && getComputedStyle(document.querySelector('[data-deck-panel-body="editor"]')).display === 'none'`,
+	const docBodyHidden = await js(
+		`!!document.querySelector('[data-deck-panel-body="doc"]') && getComputedStyle(document.querySelector('[data-deck-panel-body="doc"]')).display === 'none'`,
 	)
 	const tabActive = await js(
-		`document.querySelector('[data-deck-tab="logs"]').getAttribute('data-active') === 'true'`,
+		`document.querySelector('[data-deck-tab="output"]').getAttribute('data-active') === 'true'`,
 	)
-	log('PROOF1: g-right active', beforeActive, '→', afterActive, '| logsVisible', String(logsBodyVisible), '| editorHidden', String(editorBodyHidden), '| tabActive', String(tabActive))
-	if (afterActive === 'logs' && logsBodyVisible && editorBodyHidden && tabActive) {
-		log('✅ DOM tab switch: clicking [data-deck-tab="logs"] flipped the model, showed the logs body, and left the editor body mounted-but-hidden.')
+	log('PROOF1: g-right active', beforeActive, '→', afterActive, '| outputVisible', String(outputBodyVisible), '| docHidden', String(docBodyHidden), '| tabActive', String(tabActive))
+	if (afterActive === 'output' && outputBodyVisible && docBodyHidden && tabActive) {
+		log('✅ DOM tab switch: clicking [data-deck-tab="output"] flipped the model, showed the output body, and left the doc body mounted-but-hidden.')
 	} else {
 		log('❌ DOM tab switch did NOT propagate to the model/DOM.')
 	}
@@ -1148,29 +1148,29 @@ async function runVerification(mainWin) {
 
 	// ── PROOF 2: native slot following ────────────────────────────────────────
 	// Resize the dock host (renderer-driven): react-resizable-panels re-distributes
-	// the left (simulator) panel → the native slot rect changes → the view-anchor
-	// re-publishes → the framework moves the native WCV. Assert the native sim
+	// the left (preview) panel → the native slot rect changes → the view-anchor
+	// re-publishes → the framework moves the native WCV. Assert the native preview
 	// block's width SHRANK to track its slot. Zero host resize code.
 	log('── PROOF 2: native slot following (renderer-driven resize) ──')
 	await js(`window.__deck.setHostWidth(880)`)
 	await sleep(700)
-	const before = simBounds()
-	log('PROOF2: native sim bounds @hostWidth=880 :', JSON.stringify(before))
+	const before = previewBounds()
+	log('PROOF2: native preview bounds @hostWidth=880 :', JSON.stringify(before))
 	await js(`window.__deck.setHostWidth(520)`)
 	await sleep(700)
-	const after = simBounds()
-	log('PROOF2: native sim bounds @hostWidth=520 :', JSON.stringify(after))
+	const after = previewBounds()
+	log('PROOF2: native preview bounds @hostWidth=520 :', JSON.stringify(after))
 	await shot(mainWin, '3-after-resize.png')
 
 	// The left panel is ~half the dock host (rrp 50/50). Host 880→520 shrinks the
-	// left region by ~180px; the native sim slot (minus CSS margins) tracks it.
-	const simDelta = before && after ? before.width - after.width : 0
-	const simTracked = simDelta > 100 && simDelta < 260 // ~180 expected, generous band
-	log('PROOF2: native sim widthΔ =', String(simDelta), '(expect ~180; band 100..260)')
-	if (simTracked) {
-		log('✅ native slot following: the native simulator WCV tracked the dock slot rect (renderer-driven geometry, zero host resize code).')
+	// left region by ~180px; the native preview slot (minus CSS margins) tracks it.
+	const previewDelta = before && after ? before.width - after.width : 0
+	const previewTracked = previewDelta > 100 && previewDelta < 260 // ~180 expected, generous band
+	log('PROOF2: native preview widthΔ =', String(previewDelta), '(expect ~180; band 100..260)')
+	if (previewTracked) {
+		log('✅ native slot following: the native preview WCV tracked the dock slot rect (renderer-driven geometry, zero host resize code).')
 	} else {
-		log('❌ native simulator block did NOT follow the dock slot resize.')
+		log('❌ native preview block did NOT follow the dock slot resize.')
 	}
 
 	if (process.env.DECK_DEMO_PROFILE === '1') {
@@ -1182,40 +1182,40 @@ async function runVerification(mainWin) {
 	}
 
 	// ── PROOF 3: serialize / restore ──────────────────────────────────────────
-	// Move 'logs' to the left group (cross-group move via the model API), then
+	// Move 'output' to the left group (cross-group move via the model API), then
 	// serialize → teardown → parse+validate → rebuild fresh. Assert the restored
-	// DOM reflects the persisted tree: g-right active was 'logs' before the move;
-	// after the move 'logs' lives in g-left. The restored tree must preserve that
-	// 'logs' is in g-left and that the previously-activated state round-tripped.
+	// DOM reflects the persisted tree: g-right active was 'output' before the move;
+	// after the move 'output' lives in g-left. The restored tree must preserve that
+	// 'output' is in g-left and that the previously-activated state round-tripped.
 	log('── PROOF 3: serialize / restore ──')
-	// First restore the simulator slot to a sane width so re-mount re-anchors.
+	// First restore the preview slot to a sane width so re-mount re-anchors.
 	await js(`window.__deck.setHostWidth(900)`)
 	await sleep(200)
-	// move logs into the left group (so the persisted tree differs from default).
-	await js(`window.__deck.moveLogsLeft()`)
+	// move output into the left group (so the persisted tree differs from default).
+	await js(`window.__deck.moveOutputLeft()`)
 	await sleep(200)
-	const preLogsInLeft = await js(
-		`!!document.querySelector('[data-deck-group="g-left"] [data-deck-tab="logs"]')`,
+	const preOutputInLeft = await js(
+		`!!document.querySelector('[data-deck-group="g-left"] [data-deck-tab="output"]')`,
 	)
 	const persistedJson = await js(`window.__deck.serializeLayout(window.__deck.model().get())`)
-	log('PROOF3: pre-restore — logs tab in g-left:', String(preLogsInLeft))
+	log('PROOF3: pre-restore — output tab in g-left:', String(preOutputInLeft))
 	log('PROOF3: serialized tree:', persistedJson)
 
 	const restore = await js(`window.__deck.serializeRestore()`)
 	if (!restore.ok) {
-		log('PROOF3: parseLayout/validateTree FAILED:', JSON.stringify(restore.problems))
+		log('PROOF3: parseLayout/collectTreeProblems FAILED:', JSON.stringify(restore.problems))
 		log('❌ serialize/restore: validation rejected the persisted tree.')
 	} else {
 		await sleep(400)
-		const postLogsInLeft = await js(
-			`!!document.querySelector('[data-deck-group="g-left"] [data-deck-tab="logs"]')`,
+		const postOutputInLeft = await js(
+			`!!document.querySelector('[data-deck-group="g-left"] [data-deck-tab="output"]')`,
 		)
-		const postSimSlot = await js(
-			`!!document.querySelector('[data-deck-native-slot="simulator"]')`,
+		const postPreviewSlot = await js(
+			`!!document.querySelector('[data-deck-native-slot="preview"]')`,
 		)
-		log('PROOF3: post-restore — logs tab in g-left:', String(postLogsInLeft), '| native slot present:', String(postSimSlot))
-		if (postLogsInLeft && postSimSlot) {
-			log('✅ serialize/restore: persisted tree round-tripped through serializeLayout→parseLayout→validateTree and the rebuilt DockView reflects it (logs in g-left, native slot intact).')
+		log('PROOF3: post-restore — output tab in g-left:', String(postOutputInLeft), '| native slot present:', String(postPreviewSlot))
+		if (postOutputInLeft && postPreviewSlot) {
+			log('✅ serialize/restore: persisted tree round-tripped through serializeLayout→parseLayout→collectTreeProblems and the rebuilt DockView reflects it (output in g-left, native slot intact).')
 		} else {
 			log('❌ serialize/restore: restored DOM did NOT reflect the persisted tree.')
 		}

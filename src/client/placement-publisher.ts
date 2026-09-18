@@ -23,8 +23,8 @@ export interface PlacementPublisherDeps<Extra = unknown> {
   publish: (snapshot: PlacementSnapshot<Extra>) => void
   // Injectable for tests; default to a MessageChannel-based post-task (see
   // createDefaultScheduler below).
-  requestFrame?: (cb: () => void) => number
-  cancelFrame?: (id: number) => void
+  schedulePublish?: (cb: () => void) => number
+  cancelScheduledPublish?: (id: number) => void
 }
 
 export interface PlacementPublisher<Extra = unknown> {
@@ -49,19 +49,19 @@ export function createPlacementPublisher<Extra = unknown>(
   // a later callback harmless, so a no-op cancel is the safe fallback. A
   // cancel-only injection is ignored because its scheduler did not issue the id.
   const defaultScheduler = getDefaultScheduler()
-  const requestFrame = deps.requestFrame ?? defaultScheduler.request
-  const cancelFrame = deps.requestFrame === undefined ? defaultScheduler.cancel : (deps.cancelFrame ?? ((): void => {}))
+  const schedulePublish = deps.schedulePublish ?? defaultScheduler.request
+  const cancelScheduledPublish = deps.schedulePublish === undefined ? defaultScheduler.cancel : (deps.cancelScheduledPublish ?? ((): void => {}))
   const readGeneration =
     typeof deps.generation === 'function' ? deps.generation : (): number => deps.generation as number
 
   const views = new Map<string, DesiredView<Extra>>()
   let dirty = false
   let frameId: number | null = null
-  // `armed` is set the instant a frame is requested, before requestFrame()
-  // returns — so a requestFrame that invokes its callback SYNCHRONOUSLY
+  // `armed` is set the instant a frame is requested, before schedulePublish()
+  // returns — so a schedulePublish that invokes its callback SYNCHRONOUSLY
   // (as an injected test double may) still sees the schedule as taken and
   // won't recurse. `frameId` alone can't do this: flush() clears it to null
-  // BEFORE schedule()'s `frameId = requestFrame(flush)` assignment lands,
+  // BEFORE schedule()'s `frameId = schedulePublish(flush)` assignment lands,
   // so that assignment would stomp it back to non-null forever, silently
   // wedging every future set()/remove() as "already scheduled".
   let armed = false
@@ -73,7 +73,7 @@ export function createPlacementPublisher<Extra = unknown>(
     armed = true
     let id: number
     try {
-      id = requestFrame(flush)
+      id = schedulePublish(flush)
     } catch (error) {
       // A scheduler failure must leave the dirty level available for retry.
       if (frameId === null) armed = false
@@ -122,7 +122,7 @@ export function createPlacementPublisher<Extra = unknown>(
       if (disposed) return
       disposed = true
       if (armed) {
-        if (frameId !== null) cancelFrame(frameId)
+        if (frameId !== null) cancelScheduledPublish(frameId)
         armed = false
         frameId = null
       }

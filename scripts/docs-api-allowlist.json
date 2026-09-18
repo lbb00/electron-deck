@@ -23,10 +23,12 @@
 
   "_host_example_types": "Host-authored example type aliases in the docs' sample config (e.g. `export type HostServices = typeof hostServices`) — illustrative, defined by the downstream host, not exported by this package.",
   "HostServices": true,
-  "SimulatorApis": true,
 
   "_doc_local_type_params": "Single/short type-parameter and example identifiers local to a code snippet (generics, example component names, app name literals) — not package exports.",
   "HS": true,
   "EV": true,
-  "My": true
+  "My": true,
+
+  "_dock_react_props": "Required callback props on DockViewProps from electron-deck/dock-react that match the VERB regex pattern.",
+  "bindNativeSlot": true
 }

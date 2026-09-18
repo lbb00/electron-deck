@@ -1,6 +1,8 @@
-# electron-deck
+<p align="center">
+  <img src="https://raw.githubusercontent.com/lbb00/electron-deck/main/assets/banner.svg" alt="electron-deck — native views always draw over the DOM; the main process plans that stack" width="820">
+</p>
 
-> Window and view orchestration for Electron: dockable panels whose native WebContentsViews follow the DOM, behind a single `electronDeck(config)` entry.
+> Host-shell framework for Electron: multi-window orchestration, native WebContentsViews that follow the DOM, overlays, popouts and cross-process IPC behind one `electronDeck(config)` entry — plus a browser-only dock layout engine.
 
 [![npm version](https://img.shields.io/npm/v/electron-deck)](https://www.npmjs.com/package/electron-deck)
 [![npm downloads](https://img.shields.io/npm/dm/electron-deck)](https://www.npmjs.com/package/electron-deck)
@@ -27,7 +29,7 @@ Every claim here has a command that reproduces it:
 - **Native views track the DOM within about 1 ms** — the placement publisher coalesces every `set`/`remove` of a render step into one IPC publish, scheduled as a post-render task instead of the next animation frame. `DECK_DEMO_LAG=1 pnpm run examples:dockable` drives a real pointer drag of a split handle and reports the lag of the native view behind its DOM slot (median 0.9 ms over 152 samples here, p95 2.2 ms; forcing the same drag back onto `requestAnimationFrame` moves the median to 16.9 ms — one full frame).
 - **Bundle size is ratcheted** — `pnpm run check:bundle-size` bundles a consumer for every public entry with esbuild and fails when an entry has no reviewed baseline or its gzip size grows more than 5% past `scripts/bundle-size.baseline.json`. `pnpm run check:tree-shaking` verifies that importing only `createInitialState` from `electron-deck/layout` shakes out its layout siblings, yielding a bundle of about 100 B gzip instead of the whole 5 KB entry; its root-entry case separately checks that `dock-react` stays outside the root dependency graph. Both run in `prepack`.
 - **Window cleanup is regression-tested** — `pnpm exec vitest run src/internal/deck-app.memory-regression.test.ts` cycles windows and views in a fake Electron runtime, forces GC, and checks that the closed objects are collectible and heap growth stays below 1 MB. This tests `DeckApp` retention, not native Electron memory.
-- **The main-process frame path is cheap** — `pnpm bench` measures `cleanSnapshot → reconcile → dispatchOps` per frame; expect a few microseconds per frame for a dozen views, and treat single runs as noisy.
+- **The main-process frame path is cheap** — `pnpm bench` measures `authorizeSnapshot → reconcile → applyReconciledPlacements` per frame; expect a few microseconds per frame for a dozen views, and treat single runs as noisy.
 
 ## Installation
 
@@ -37,7 +39,7 @@ pnpm add electron-deck
 npm install electron-deck
 ```
 
-`electron` (`^43.2.0`) is an optional peer dependency — browser-only consumers of `/layout` and `/dock-react` don't need it. React ≥ 18 is required for `/dock-react`.
+`electron` (`>=30.5.1`, the first line with `WebContentsView`; CI runs the e2e on both that floor and the version in `devDependencies`) is an optional peer dependency — browser-only consumers of `/layout` and `/dock-react` don't need it. React ≥ 18 is required for `/dock-react`.
 
 ## Quick start
 
@@ -51,40 +53,40 @@ import { electronDeck } from 'electron-deck'
 import { myBackend } from './my-backend.js'
 
 electronDeck({ backend: myBackend }).catch((err) => {
-  console.error(err)
-  process.exit(1)
+	console.error(err)
+	process.exit(1)
 })
 ```
 
 The framework waits for `app.whenReady()`, wires the transport, and enforces the trust boundary; you only assemble your domain (real context, main window content, views, IPC modules). Set `ownsWindows: true` when the backend owns the main window completely.
 
-> **Don't `await electronDeck()` at the top level of your main module.** Electron only fires `whenReady` after the main module finishes evaluating, so a top-level await deadlocks. Use `.catch(...)`, or `startElectronDeck()` which gates on `whenReady()` internally.
+> **Don't `await electronDeck()` at the top level of your main module.** Electron only fires `whenReady` after the main module finishes evaluating, so a top-level await deadlocks. Use `.catch(...)` instead. `startElectronDeck()` returns its handle synchronously, so the call itself never blocks module evaluation — but `await handle.ready` at the top level deadlocks identically to `await electronDeck()`; defer that await into an event handler or other post-ready code.
 
 ### Window-internal docking only
 
 `electron-deck/layout` is a pure-TypeScript layout-as-data engine; `electron-deck/dock-react` is its `<DockView>` React renderer. Both work in plain-browser web projects.
 
-- The layout is a serializable tree of `SplitNode` / `TabGroupNode` nodes. `movePanel`, `splitPanel`, `closePanel`, `insertPanel`, `setActive`, `setSizes` and `setConstraint` are its mutations; `serializeLayout` / `parseLayout` / `validateTree` handle persistence; `createLayoutModel` is the observable single-writer model.
+- The layout is a serializable tree of `SplitNode` / `TabGroupNode` nodes. `movePanel`, `splitPanel`, `closePanel`, `insertPanel`, `setActive`, `setSizes` and `setConstraint` are its mutations; `serializeLayout` / `parseLayout` / `collectTreeProblems` handle persistence; `createLayoutModel` is the observable single-writer model.
 - Split children can carry a `SizeConstraint`: `fixedPx` pins a size, `minPx` sets a floor the user can still drag upward.
-- Panel descriptors can carry `PanelCapabilities` (`draggable` / `dropPolicy` / `closable` / `hideTab`) that constrain dragging and closing; `computeReorderIndex` is the accompanying pure geometry function.
+- Panel descriptors can carry `PanelCapabilities` (`draggable` / `acceptsDrops` / `dropPolicy` / `closable` / `hideTab`) that constrain dragging and closing; `computeReorderIndex` is the accompanying pure geometry function.
 
 Runnable examples live in [examples/layout-demo](./examples/layout-demo) and [examples/dockable-demo](./examples/dockable-demo).
 
 ## Entry points
 
-| What you need | Import from |
-|---|---|
-| `electronDeck` entry, `DeckConfig` / `RuntimeBackend` types | `electron-deck` |
-| Main-process assembly utilities | `electron-deck/main` |
-| Host-side control-bus / capability / trust primitives | `electron-deck/host` |
-| Preload bridge `exposeDeckBridge()` | `electron-deck/preload` |
-| Renderer client `createDeckClient<HS, EV>()` | `electron-deck/client` (`/client/browser` is an alias) |
-| Layout-as-data engine + panel registry | `electron-deck/layout` |
-| `<DockView>` + `computeReorderIndex` | `electron-deck/dock-react` |
+| What you need                                               | Import from                                            |
+| ----------------------------------------------------------- | ------------------------------------------------------ |
+| `electronDeck` entry, `DeckConfig` / `RuntimeBackend` types | `electron-deck`                                        |
+| Main-process assembly utilities                             | `electron-deck/main`                                   |
+| Host-side control-bus / capability / trust primitives       | `electron-deck/host`                                   |
+| Preload bridge `exposeDeckBridge()`                         | `electron-deck/preload`                                |
+| Renderer client `createDeckClient<HS, EV>()`                | `electron-deck/client` (`/client/browser` is an alias) |
+| Layout-as-data engine + panel registry                      | `electron-deck/layout`                                 |
+| `<DockView>` + `computeReorderIndex`                        | `electron-deck/dock-react`                             |
 
 ## Experimental: declarative assembly
 
-A higher-level declarative surface exists via `startElectronDeck()` with top-level config (`hostServices` / `events` / `toolbar`) and high-level runtime APIs (`runtime.windows` / `runtime.view` / `runtime.scopes` / `runtime.grants`):
+A higher-level declarative surface exists via `startElectronDeck()` with top-level config (`hostServices` / `events`) and high-level runtime APIs (`runtime.windows` / `runtime.view` / `runtime.scopes`):
 
 ```ts
 import { startElectronDeck, defineEvent } from 'electron-deck'
@@ -92,13 +94,13 @@ import { startElectronDeck, defineEvent } from 'electron-deck'
 const authChanged = defineEvent<{ user: { id: string } | null }>('authChanged')
 
 startElectronDeck({
-  app: { name: 'My Host' },
-  hostServices: { getUser: async () => ({ user: null }) },
-  events: [authChanged],
+	app: { name: 'My Host' },
+	hostServices: { getUser: async () => ({ user: null }) },
+	events: [authChanged],
 })
 ```
 
-It currently has no production consumers outside this repo's examples — treat it as `@experimental`: signatures may change and it has not been validated under non-demo workloads. Its one concrete advantage over `electronDeck()` is internal `whenReady()` gating, so it can be called at the top level of a main module.
+It currently has no production consumers outside this repo's examples — treat it as `@experimental`: signatures may change and it has not been validated under non-demo workloads. Its one concrete advantage over `electronDeck()` is that the call itself returns synchronously, so it never blocks module evaluation — but awaiting `handle.ready` still has to happen after top-level evaluation finishes, same as `electronDeck()`.
 
 ## Documentation
 

@@ -42,7 +42,10 @@ const srcRoot = join(pkgRoot, 'src')
  * consuming applications and are out of reach here; only docs shipped with
  * this package can be gated.
  */
-const DOC_FILES = [join(pkgRoot, 'README.md')]
+const DOC_FILES = [
+	join(pkgRoot, 'README.md'),
+	join(pkgRoot, 'README.zh-CN.md'),
+]
 
 const ALLOWLIST_FILE = join(here, 'docs-api-allowlist.json')
 

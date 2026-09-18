@@ -10,20 +10,21 @@
 
 - `src/internal/wire-transport.ts`
   - `handleInvoke` 持有 senderId + frame，做 trust 闸 + main-frame 闸；通过后构造
-    `InvokeCtx` 携 senderId 下传到 `invokeHost(name, args, ctx)` /
-    `invokeSimulator(name, args, ctx)`。
+    `InvokeCtx` 携 senderId 下传到 `invokeHost(name, args, ctx)`。
 - `src/host/control-bus.ts`
   - `dispatch(name, args, ctx)` 查 command 表后判 grant 闸，再 `handler(...args)`。
-    生产接线：deck-app 把 `invokeHost = (name, args, ctx) => controlBus.dispatch(name, args, ctx)`。
+    生产接线由**host 自己**在 `backend.assemble` 里做（`invokeHost = (name, args, ctx) => controlBus.dispatch(name, args, ctx)`）——deck-app 不接线 ControlBus。
 - `src/internal/trust-set.ts`
   - refcount 成员集；`isTrusted(id)` 扫 `wc.id`。它**只回答「可不可信」，不回答「可不可调某 command」**——后者是 grant 闸的事。
 - `src/main/scope.ts`
   - 嵌套寿命 + 完成栅栏；`on('reset'|'closed', cb)` = generation 边界。
     reset = 软复用（导航/关项目），closed = 终结（关窗/销毁）。**grant 撤销挂这两个事件。**
 - `src/internal/deck-app.ts`
-  - 每个受信 wc 有一个 per-wc Scope（wcScope），随该 wc 销毁而 `closed`。grant 默认挂这个 wcScope。
+  - 每个受信 wc 有一个 per-wc Scope（wcScope），随该 wc 销毁而 `closed`；这是 grant 若要
+    拿到 wc.id 复用安全时 `senderScope` 该绑的目标，但 deck-app.ts 不把它自动接给
+    grant（没有 `runtime.grants` 便捷包装）。
 - `view-anchor/src/view-anchor.ts`
-  - `createPlacementAnchor(target, { visible, publish })`：renderer 侧测量 + `publish(Placement)`。
+  - `createViewAnchor(target, { visible, publish })`：renderer 侧测量 + `publish(Placement)`。
     `publish` 本身不带 slot 身份——slot 身份由 control-layer 的 IPC 适配层（`createDeckLayoutClient`）在 sink 闭包里拼上 slotToken（见「anchor slotToken 原子下发」）。
   - bounds 的 x/y 允许负（`clampRect` 只 clamp width/height ≥0）——滚动跟随合法，slot 上报校验**不得**把负 x/y 当非法丢弃。
 
@@ -38,10 +39,10 @@ wire 已持有的 sender 身份经 `InvokeCtx` 贯穿到 dispatch：
 ```ts
 // InvokeCtx（host/index.ts 导出）
 export interface InvokeCtx {
-  /** 发起 invoke 的 webContents id（wire 已做 trust + main-frame 闸后才到这）。 */
-  readonly senderId: number
-  /** 发起的帧引用，main-frame 已校验；保留给未来按 frame 细分用，可为 null。 */
-  readonly senderFrame: FrameRef | null
+	/** 发起 invoke 的 webContents id（wire 已做 trust + main-frame 闸后才到这）。 */
+	readonly senderId: number
+	/** 发起的帧引用，main-frame 已校验；保留给未来按 frame 细分用，可为 null。 */
+	readonly senderFrame: FrameRef | null
 }
 ```
 
@@ -49,8 +50,7 @@ export interface InvokeCtx {
 
 ```ts
 // WireTransportDeps
-invokeHost:      (name: string, args: readonly JsonValue[], ctx: InvokeCtx) => Promise<JsonValue>
-invokeSimulator: (name: string, args: readonly JsonValue[], ctx: InvokeCtx) => Promise<JsonValue>
+invokeHost: (name: string, args: readonly JsonValue[], ctx: InvokeCtx) => Promise<JsonValue>
 
 // ControlBus
 dispatch(name: string, args: readonly JsonValue[], ctx: InvokeCtx): Promise<JsonValue>
@@ -62,50 +62,49 @@ number、frame 已是 main-frame，构造点天然 fail-closed）：
 ```ts
 // wire-transport.ts handleInvoke 内，闸之后：
 const ctx: InvokeCtx = { senderId, senderFrame: senderFrame ?? null }
-const result = await this.deps.invokeHost(req.name, req.args, ctx)   // simulator 同理
+const result = await this.deps.invokeHost(req.name, req.args, ctx)
 ```
 
 ctx **必填**（无 `ctx?` 可选默认）：🔒 这是安全边界，可选默认会让忘传 ctx 的调用点静默退化成「无 sender 上下文」——把丢 senderId 的漏判从编译错误降级成运行时漏判。`ControlBus.dispatch` 的闸必须拿到真 senderId 才能判 grant。
 
 ### 两条 invoke 路由的硬边界
 
-deck-app 有**两条 invoke 路由**：
+`WireTransportDeps.invokeHost` 这个接线点支持**两种接法**：
 
-- **默认路由**：`invokeHost = (name, args, ctx) => ipc.invoke(HOST_PREFIX+name, ...args)`，走 `InMemoryTypedIpcRegistry`，承载声明式 `hostServices` / `simulatorApis`。**只做 trust 闸，没有 grant 闸**——「trusted 即可调」。
-- **ControlBus 路由**：`invokeHost = (name, args, ctx) => controlBus.dispatch(name, args, ctx)`，承载布局/特权 command。grant 闸**只在这条**。
+- **默认路由**：`invokeHost = (name, args, ctx) => ipc.invoke(HOST_PREFIX+name, ...args)`，走 `InMemoryTypedIpcRegistry`，承载声明式 `hostServices`。**只做 trust 闸，没有 grant 闸**——「trusted 即可调」。deck-app.ts 自己的运行时（`bindWireTransport`）目前**只固定用这一条**——它不再有把 `invokeHost` 换成 ControlBus 分支的配置面（没有 `runtime.layout.command` 那层接线了）。
+- **ControlBus 路由**：`invokeHost = (name, args, ctx) => controlBus.dispatch(name, args, ctx)`，承载布局/特权 command，grant 闸**只在这条**。这是 host 自己用 `WireTransport` + `createControlBus`（+ 可选 `createCapabilityRegistry` 的 policy）独立装配时才会接上的路由，deck-app.ts 的 runtime 工厂不提供。
 
 两条路由签名都带 ctx（默认路由把 ctx 收下不用）。
 
-> 🔒 **硬不变量—— 布局/特权 command 必须唯一经 ControlBus**：grant 闸**只存在于 `ControlBus.dispatch`**。任何**布局/特权 command**（`layout.*` 等驱动原生 view / 寿命 / 跨窗的动作）**必须**经 ControlBus 注册并 dispatch，**禁止**注册进普通 `hostServices` / `InMemoryTypedIpcRegistry`（那条路由没有 grant 闸）。特权名若误进默认路由 = **grant 授权闸被完全绕过**（任何受信 control 层都能调，越权）。两条路由的边界在接线处写死，特权名永不落进普通 hostServices。与 `architecture.md` 中 ControlBus 必经路由的硬约束一致。
+> 🔒 **硬不变量—— 布局/特权 command 必须唯一经 ControlBus**：grant 闸**只存在于 `ControlBus.dispatch`**。谁若自己装配 `WireTransport` 来承载**布局/特权 command**（`layout.*` 等驱动原生 view / 寿命 / 跨窗的动作），就**必须**经 ControlBus 注册并 dispatch，**禁止**注册进普通 `hostServices` / `InMemoryTypedIpcRegistry`（那条路由没有 grant 闸）。特权名若误进默认路由 = **grant 授权闸被完全绕过**（任何受信 control 层都能调，越权）。两条路由的边界在接线处写死，特权名永不落进普通 hostServices。与 `architecture.md` 中 ControlBus 必经路由的硬约束一致。
 
 ### grant 强制闸（数据形状 + 插点）
 
-**grant 数据形状**（`host/capability.ts`，挂在 sender wcScope 上）：
+**grant 数据形状**（`host/capability.ts`，通用基础设施，经 `electron-deck/host` 导出）：
 
 ```ts
 export interface Grant {
   /** 被授权的 sender：control-layer renderer 的 webContents id。 */
   readonly senderId: number
-  /** grant 寿命：随这棵 Scope 的 reset/closed 自动撤（= sender 的 wcScope）。 */
+  /** grant 寿命：随这棵 Scope 的 reset/closed 自动撤。由调用方在构造 Grant 时自己
+   *  提供——deck-app.ts 没有便捷包装替 host 把某个 wc 的 wcScope 自动填进来。 */
   readonly senderScope: Scope
-  /** 可选授权边界，保留给未来 per-target view-command 检查；当前 grant 闸只按
-   *  (senderId, command-name) 判，targetScope 不参与 dispatch。 */
-  readonly targetScope?: Scope
   /** 白名单 command 名集合（精确匹配，default-deny）。 */
   readonly commands: ReadonlySet<string>
 }
 
-// runtime 面：
-runtime.grants.issue(controlWc, { commands: ['layout.resize', ...], targetScope? }): Disposable
-//   senderScope 由框架从 controlWc 的 wcScope 自动填（host 不传）。
+// host 面：
+const { policy, issue } = createCapabilityRegistry()
+issue({ senderId, senderScope, commands: new Set(['layout.resize', ...]) }): Disposable
+//   senderScope 由 host 自己传（通常绑一个随该 sender 死亡而 reset/closed 的 Scope）。
 ```
 
 **policy 接口**（ControlBus 注入，default-deny）：
 
 ```ts
 export interface CapabilityPolicy {
-  /** true 仅当存在一条 live grant：senderId 命中 且 name ∈ commands。 */
-  allows(senderId: number, name: string): boolean
+	/** true 仅当存在一条 live grant：senderId 命中 且 name ∈ commands。 */
+	allows(senderId: number, name: string): boolean
 }
 ```
 
@@ -131,8 +130,10 @@ trust 闸，是叠在其上的第二道。
 
 > **policy 是否注入**：`createControlBus` 加可选 `policy?: CapabilityPolicy` dep。
 > **不注入 policy ⇒ 闸不存在 ⇒ 维持当前「trusted 即可 dispatch」行为**（向后兼容：
-> 现有只用 `command()` 注册普通 RPC 的 host 不受影响）。只有声明了 grants 的 host 才注入。
-> ⚠️ 取舍：default 不注入=不闸，是为兼容；但一旦 host 用 `runtime.grants`，未被任何
+> 现有只用 `command()` 注册普通 RPC 的 host 不受影响）。只有自己用
+> `createCapabilityRegistry()` 建 grant、并把它的 `policy` 传进 `createControlBus` 的
+> host 才有这道闸。
+> ⚠️ 取舍：default 不注入=不闸，是为兼容；但一旦 host 接了 policy，未被任何
 > grant 覆盖的 command 必须 default-deny（policy 内部 default-deny，不是「没 policy 就放行」）。
 
 **错误码** `DECK_FORBIDDEN`（`wire-transport.ts` 的 `DECK_CODE.Forbidden`）：抛
@@ -142,33 +143,37 @@ fail-closed 序列化复用 `DeckRemoteError` 的保真路径，无新增帧逻�
 
 ### grant 绑 Scope generation（自动撤销）
 
-`runtime.grants.issue(controlWc, { commands, targetScope? })` 内部：
+`createCapabilityRegistry().issue(grant)`（`host/capability.ts`）内部：
 
-1. 把 grant 加进 policy 的活跃集合（按 senderId 索引）；senderScope = controlWc 的 wcScope。
-2. **订阅 senderScope 的两个事件**自动撤：
+1. 把 grant 加进 policy 的活跃集合（按 senderId 索引）。
+2. **订阅 `grant.senderScope` 的两个事件**自动撤：
    ```ts
-   const off1 = senderScope.on('reset',  () => revoke(grant))   // 导航/关项目 → 旧授权失效
-   const off2 = senderScope.on('closed', () => revoke(grant))   // 关窗/销毁 → 失效
+   const off1 = grant.senderScope.on('reset', () => revoke(grant)) // 导航/关项目 → 旧授权失效
+   const off2 = grant.senderScope.on('closed', () => revoke(grant)) // 关窗/销毁 → 失效
    ```
    `revoke` = 从 policy 活跃集移除 + dispose 这两个订阅。`issue` 返回的 Disposable 也调
    `revoke`（host 手动提前撤）。
-3. **wc.id 复用安全** 🔒：grant 按 `senderId` 命中。closed 后若 wc.id 被新窗口复用而 grant
-   未撤，新窗口会继承旧授权。grant 挂在随该 wc 销毁而 `closed` 的 wcScope 上、`on('closed')`
-   自动撤，是关掉这个洞的方式。
+3. **wc.id 复用安全** 🔒：grant 按 `senderId` 命中。若 host 把 `senderScope` 绑到一个随
+   该 wc 销毁而 `closed` 的 Scope，`on('closed')` 自动撤就关掉了「wc.id 被新窗口复用、
+   继承旧授权」这个洞——这是 `senderScope` 该怎么绑的**要求**，不是 registry 不问来源
+   就自动保证的。
 
-每个受信 wc 有一个 per-wc Scope（wcScope）：window/view 装配时为其 control wc 建，`win.on('closed')`
-里 `void wcScope.close()`，导航软复用（同 wc 重新 load）时 `wcScope.reset()`。`runtime.grants.issue`
-默认把 grant 挂这个 wcScope；grant 与 view 寿命统一在同一棵 Scope 树。wc.id-复用安全是框架级
-安全属性，由框架保证、不外包给 host。
+`unified-lifetime.md` §3 的 per-wc wcScope（window/view 装配时为其 control wc 建，
+`win.on('closed')` 里 `void wcScope.close()`，导航软复用时 `wcScope.reset()`）具备正好
+匹配的 generation 语义，但 deck-app.ts 没有把它作为公开句柄暴露给 host，也不再有便捷
+包装自动把它填进 Grant——`capability.ts` 的 registry 是独立于 deck-app.ts 的通用基础
+设施，`senderScope` 绑谁由调用方决定。wc.id-复用安全因此是**调用方按上面的绑法换来的
+属性**，不是框架不问 senderScope 来源就自动给的保证。
 
 🧪 需实证：navigate（reset）/ 关窗（closed）后，旧 grant 的 command 被 `DECK_FORBIDDEN`
-拒；wc.id 复用场景（关一个窗再开一个拿到同 id）下新窗口**不**继承旧 grant。
+拒；wc.id 复用场景（关一个窗再开一个拿到同 id）下新窗口**不**继承旧 grant（前提：
+senderScope 确实绑对了该 wc 的生命周期）。
 
 ---
 
 ## anchor slotToken 原子下发
 
-slotToken 解决两件事：(a) 区分同一 control wc 上的多个原生 view 占位（#simulator / #panel
+slotToken 解决两件事：(a) 区分同一 control wc 上的多个原生 view 占位（#preview / #panel
 各一个 slot）；(b) 防一个 renderer 谎报另一个 slot 的 bounds 把别人的 view 挪走。`publish(Placement)`
 本身不带 slot 身份，所以靠下发握手补上身份，并消除「view 已建、renderer 还没拿到身份就 measure」
 的一帧空窗。
@@ -183,24 +188,24 @@ slotToken 解决两件事：(a) 区分同一 control wc 上的多个原生 view 
 ```ts
 // 主进程为每个原生 view 创建时生成
 interface SlotGrant {
-  readonly viewId: string      // Compositor 的 NativeViewRef.id
-  readonly slotId: string      // DOM 占位 id（'#simulator'），renderer 用来定位 target
-  readonly slotToken: string   // 不可猜 nonce（crypto 随机），主进程私存 token→(viewId, 授权 wc, zone)
-  readonly generation: number  // 主进程分配、per-wc 单调；stamp 进每帧 snapshot，reload 时更高 generation 重置主进程 reconciler
+	readonly viewId: string // Compositor 的 NativeViewRef.id
+	readonly slotId: string // DOM 占位 id（'#preview'），renderer 用来定位 target
+	readonly slotToken: string // 不可猜 nonce（crypto 随机），主进程私存 token→(viewId, 授权 wc, zone)
+	readonly generation: number // 主进程分配、per-wc 单调；stamp 进每帧 snapshot，reload 时更高 generation 重置主进程 reconciler
 }
 ```
 
 握手时序（与 view 创建**原子**）：
 
 ```
-主进程 runtime.view({...}).placeIn(controlWc, { anchor:'#simulator' })
+主进程 runtime.view({...}).placeIn(controlWc, { anchor:'#preview' })
   1. Compositor 分配 viewId；生成 slotToken（nonce）
   2. 主进程私表登记： token → { viewId, authorizedWcId: controlWc.id, zone }
   3. 主进程 controlWc.send('__deck:slot-grant', { viewId, slotId, slotToken, generation })   ← push，不等 renderer 问
   ──────────────────────────────────────────────────────────────────────────
 renderer（control-layer, createDeckLayoutClient）
   4. 启动即订阅 '__deck:slot-grant'（在任何 measure 之前）
-  5. 收到 grant → 用 slotId 定位 DOM target → createPlacementAnchor(target, { ... })
+  5. 收到 grant → 用 slotId 定位 DOM target → createViewAnchor(target, { ... })
      anchor 的 publish 写进一个 **中央 placement publisher**（不是每 view 直接 IPC）
   6. publisher 每帧把所有 anchor 的最新测量合并成 **一个窗口级 snapshot**，
      每 view 带上自己 slot 的 token 作为 extra：
@@ -224,13 +229,13 @@ renderer（control-layer, createDeckLayoutClient）
 > 后拼进帧——**放在 view-anchor 包之外**：view-anchor 仍是 engine-agnostic 的纯测量器（publish
 > 是注入的 sink，它不认识 token），保住「不认识 Electron / 不认识协议」的契约。
 
-### slot 上报校验（clean → reconcile → dispatch）
+### slot 上报校验（authorize → reconcile → dispatch）
 
 主进程收到 `{ generation, epoch, views:[...] }` 的 snapshot IPC handler（trusted + main-frame
 闸之上，复用 wire 那套）后走三步纯函数（`src/layout/snapshot-reconcile.ts` + `placement-reconcile.ts`）：
 
 ```
-1. cleanSnapshot(raw, authorize)：逐 view 授权 + 清洗成可信 CleanSnapshot——
+1. authorizeSnapshot(raw, authorize)：逐 view 授权 + 清洗成可信 CleanSnapshot——
    a. 查私表 token → { viewId, authorizedWcId, zone }；查不到 → 丢弃该 view。
    b. 🔒 sender wc 匹配： senderId === authorizedWcId ？否则丢弃该 view（越权：B 谎报 A 的 slot）。
    c. viewId / layer(zone) **取自私表，绝不取 renderer 上报的字段**（有效 token 不能拼到伪 viewId 上毒化 key）。
@@ -239,10 +244,10 @@ renderer（control-layer, createDeckLayoutClient）
    e. viewId 去重（保留第一个）。
    ⚠️ raw.views 非空但**全部授权失败 → 整个 snapshot 拒绝**（返回 null），绝不解释成「detach 全部」——
       否则一次 token 瞬时失效会把仍活着的 view 全撤掉。views 本就为空（renderer 主动移除全部）则正常 reconcile→detach。
-2. reconcile(perWcState, cleanSnapshot)：按整张 desired 表 diff 上次 actual → 有序 op 列表。
+2. reconcile(perWcState, clean)：按整张 desired 表 diff 上次 actual → 有序 op 列表。
    stale 规则：generation < 上次 → 拒；generation===上次 && epoch<=lastEpoch → 拒；generation>上次 → 重置重建。
    （level-triggered：丢/伪一帧自愈；单调 generation 让 reload 的低 generation 在途旧帧被拒。）
-3. dispatchOps → 每个受影响 view 调 ViewHandle.applyPlacement（visible:true setBounds / visible:false detach；
+3. applyReconciledPlacements → 每个受影响 view 调 ViewHandle.applyPlacement（visible:true setBounds / visible:false detach；
    Compositor 纯 z-order 按 zone，reorder op 在 deck 侧忽略）。
 ```
 
@@ -266,12 +271,12 @@ tab 切换用 `Placement{ visible:false }` 的 detach-but-keep-alive 保活（�
 
 逐 primitive 看「保活上界该进框架的哪一层」：
 
-| primitive | 职责 | 能管 keep-alive 上界吗 |
-|---|---|---|
-| **Layout / Placement (view-anchor)** | DOM↔native 几何缝合（measure→bounds） | ❌ 只懂位置，不懂「这个 view 活了多久、多久没显示」。`visible:false` 它只发一帧 detach，不持有 WebContents 寿命。 |
-| **Compositor** | z-order / mount-unmount 计划 | ❌ 只懂渲染顺序。`unmount` 已经是「这是新实例」语义（compositor.ts 头注），它不持有也不该决定 WebContents 该不该销毁。 |
-| **Scope** | 嵌套寿命 + 完成栅栏 | ⚠️ **懂寿命，但不懂「久未显示」**。Scope 的 close/reset 是**结构性**触发（关窗/导航/host 调用），它没有「最近使用时间」「可见性」这类**策略**输入。 |
-| **ControlBus** | RPC + event + trust | ❌ 与寿命正交。 |
+| primitive                            | 职责                                  | 能管 keep-alive 上界吗                                                                                                                              |
+| ------------------------------------ | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Layout / Placement (view-anchor)** | DOM↔native 几何缝合（measure→bounds） | ❌ 只懂位置，不懂「这个 view 活了多久、多久没显示」。`visible:false` 它只发一帧 detach，不持有 WebContents 寿命。                                   |
+| **Compositor**                       | z-order / mount-unmount 计划          | ❌ 只懂渲染顺序。`unmount` 已经是「这是新实例」语义（compositor.ts 头注），它不持有也不该决定 WebContents 该不该销毁。                              |
+| **Scope**                            | 嵌套寿命 + 完成栅栏                   | ⚠️ **懂寿命，但不懂「久未显示」**。Scope 的 close/reset 是**结构性**触发（关窗/导航/host 调用），它没有「最近使用时间」「可见性」这类**策略**输入。 |
+| **ControlBus**                       | RPC + event + trust                   | ❌ 与寿命正交。                                                                                                                                     |
 
 结论：**「N 个隐藏 tab 的上界」是一条策略（LRU / max-N / TTL），不是任何 primitive 的固有
 职责**。geometry 和 compositor 在设计上就不该碰寿命；Scope 管寿命但只认结构事件、不认
@@ -294,9 +299,9 @@ tab 切换用 `Placement{ visible:false }` 的 detach-but-keep-alive 保活（�
 
 ```ts
 runtime.view({
-  source,
-  scope: session,
-  keepAlive: { policy: 'lru', max: 6 },   // 可选；省略 = 框架不淘汰，纯 host 管
+	source,
+	scope: session,
+	keepAlive: { policy: 'lru', max: 6 }, // 可选；省略 = 框架不淘汰，纯 host 管
 })
 ```
 
@@ -320,6 +325,7 @@ LRU 作为一行 opt-in。不内建 TTL / 其它策略，避免 helper 变策略
 ## 附：安全攸关 / 待实证清单
 
 🔒 **安全攸关（设计/实现必须守的不变量）**
+
 - grant 闸：ctx 必填、闸层次 `trust → main-frame → grant` 不可换序、grant 闸 default-deny。
 - grant 寿命：grant 必挂会随 wc 销毁而 `closed` 的 Scope；wc.id 复用不得继承旧 grant。
 - slotToken：renderer 拿到 slotToken 前不上报；token→(viewId, 授权 wc) 私表 + sender wc 匹配；
@@ -327,14 +333,17 @@ LRU 作为一行 opt-in。不内建 TTL / 其它策略，避免 helper 变策略
 - tab 保活：keep-alive WebContents 必由 Scope `own()`，关窗/关项目连带销毁。
 
 🧪 **需真机 / e2e 实证（不能只看 typecheck/单测）**
+
 - grant 闸：一条真实 webview→main invoke 端到端带对 senderId；navigate/关窗后旧 grant 被
   `DECK_FORBIDDEN`；wc.id 复用不继承。
 - slotToken：多 slot 各自驱动；伪 token 越权被 drop；负 x/y 滚动跟随。
 - tab 保活：LRU 淘汰真销毁 WebContents；Scope 连带销毁无泄漏；无 keepAlive 时不淘汰。
 
 ## 附：实现时易错点
-1. **per-wc Scope 地基**：grant 绑定依赖「每个 control wc 有一个会随其销毁而 closed 的 wcScope」。
-   这块地基与 ViewHandle 共用，统一寿命见 `unified-lifetime.md`。
+
+1. **per-wc Scope 地基**：grant 若要拿到 wc.id 复用安全，`senderScope` 依赖「每个 control
+   wc 有一个会随其销毁而 closed 的 wcScope」这块地基（deck-app.ts 内部有，但未对 host
+   公开句柄）。这块地基与 ViewHandle 共用，统一寿命见 `unified-lifetime.md`。
 2. **两条 invoke 路由的边界**：grant 闸只在 `ControlBus.dispatch`。布局/特权 command 必须走
    ControlBus，禁止注册进默认路由的 `InMemoryTypedIpcRegistry`（声明式 hostServices），否则闸被
    绕过（见「两条 invoke 路由的硬边界」+ `architecture.md` 中 ControlBus 必经路由的硬约束）。边界在接线处写死。

@@ -77,10 +77,13 @@ export interface ViewHandle {
   /** Mount the native view into the target window (mount + commit) and adopt a
    *  per-placement viewScope under the target's `windowScope`. Chainable. */
   placeIn(target: PlaceTarget, opts: { zone?: number }): ViewHandle
-  /** The placement sink. Drops frames once disposed (idempotent late IPC).
-   *  `visible:true` ensures mounted + drives `setBounds` directly; `visible:false`
-   *  detaches (unmount + commit) but keeps the native view alive. */
-  applyPlacement(p: Placement): void
+  /** The placement sink. Drops frames once disposed (idempotent late IPC) or
+   *  while a moveTo is mid-migration, and returns `false` when it does —
+   *  callers doing bookkeeping alongside the sink must not treat a dropped
+   *  frame as applied. `visible:true` ensures mounted + drives `setBounds`
+   *  directly; `visible:false` detaches (unmount + commit) but keeps the
+   *  native view alive. */
+  applyPlacement(p: Placement): boolean
   /**
    * Cross-window move (view-handle.md「moveTo 跨窗迁移」/ compositor-and-teardown.md「moveTo 事务状态机」). Migrate the view from its
    * current placement (`src`) to `dest` as TWO independent Compositor commits,
@@ -369,11 +372,14 @@ export function createViewHandle(deps: ViewHandleDeps): ViewHandle {
 
     applyPlacement(p) {
       // Disposed / never-placed: drop the frame (idempotent late IPC).
-      if (!active || !current) return
+      // Returns whether the frame was ACCEPTED, so a caller doing bookkeeping
+      // alongside the sink (e.g. deck-app's keepAlive LRU) never treats a
+      // dropped frame as applied.
+      if (!active || !current) return false
       // Drop place frames while a moveTo is in flight.
       // Mid-migration `current` may point at dest while the source token is still
       // live — a stale source `place` must NOT drive setBounds during the move.
-      if (migrating) return
+      if (migrating) return false
       if (p.visible) {
         // Set bounds BEFORE mounting so a fresh attach composites at its correct
         // geometry (avoids the attach-then-resize flicker the reconciler's op order
@@ -401,6 +407,7 @@ export function createViewHandle(deps: ViewHandleDeps): ViewHandle {
         // Not on screen → no live rect.
         visibleBounds = null
       }
+      return true
     },
 
     moveTo(dest, opts) {

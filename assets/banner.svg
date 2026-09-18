@@ -1,0 +1,260 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="1200" height="540" role="img" aria-labelledby="t d">
+<title id="t">electron-deck</title>
+<desc id="d">Three layers of one Electron window, drawn as a stack. First, a screen-space cursor lifts the second DOM tab; it leaves its source and docks as a full-height panel over the right WebContentsView. Next, it drags the DOM splitter: its reserved slot and the WebContentsView above it resize as one rectangle, then briefly glow together. Finally, a purple popup visibly labelled Native overlay and WebContentsView appears above the native panels, showing why a DOM element could never cover one. The main process plans that order.</desc>
+
+<defs>
+  <radialGradient id="bg" cx="34%" cy="34%" r="82%">
+    <stop offset="0" stop-color="#191a26"/>
+    <stop offset="1" stop-color="#0d0e14"/>
+  </radialGradient>
+  <linearGradient id="glass" x1="0" y1="0" x2="0.4" y2="1">
+    <stop offset="0" stop-color="#89b4fa" stop-opacity="0.34"/>
+    <stop offset="1" stop-color="#2a4a7f" stop-opacity="0.24"/>
+  </linearGradient>
+  <filter id="cardShadow" x="-30%" y="-30%" width="170%" height="180%">
+    <feDropShadow dx="0" dy="26" stdDeviation="20" flood-color="#000" flood-opacity="0.55"/>
+  </filter>
+  <filter id="ovShadow" x="-30%" y="-30%" width="170%" height="180%">
+    <feDropShadow dx="0" dy="18" stdDeviation="13" flood-color="#000" flood-opacity="0.6"/>
+  </filter>
+
+  <style>
+    .sans { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+    /* Every animated element sits on a group that carries no transform
+       attribute of its own: a CSS transform there would replace the layer's
+       matrix instead of composing with it.
+
+       The projection shears x by 0.16 per unit of y, so over the 360-tall
+       plane a rect drifts 57.6 units sideways between its top and bottom
+       edges. That has to stay under the narrowest column's width — the DOM
+       group is 84 wide at its narrowest — or neighbouring columns overlap on
+       screen and the layer reads as a tangle of crossing outlines.
+
+       The splitter travels 44 plane units left, so the DOM group shrinks from
+       12..140 to 12..96 and the slot beside it grows from 152..346 to
+       108..346, its right edge pinned. Each scaleX is (new span / old span)
+       and each translateX is (new start - scale * old start). Dragging this
+       way keeps the native panels from ever getting narrower than their own
+       name.
+
+       .slotA drives two elements on two different layers: the empty slot in
+       the DOM and the WebContentsView sitting on it. One animation for both is
+       the point — the native view is not tracking the slot here, it is the
+       same rectangle drawn one layer up. The 8-second loop is three acts:
+       DOM tab docking (which leaves a full-height panel on its destination), synchronized
+       resize, then native-overlay stacking.
+       Helpers have an explicit opacity="0" too, so a non-animating SVG
+       renderer never leaks them at the origin. */
+    .drag  { animation: drag  8s ease-in-out infinite; }
+    .grp   { animation: grp   8s ease-in-out infinite; }
+    .slotA { animation: slotA 8s ease-in-out infinite; }
+    .ov    { animation: ov    8s ease-in-out infinite; }
+    .cursor { animation: cursor 8s ease-in-out infinite; }
+    .sourceTab { animation: sourceTab 8s ease-in-out infinite; }
+    .tabGhost { animation: tabGhost 8s ease-in-out infinite; }
+    .dockedPanel { animation: dockedPanel 8s ease-in-out infinite; }
+    .dropIndicator { animation: dropIndicator 8s ease-in-out infinite; }
+
+    @keyframes drag {
+      0%, 32%   { transform: translateX(0) }
+      46%, 50%  { transform: translateX(-44px) }
+      60%, 100% { transform: translateX(0) }
+    }
+    @keyframes grp {
+      0%, 32%   { transform: translateX(0) scaleX(1) }
+      46%, 50%  { transform: translateX(4.125px) scaleX(0.65625) }
+      60%, 100% { transform: translateX(0) scaleX(1) }
+    }
+    @keyframes slotA {
+      0%, 32%   { transform: translateX(0) scaleX(1); filter: none }
+      46%       { transform: translateX(-78.474px) scaleX(1.226804); filter: none }
+      48%, 50%  { transform: translateX(-78.474px) scaleX(1.226804); filter: drop-shadow(0 0 7px #89b4fa) }
+      60%, 100% { transform: translateX(0) scaleX(1); filter: none }
+    }
+    @keyframes ov {
+      0%, 62%   { opacity: 0; transform: translateY(-34px) }
+      70%, 92%  { opacity: 1; transform: translateY(0) }
+      98%, 100% { opacity: 0; transform: translateY(-34px) }
+    }
+    @keyframes cursor {
+      0%, 2%    { opacity: 0; transform: translate(175px, 328px) }
+      5%        { opacity: 1; transform: translate(175px, 328px) }
+      20%, 24%  { opacity: 1; transform: translate(493px, 268px) }
+      26%, 28%  { opacity: 0; transform: translate(493px, 268px) }
+      30%       { opacity: 1; transform: translate(239px, 399px) }
+      46%, 50%  { opacity: 1; transform: translate(205px, 406px) }
+      58%       { opacity: 1; transform: translate(239px, 399px) }
+      60%, 100% { opacity: 0; transform: translate(239px, 399px) }
+    }
+    @keyframes sourceTab {
+      0%, 4%    { opacity: 1 }
+      6%, 94%   { opacity: 0 }
+      98%, 100% { opacity: 1 }
+    }
+    @keyframes tabGhost {
+      0%, 2%    { opacity: 0; transform: translate(169px, 306px) rotate(-4deg) }
+      5%        { opacity: 0.94; transform: translate(169px, 306px) rotate(-4deg) }
+      20%       { opacity: 0.94; transform: translate(455px, 231px) rotate(0deg) }
+      23%       { opacity: 0; transform: translate(455px, 231px) rotate(0deg) }
+      24%, 100% { opacity: 0; transform: translate(455px, 231px) }
+    }
+    @keyframes dockedPanel {
+      0%, 22%   { opacity: 0 }
+      24%, 94%  { opacity: 1 }
+      98%, 100% { opacity: 0 }
+    }
+    @keyframes dropIndicator {
+      0%, 10%   { opacity: 0; transform: scale(0.96) }
+      16%       { opacity: 0.72; transform: scale(1) }
+      20%, 24%  { opacity: 1; transform: scale(1); filter: drop-shadow(0 0 8px #89b4fa) }
+      28%, 100% { opacity: 0; transform: scale(1) }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .drag, .grp, .slotA, .ov, .cursor, .sourceTab, .tabGhost, .dockedPanel, .dropIndicator { animation: none }
+      .ov { opacity: 1 }
+      .cursor, .tabGhost, .dockedPanel, .dropIndicator { opacity: 0 }
+    }
+  </style>
+</defs>
+
+<rect width="1200" height="540" fill="url(#bg)"/>
+
+<!-- The stack. One window, three z layers, 80px apart on screen. Each layer is
+     the same 560x360 plane under the same projection, so a rect keeps its
+     position across layers: the native view in z1 lands exactly on the slot
+     reserved for it in z0. -->
+
+<!-- z0 — the renderer DOM. Always the bottom layer; that is the Electron
+     constraint the whole library is built around, not a drawing choice. -->
+<g transform="matrix(0.78,-0.16,0.16,0.50,96,332.2)" filter="url(#cardShadow)">
+  <rect x="0" y="0" width="560" height="360" rx="14" fill="#1a1b28" stroke="#3a4066" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+
+  <!-- A docked group of DOM panels. Frame, tabs and text lines all scale
+       together, so nothing can spill past the frame as the group narrows. The
+       tabs carry no words: this is any host's panel, not a particular app's. -->
+  <g class="grp">
+    <rect x="12" y="12" width="128" height="336" rx="9" fill="#26263a" stroke="#454a63" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
+    <rect x="22" y="22" width="68" height="26" rx="6" fill="#585b70" stroke="#89b4fa" stroke-width="1.4" vector-effect="non-scaling-stroke"/>
+    <rect x="32" y="31" width="48" height="8" rx="4" fill="#cdd6f4"/>
+    <!-- This is the tab that the first act lifts. Its group disappears from
+         the source strip while the screen-space ghost is in flight. -->
+    <g class="sourceTab">
+      <rect x="96" y="22" width="34" height="26" rx="6" fill="#45475a" stroke="#585b70" stroke-width="1.4" vector-effect="non-scaling-stroke"/>
+      <rect x="104" y="31" width="18" height="8" rx="4" fill="#8b90a8"/>
+    </g>
+    <g fill="#343652">
+      <rect x="22" y="74" width="108" height="7" rx="3.5"/>
+      <rect x="22" y="96" width="78" height="7" rx="3.5"/>
+      <rect x="22" y="118" width="96" height="7" rx="3.5"/>
+      <rect x="22" y="150" width="66" height="7" rx="3.5"/>
+      <rect x="22" y="172" width="102" height="7" rx="3.5"/>
+      <rect x="22" y="194" width="84" height="7" rx="3.5"/>
+    </g>
+  </g>
+
+  <g class="drag">
+    <rect x="142" y="12" width="8" height="336" rx="4" fill="#343a52"/>
+    <rect x="144" y="166" width="4" height="28" rx="2" fill="#7f88a8"/>
+  </g>
+
+  <!-- the two reserved slots: empty divs, no pixels of their own -->
+  <g class="slotA">
+    <rect x="152" y="12" width="194" height="336" rx="9" fill="#89b4fa" fill-opacity="0.05" stroke="#565d80" stroke-width="1.8" stroke-dasharray="7 6" vector-effect="non-scaling-stroke"/>
+  </g>
+  <rect x="354" y="12" width="194" height="336" rx="9" fill="#89b4fa" fill-opacity="0.05" stroke="#565d80" stroke-width="1.8" stroke-dasharray="7 6" vector-effect="non-scaling-stroke"/>
+  <!-- right-aligned on the edge the drag leaves fixed, so it never overruns -->
+  <text class="mono" x="22" y="336" font-size="15" fill="#6b7394">DOM</text>
+  <text class="mono" x="334" y="336" font-size="15" text-anchor="end" fill="#6b7394">native slot</text>
+  <text class="mono" x="536" y="336" font-size="15" text-anchor="end" fill="#6b7394">native slot</text>
+</g>
+
+<!-- z1 — the native panel zone. Two WebContentsViews on the slots below. -->
+<g transform="matrix(0.78,-0.16,0.16,0.50,96,252.2)">
+  <rect x="0" y="0" width="560" height="360" rx="14" fill="none" stroke="#89b4fa" stroke-opacity="0.14" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
+  <g filter="url(#cardShadow)">
+    <g class="slotA">
+      <rect x="152" y="12" width="194" height="336" rx="9" fill="url(#glass)" stroke="#89b4fa" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    </g>
+    <rect x="354" y="12" width="194" height="336" rx="9" fill="url(#glass)" stroke="#89b4fa" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  </g>
+  <g class="drag">
+    <text class="sans" x="164" y="332" font-size="18" font-weight="600" fill="#dbe8ff">WebContentsView</text>
+  </g>
+  <text class="sans" x="366" y="332" font-size="18" font-weight="600" fill="#dbe8ff">WebContentsView</text>
+</g>
+
+<!-- The successful drop becomes a real, tall panel in z1. It is intentionally
+     painted after the existing z1 views but before z2, so the native modal
+     below still demonstrates that it can cover every panel. -->
+<g class="dockedPanel" opacity="0" aria-hidden="true">
+  <polygon data-role="panel-shell" points="453,195 522,181 570,331 501,345" fill="#253653" fill-opacity="0.98" stroke="#89b4fa" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="462,209 514,199 523,225 470,236" fill="#3b5278" stroke="#b9d7ff" stroke-opacity="0.82" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M476 217 L504 211" stroke="#e1eeff" stroke-width="4.5" stroke-linecap="round"/>
+  <circle cx="512" cy="210" r="4" fill="#89b4fa"/>
+  <path d="M477 254 L532 243 M484 276 L540 265 M491 298 L548 287" stroke="#6683ad" stroke-width="5" stroke-linecap="round"/>
+  <path d="M479 315 L553 300" stroke="#3c5173" stroke-width="1.5"/>
+</g>
+
+<!-- z2 — the overlay zone. The labelled popup covers the native panels below,
+     which is only possible because it is a WebContentsView too. -->
+<g class="ov">
+  <g transform="matrix(0.78,-0.16,0.16,0.50,96,172.2)">
+    <rect x="0" y="0" width="560" height="360" rx="14" fill="none" stroke="#cba6f7" stroke-opacity="0.14" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
+    <g filter="url(#ovShadow)">
+      <rect x="236" y="104" width="226" height="196" rx="11" fill="#221d33" stroke="#cba6f7" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    </g>
+    <text class="sans" x="252" y="145" font-size="20" font-weight="700" fill="#f3ebff">Native overlay</text>
+    <text class="mono" x="252" y="170" font-size="13" fill="#cba6f7">WebContentsView</text>
+    <rect x="252" y="188" width="164" height="9" rx="4.5" fill="#463a63"/>
+    <path d="M252 220 H446" stroke="#3a3154" stroke-width="1.4" vector-effect="non-scaling-stroke"/>
+    <rect x="244" y="236" width="210" height="34" rx="7" fill="#cba6f7" fill-opacity="0.16"/>
+    <rect x="252" y="248" width="134" height="9" rx="4.5" fill="#cba6f7" fill-opacity="0.75"/>
+  </g>
+</g>
+
+<!-- Dock helpers live in screen space: the right-panel target follows its
+     isometric silhouette, while the tab remains recognisable as a tab while
+     it crosses the layers. Explicit opacity keeps static renderers clean. -->
+<g class="dropIndicator" opacity="0" aria-hidden="true">
+  <polygon points="453,195 522,181 570,331 501,345" fill="#89b4fa" fill-opacity="0.20" stroke="#89b4fa" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="465,209 514,199 557,321 509,331" fill="none" stroke="#dbe8ff" stroke-opacity="0.65" stroke-width="1.2" stroke-dasharray="5 4"/>
+</g>
+<g class="tabGhost" opacity="0" aria-hidden="true">
+  <rect width="78" height="29" rx="7" fill="#30344d" fill-opacity="0.96" stroke="#89b4fa" stroke-width="1.8"/>
+  <rect x="12" y="11" width="43" height="7" rx="3.5" fill="#dbe8ff"/>
+  <rect x="60" y="10" width="8" height="8" rx="4" fill="#89b4fa"/>
+</g>
+<!-- One cursor is hidden before moving between acts. It is screen-space so it
+     follows the projected splitter, rather than making the diagram rearrange
+     itself. Reduced-motion mode keeps only the complete static stack. -->
+<g class="cursor" opacity="0" aria-hidden="true">
+  <path d="M0 0 L3 24 L9 17 L15 30 L20 28 L14 15 L25 14 Z" fill="#f2f2f2" stroke="#11121a" stroke-width="2" stroke-linejoin="round"/>
+</g>
+
+<!-- layer tags, in screen space so they stay upright -->
+<g class="mono" font-size="15" text-anchor="end">
+  <text x="84" y="341" fill="#6b7394">z0</text>
+  <text x="84" y="261" fill="#89b4fa">z1</text>
+  <text x="84" y="181" fill="#cba6f7">z2</text>
+</g>
+
+<!-- copy -->
+<text class="sans" x="690" y="200" font-size="46" font-weight="700" fill="#f2f2f2" letter-spacing="-0.5">electron-deck</text>
+<text class="sans" x="690" y="240" font-size="19" fill="#adadad">Host shell framework for Electron.</text>
+<text class="sans" x="690" y="266" font-size="19" fill="#adadad">Multi-window, native views, overlays, IPC.</text>
+<text class="sans" x="690" y="296" font-size="17" fill="#7a7a7a">WebContentsViews stay lined up as the layout changes.</text>
+
+<g class="sans" font-size="16">
+  <rect x="690" y="342" width="14" height="14" rx="4" fill="#cba6f7" fill-opacity="0.22" stroke="#cba6f7" stroke-width="1.6"/>
+  <text x="716" y="354" fill="#f2f2f2">z2 · Native overlay<tspan fill="#7a7a7a"> — stays above docked panels</tspan></text>
+
+  <rect x="690" y="380" width="14" height="14" rx="4" fill="url(#glass)" stroke="#89b4fa" stroke-width="1.6"/>
+  <text x="716" y="392" fill="#f2f2f2">z1 · WebContentsView<tspan fill="#7a7a7a"> — fills a DOM slot</tspan></text>
+
+  <rect x="690" y="418" width="14" height="14" rx="4" fill="#89b4fa" fill-opacity="0.05" stroke="#4a4f6b" stroke-width="1.6" stroke-dasharray="3 2"/>
+  <text x="716" y="430" fill="#f2f2f2">z0 · Dock layout<tspan fill="#7a7a7a"> — tabs, splits, and drop targets</tspan></text>
+</g>
+</svg>

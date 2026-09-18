@@ -226,8 +226,8 @@ describe('exposeDeckBridge()', () => {
 			})
 			const bridge = getExposedBridge()
 			const req: InvokeRequest = {
-				kind: 'simulator',
-				name: 'wx.getStorage',
+				kind: 'host',
+				name: 'getStorage',
 				args: ['key'],
 			}
 			await bridge.invoke(req)

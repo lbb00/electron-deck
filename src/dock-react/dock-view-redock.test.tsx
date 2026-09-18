@@ -46,6 +46,7 @@ import {
 	type LayoutNode,
 	type LayoutTree,
 	type LayoutModel,
+	type PanelCapabilities,
 	type PanelRegistry,
 	type TabGroupNode,
 } from '../layout/index.js'
@@ -56,7 +57,7 @@ import { computeDropZone, dropZoneToMutation } from './index.js'
 
 // ───────────────────────── fixtures ─────────────────────────
 
-/** root split[row] -> [ g-left(sim) | g-right(editor, debug) ] */
+/** root split[row] -> [ g-left(preview) | g-right(doc, notes) ] */
 function makeTree(): LayoutTree {
 	return {
 		version: 1,
@@ -66,8 +67,8 @@ function makeTree(): LayoutTree {
 			orientation: 'row',
 			sizes: [1, 1],
 			children: [
-				{ kind: 'tabs', id: 'g-left', panels: ['sim'], active: 'sim' },
-				{ kind: 'tabs', id: 'g-right', panels: ['editor', 'debug'], active: 'editor' },
+				{ kind: 'tabs', id: 'g-left', panels: ['preview'], active: 'preview' },
+				{ kind: 'tabs', id: 'g-right', panels: ['doc', 'notes'], active: 'doc' },
 			],
 		},
 	}
@@ -75,9 +76,9 @@ function makeTree(): LayoutTree {
 
 function makeRegistry(): PanelRegistry {
 	const reg = createPanelRegistry()
-	reg.register({ kind: 'dom', id: 'sim', title: 'Simulator' })
-	reg.register({ kind: 'dom', id: 'editor', title: 'Editor' })
-	reg.register({ kind: 'dom', id: 'debug', title: 'Debug' })
+	reg.register({ kind: 'dom', id: 'preview', title: 'Preview' })
+	reg.register({ kind: 'dom', id: 'doc', title: 'Doc' })
+	reg.register({ kind: 'dom', id: 'notes', title: 'Notes' })
 	return reg
 }
 
@@ -145,20 +146,20 @@ describe('<DockView> drag-to-redock — draggable tab affordance', () => {
 	// and the whole redock UX is dead on arrival.
 	it('marks every tab button draggable="true"', () => {
 		const { container } = renderDock(createLayoutModel(makeTree()), makeRegistry())
-		const editorTab = container.querySelector('[data-deck-tab="editor"]')!
-		const debugTab = container.querySelector('[data-deck-tab="debug"]')!
-		const simTab = container.querySelector('[data-deck-tab="sim"]')!
-		expect(editorTab.getAttribute('draggable')).toBe('true')
-		expect(debugTab.getAttribute('draggable')).toBe('true')
-		expect(simTab.getAttribute('draggable')).toBe('true')
+		const docTab = container.querySelector('[data-deck-tab="doc"]')!
+		const notesTab = container.querySelector('[data-deck-tab="notes"]')!
+		const previewTab = container.querySelector('[data-deck-tab="preview"]')!
+		expect(docTab.getAttribute('draggable')).toBe('true')
+		expect(notesTab.getAttribute('draggable')).toBe('true')
+		expect(previewTab.getAttribute('draggable')).toBe('true')
 	})
 
 	// BUG: the dragged panel id is no longer recoverable from the DOM, so the drop
 	// handler can't know WHAT is being dragged.
 	it('keeps the dragged panel id recoverable via data-deck-tab', () => {
 		const { container } = renderDock(createLayoutModel(makeTree()), makeRegistry())
-		const tab = container.querySelector('[data-deck-tab="debug"]')!
-		expect(tab.getAttribute('data-deck-tab')).toBe('debug')
+		const tab = container.querySelector('[data-deck-tab="notes"]')!
+		expect(tab.getAttribute('data-deck-tab')).toBe('notes')
 	})
 })
 
@@ -179,22 +180,22 @@ describe('<DockView> drag-to-redock — __deckHandleDrop seam', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock(model, makeRegistry())
 
-		// 'sim' lives in g-left; drop it onto g-right's center => it joins g-right.
+		// 'preview' lives in g-left; drop it onto g-right's center => it joins g-right.
 		const right = container.querySelector('[data-deck-group="g-right"]') as DeckGroupElement
 		expect(typeof right.__deckHandleDrop).toBe('function')
 		act(() => {
-			right.__deckHandleDrop!('sim', 'center')
+			right.__deckHandleDrop!('preview', 'center')
 		})
 
 		const root = model.get().root
-		const home = findGroupOf(root, 'sim')!
+		const home = findGroupOf(root, 'preview')!
 		expect(home.id).toBe('g-right')
-		expect(home.panels).toContain('sim')
-		expect(countPanel(root, 'sim')).toBe(1)
+		expect(home.panels).toContain('preview')
+		expect(countPanel(root, 'preview')).toBe(1)
 	})
 
 	// BUG: a right drop fails to split (or splits the wrong way / duplicates the
-	// dragged panel because it didn't extract-then-split). Prove 'sim' lands to the
+	// dragged panel because it didn't extract-then-split). Prove 'preview' lands to the
 	// RIGHT of g-right's target, exactly once.
 	it('__deckHandleDrop(dragged, "right") splits the group, placing the panel to the right exactly once', () => {
 		const model = createLayoutModel(makeTree())
@@ -203,18 +204,18 @@ describe('<DockView> drag-to-redock — __deckHandleDrop seam', () => {
 		const right = container.querySelector('[data-deck-group="g-right"]') as DeckGroupElement
 		expect(typeof right.__deckHandleDrop).toBe('function')
 		act(() => {
-			right.__deckHandleDrop!('sim', 'right')
+			right.__deckHandleDrop!('preview', 'right')
 		})
 
 		const root = model.get().root
 		// dragged panel present exactly once (extract-then-split, not duplicated).
-		expect(countPanel(root, 'sim')).toBe(1)
-		// a row split now exists with 'sim' present somewhere to the right of editor.
-		const simGroup = findGroupOf(root, 'sim')!
-		const editorGroup = findGroupOf(root, 'editor')!
-		// 'sim' is no longer co-located with the original g-left only — it split out.
-		expect(simGroup.id).not.toBe('g-left')
-		expect(editorGroup.panels).toContain('editor')
+		expect(countPanel(root, 'preview')).toBe(1)
+		// a row split now exists with 'preview' present somewhere to the right of doc.
+		const previewGroup = findGroupOf(root, 'preview')!
+		const docGroup = findGroupOf(root, 'doc')!
+		// 'preview' is no longer co-located with the original g-left only — it split out.
+		expect(previewGroup.id).not.toBe('g-left')
+		expect(docGroup.panels).toContain('doc')
 	})
 
 	// BUG: dropping a panel onto its OWN group center (no-op) still churns the
@@ -227,17 +228,17 @@ describe('<DockView> drag-to-redock — __deckHandleDrop seam', () => {
 		model.subscribe(() => { revisions += 1 })
 
 		const right = container.querySelector('[data-deck-group="g-right"]') as DeckGroupElement
-		// 'editor' is the active panel of g-right — dropping it onto its own center.
+		// 'doc' is the active panel of g-right — dropping it onto its own center.
 		act(() => {
-			right.__deckHandleDrop!('editor', 'center')
+			right.__deckHandleDrop!('doc', 'center')
 		})
 
 		// no model.apply happened => no subscriber notification.
 		expect(revisions).toBe(0)
-		// tree structurally unchanged: editor still the sole-active member of g-right.
-		const grp = findGroupOf(model.get().root, 'editor')!
+		// tree structurally unchanged: doc still the sole-active member of g-right.
+		const grp = findGroupOf(model.get().root, 'doc')!
 		expect(grp.id).toBe('g-right')
-		expect(countPanel(model.get().root, 'editor')).toBe(1)
+		expect(countPanel(model.get().root, 'doc')).toBe(1)
 	})
 })
 
@@ -254,7 +255,7 @@ describe('<DockView> drag-to-redock — registered-but-absent payload (M2)', () 
   // `movePanel: panel not found` on HEAD. The contract: a drop carrying a
   // registered id NOT present in the tree is a NO-OP (no mutation, no throw).
   //
-  // Registry has 'sim'/'editor'/'debug' (makeRegistry); the tree (makeTree) holds
+  // Registry has 'preview'/'doc'/'notes' (makeRegistry); the tree (makeTree) holds
   // exactly those three. We additionally register a 'ghost' panel that is NOT in
   // the tree, then drop it onto a group.
 
@@ -327,16 +328,16 @@ describe('<DockView> drag-to-redock — registered-but-absent payload (M2)', () 
   })
 
   it('a drop carrying a registered id CLOSED out of the tree is a no-op (registry membership != tree membership)', () => {
-    // Start with 'debug' in g-right, then close it from the tree (it stays
-    // REGISTERED). A drop of 'debug' must NOT resurrect it / error.
+    // Start with 'notes' in g-right, then close it from the tree (it stays
+    // REGISTERED). A drop of 'notes' must NOT resurrect it / error.
     const model = createLayoutModel(makeTree())
     const { container } = renderDock(model, makeRegistry())
 
-    // Close 'debug' out of the tree (still registered in the registry).
+    // Close 'notes' out of the tree (still registered in the registry).
     act(() => {
-      model.apply((t) => closePanel(t, 'debug'))
+      model.apply((t) => closePanel(t, 'notes'))
     })
-    expect(countPanel(model.get().root, 'debug')).toBe(0)
+    expect(countPanel(model.get().root, 'notes')).toBe(0)
 
     let revisions = 0
     model.subscribe(() => { revisions += 1 })
@@ -344,13 +345,13 @@ describe('<DockView> drag-to-redock — registered-but-absent payload (M2)', () 
 
     const left = container.querySelector('[data-deck-group="g-left"]') as DeckGroupElement
     const errors = withCapturedGlobalErrors(() => {
-      fireEvent.drop(left, { dataTransfer: dragPayload('debug') })
+      fireEvent.drop(left, { dataTransfer: dragPayload('notes') })
     })
 
     expect(errors.map((e) => e.message)).toEqual([])
     expect(JSON.stringify(model.get())).toBe(before)
     expect(revisions).toBe(0)
-    expect(countPanel(model.get().root, 'debug')).toBe(0)
+    expect(countPanel(model.get().root, 'notes')).toBe(0)
   })
 })
 
@@ -644,6 +645,90 @@ describe('<DockView> drag-to-redock — PanelCapabilities gates (draggable / dro
 
 		expect(container.querySelector('[data-deck-drop-zone]')).not.toBeNull()
 		fireEvent.dragEnd(freeTab)
+	})
+})
+
+// ───────────────────── PanelCapabilities: acceptsDrops fallback ─────────────────────
+//
+// `acceptsDrops` gates the drop TARGET independently of `draggable` (which gates
+// the drag SOURCE). When omitted it falls back to `draggable`, then to `true` —
+// see the PanelCapabilities doc-block in types.ts. Three combinations pin that
+// fallback chain: an explicit `acceptsDrops:false`, an explicit `acceptsDrops:true`
+// overriding a `draggable:false` on the same panel, and both omitted (the
+// default-permissive case already exercised elsewhere, pinned here for the combo).
+describe('<DockView> drag-to-redock — acceptsDrops fallback', () => {
+	// root split[row] -> [ g-target(target) | g-free(free) ]
+	function acceptsDropsTree(): LayoutTree {
+		return {
+			version: 1,
+			root: {
+				kind: 'split',
+				id: 'root',
+				orientation: 'row',
+				sizes: [1, 1],
+				children: [
+					{ kind: 'tabs', id: 'g-target', panels: ['target'], active: 'target' },
+					{ kind: 'tabs', id: 'g-free', panels: ['free'], active: 'free' },
+				],
+			},
+		}
+	}
+
+	function acceptsDropsRegistry(targetCapabilities: PanelCapabilities): PanelRegistry {
+		const reg = createPanelRegistry()
+		reg.register({ kind: 'dom', id: 'target', title: 'Target', ...targetCapabilities })
+		reg.register({ kind: 'dom', id: 'free', title: 'Free' })
+		return reg
+	}
+
+	it('explicit acceptsDrops:false rejects a drop (draggable left at its default)', () => {
+		const model = createLayoutModel(acceptsDropsTree())
+		const { container } = renderDock(model, acceptsDropsRegistry({ acceptsDrops: false }))
+
+		let revisions = 0
+		model.subscribe(() => { revisions += 1 })
+		const before = JSON.stringify(model.get())
+
+		const gTarget = container.querySelector('[data-deck-group="g-target"]') as DeckGroupElement
+		act(() => {
+			gTarget.__deckHandleDrop!('free', 'center')
+		})
+
+		expect(revisions).toBe(0)
+		expect(JSON.stringify(model.get())).toBe(before)
+	})
+
+	it('explicit acceptsDrops:true overrides draggable:false — the panel still accepts a drop', () => {
+		const model = createLayoutModel(acceptsDropsTree())
+		const { container } = renderDock(model, acceptsDropsRegistry({ draggable: false, acceptsDrops: true }))
+
+		let revisions = 0
+		model.subscribe(() => { revisions += 1 })
+
+		const gTarget = container.querySelector('[data-deck-group="g-target"]') as DeckGroupElement
+		act(() => {
+			gTarget.__deckHandleDrop!('free', 'center')
+		})
+
+		expect(revisions).toBeGreaterThan(0)
+		expect(countPanel(model.get().root, 'free')).toBe(1)
+		expect(findGroupOf(model.get().root, 'free')!.id).toBe('g-target')
+	})
+
+	it('both draggable and acceptsDrops omitted: the default-permissive panel accepts a drop', () => {
+		const model = createLayoutModel(acceptsDropsTree())
+		const { container } = renderDock(model, acceptsDropsRegistry({}))
+
+		let revisions = 0
+		model.subscribe(() => { revisions += 1 })
+
+		const gTarget = container.querySelector('[data-deck-group="g-target"]') as DeckGroupElement
+		act(() => {
+			gTarget.__deckHandleDrop!('free', 'center')
+		})
+
+		expect(revisions).toBeGreaterThan(0)
+		expect(findGroupOf(model.get().root, 'free')!.id).toBe('g-target')
 	})
 })
 

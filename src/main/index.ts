@@ -1,10 +1,26 @@
 /**
  * `electron-deck/main` — main-process foundation primitives.
  *
- * The connection layer (foundation.md §4): one `Connection` per trusted
- * webContents, owning a single `DisposableRegistry` lifetime segment that tears
- * down deterministically on hard-destroy or soft-reuse. Downstream hosts
- * consume this as the substrate for connection-scoped resource ownership.
+ * Two lifetime primitives ship from here and they are NOT duplicates:
+ *
+ *  - `Scope` (scope.ts) — the nested lifetime primitive this package itself is
+ *    built on (deck-app, view-handle, trust-set, control-bus, capability).
+ *    Nestable via child/adopt, and its `reset()`/`close()` events fire AFTER
+ *    `disposeAll()` completes, so a listener may assume teardown is finished.
+ *  - `Connection` / `ConnectionRegistry` (connection.ts) — a FLAT per-webContents
+ *    registry keyed by `wc.id`, auto-closed by `wc.once('destroyed')`. Hosts use
+ *    it for "own a resource against a webContents, tear it down when that
+ *    webContents dies". Its events fire when `disposeAll()` STARTS, so a
+ *    listener must NOT assume the segment is already drained.
+ *
+ * Choosing between them: `Connection` when the lifetime is pinned to a real
+ * webContents and the destroyed-hook plus id-keyed lookup are worth having;
+ * `Scope` when you need nesting or a completion barrier.
+ * See docs/contracts/unified-lifetime.md §5 for the full comparison.
+ *
+ * NOTE: `Connection` and `debugTap` have no call sites inside this package.
+ * That is expected — they are published surface for downstream hosts, not dead
+ * code. Check consumers before touching either.
  */
 export {
   createConnectionRegistry,

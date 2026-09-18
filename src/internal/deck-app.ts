@@ -9,7 +9,6 @@ import type {
 	Runtime,
 	SenderPolicy,
 	WebviewSource,
-	WindowContribution,
 	WindowCreateOptions,
 	DeckConfig,
 	DeckContext,
@@ -51,25 +50,12 @@ import { createViewHandle } from '../main/view-handle.js'
 import {
 	createInitialState,
 	reconcile,
-	cleanSnapshot,
-	dispatchOps,
+	authorizeSnapshot,
+	applyReconciledPlacements,
 	type ReconcilerState,
 } from '../layout/index.js'
-import {
-	createCapabilityRegistry,
-	type CapabilityPolicy,
-} from '../host/capability.js'
-import {
-	createControlBus,
-	type ControlBus,
-} from '../host/control-bus.js'
-import {
-	WireTransport,
-	type MinimalIpcMain,
-	type MinimalWebContents,
-} from './wire-transport.js'
+import { WireTransport, type MinimalIpcMain, type MinimalWebContents } from './wire-transport.js'
 
-const SIMULATOR_CHANNEL_PREFIX = '__electron-deck:simulator:'
 const HOST_CHANNEL_PREFIX = '__electron-deck:host:'
 
 const DEFAULT_MAIN_WIDTH = 1024
@@ -92,8 +78,7 @@ export interface DeckAppOptions {
 	}
 	/**
 	 * 注入真 (或 fake) Electron `BrowserWindow` / `WebContentsView`
-	 * 构造器；提供后 framework 会装配 mainWindow / toolbarView / declared
-	 * windows，否则保持 electron-unavailable 行为。
+	 * 构造器；提供后 framework 会装配 mainWindow，否则保持 electron-unavailable 行为。
 	 */
 	readonly electron?: MinimalElectron
 	/**
@@ -116,7 +101,7 @@ export interface DeckAppOptions {
  */
 interface PendingWindowCreated {
 	window: MinimalBrowserWindow
-	role: 'main' | 'toolbar' | 'host'
+	role: 'main' | 'host'
 }
 
 /**
@@ -136,8 +121,9 @@ interface PendingLoadFailed {
  * Per-window native-view substrate. Each tracked window
  * gets ONE `Compositor` whose {@link ContentViewHost} adapts that window's
  * `contentView`. The minimal `contentView` has no `children()`, so the host
- * adapter TRACKS the Compositor-managed views' z-order itself (the toolbar,
- * added directly to `contentView`, is invisible to this `order`). `registerView`
+ * adapter TRACKS the Compositor-managed views' z-order itself (a view added
+ * directly to `contentView` outside the compositor is invisible to this
+ * `order`). `registerView`
  * binds a view id to its native `WebContentsView` so the adapter can translate a
  * Compositor `NativeViewRef` into the real `addChildView`/`removeChildView` call.
  */
@@ -154,8 +140,7 @@ export interface ViewSubstrate {
 /**
  * Framework-internal "app" object —— `electronDeck(config)` 顶层入口的 plain-class
  * 形态，便于测试驱动 lifecycle 转换。加 wireTransport 注入
- * 后可接真 ipcMain；加 electron 注入后可装配 mainWindow / toolbarView
- * / declared windows。两者都不注入时退化为同进程内存 fake。
+ * 后可接真 ipcMain；加 electron 注入后可装配 mainWindow。两者都不注入时退化为同进程内存 fake。
  *
  * @internal
  */
@@ -168,15 +153,6 @@ export class DeckApp {
 	private readonly ipc = new InMemoryTypedIpcRegistry()
 	private readonly fwListeners = new Map<keyof FrameworkEvents, Set<(payload: unknown) => void>>()
 	private readonly trustSet: TrustSet = createTrustSet()
-	/** Privileged-command grant registry. The policy gates
-	 *  ControlBus.dispatch; grants are minted via `runtime.grants.issue`. */
-	private readonly capability = createCapabilityRegistry()
-	/** The grant-gated command bus for PRIVILEGED `layout.*`
-	 *  commands. Constructed in `bindWireTransport` with the capability policy
-	 *  injected, so `dispatch` default-DENIES any command lacking a live grant.
-	 *  Privileged commands are registered via `runtime.layout.command`; ordinary
-	 *  domain APIs stay on the un-gated `InMemoryTypedIpcRegistry`. */
-	private controlBus: ControlBus | null = null
 	/** Per-webContents backend `onWindowTrusted` Disposable, so a window's
 	 *  trust mirror is undone when THAT window closes (not only at teardown). */
 	private readonly backendTrustDisposables = new Map<MinimalWebContents, Disposable>()
@@ -186,8 +162,6 @@ export class DeckApp {
 	 *  `context._senderPolicy` reflects real trust instead of a `() => true` stub. */
 	private wireSenderPolicy: SenderPolicy | null = null
 	private mainWindow: MinimalBrowserWindow | null = null
-	private toolbarView: MinimalWebContentsView | null = null
-	private readonly declaredWindows = new Map<string, MinimalBrowserWindow>()
 	private readonly trackedWindows = new Set<MinimalBrowserWindow>()
 	/**
 	 * The root lifetime scope of the app + a shadow map mirroring `trackedWindows`,
@@ -198,7 +172,7 @@ export class DeckApp {
 	private readonly rootScope: Scope = createScope()
 	private readonly lifetimeShadow = new Map<
 		MinimalWebContents,
-		{ window: MinimalBrowserWindow, windowScope: Scope }
+		{ window: MinimalBrowserWindow; windowScope: Scope }
 	>()
 	/**
 	 * Per-trusted-webContents trust record. `wcScope` is a
@@ -211,7 +185,7 @@ export class DeckApp {
 	 */
 	private readonly wcRecords = new Map<
 		MinimalWebContents,
-		{ wcScope: Scope, leases: Set<Disposable>, windowScope: Scope }
+		{ wcScope: Scope; leases: Set<Disposable>; windowScope: Scope }
 	>()
 	private readonly pendingWindowCreated: PendingWindowCreated[] = []
 	private readonly pendingLoadFailed: PendingLoadFailed[] = []
@@ -265,18 +239,21 @@ export class DeckApp {
 	private readonly sessions = new WeakMap<DeckSession, Scope>()
 	/**
 	 * keepAlive「opt-in helper：runtime.view({ keepAlive })」 — opt-in per-group LRU of HIDDEN keep-alive views. Group key is
-	 * `lru:${max}` (all `keepAlive:{policy:'lru',max:N}` views share one group per
-	 * `max`). Each group holds an ORDERED list of HIDDEN view ids (front = least
-	 * recently visible = first to evict) + a map from view id to its host handle so
-	 * an eviction can dispose it (→ its WebContents is destroyed). Views created
-	 * without `keepAlive` never participate.
+	 * `lru:${group}` (all `keepAlive:{policy:'lru',max:N,group:string}` views
+	 * sharing the same `group` name form one LRU). Each group holds the `max`
+	 * established by the FIRST view to join it (later views with a different `max`
+	 * keep that established value + a one-shot warn — see
+	 * `warnKeepAliveGroupMaxConflict`), an ORDERED list of HIDDEN view ids (front =
+	 * least recently visible = first to evict), and a map from view id to its host
+	 * handle so an eviction can dispose it (→ its WebContents is destroyed). Views
+	 * created without `keepAlive` never participate.
 	 */
 	private readonly keepAliveGroups = new Map<
 		string,
-		{ hidden: string[], handles: Map<string, DeckViewHandle> }
+		{ max: number; hidden: string[]; handles: Map<string, DeckViewHandle> }
 	>()
-	/** Wcs that already have the `did-start-navigation` grant-reset hook bound,
-	 *  so {@link bindNavigationGrantReset} is idempotent — a wc admitted to trust
+	/** Wcs that already have the `did-start-navigation` slot-reset hook bound,
+	 *  so {@link bindNavigationSlotReset} is idempotent — a wc admitted to trust
 	 *  more than once (e.g. constructed `autoTrust:false` then `windows.trust()`ed,
 	 *  or un-adopted then re-adopted) never accumulates duplicate nav listeners. */
 	private readonly navHookBound = new WeakSet<MinimalWebContents>()
@@ -292,7 +269,14 @@ export class DeckApp {
 	 */
 	private readonly slotTokens = new Map<
 		string,
-		{ viewId: string, slotId: string, authorizedWcId: number, zone: number, resend: () => void, apply: (placement: unknown) => void }
+		{
+			viewId: string
+			slotId: string
+			authorizedWcId: number
+			zone: number
+			resend: () => void
+			apply: (placement: unknown) => void
+		}
 	>()
 	private slotSeq = 0
 	/**
@@ -352,8 +336,7 @@ export class DeckApp {
 		this.rootScope.own(async () => {
 			try {
 				await this.registry.disposeAll()
-			}
-			catch (e) {
+			} catch (e) {
 				console.error('[electron-deck] registry.disposeAll failed:', e)
 			}
 		})
@@ -378,7 +361,6 @@ export class DeckApp {
 
 		// 校验在 lifecycle 转换之前；invalid config → reject，phase 不动
 		validateConfig(this.config)
-		this.assertWireTransportPresentForWebviewContent()
 
 		// pre-ready + whenReady gate. Only runs when a real `app` surface is
 		// injected (production path / gate tests); fakes without `app` skip it. The
@@ -397,24 +379,9 @@ export class DeckApp {
 		// disposed before the start() promise rejects.
 		try {
 			await this.runBindAndSetupPhases()
-		}
-		catch (err) {
+		} catch (err) {
 			await this.cleanupOnError()
 			throw err
-		}
-	}
-
-	/**
-	 * half-state guard: electron + (toolbar | windows) without wireTransport
-	 * would leave the host with webviews that can never reach back via
-	 * __electron-deck:invoke. Reject early with a clear msg.
-	 */
-	private assertWireTransportPresentForWebviewContent(): void {
-		const hasWebviewContent = !!(this.config.toolbar || this.config.windows)
-		if (this.options.electron && hasWebviewContent && !this.options.wireTransport) {
-			throw new Error(
-				'DeckAppOptions: wireTransport.ipcMain is required when config has toolbar or windows',
-			)
 		}
 	}
 
@@ -432,10 +399,12 @@ export class DeckApp {
 		}
 		if (this.options.backend?.beforeReady) {
 			await this.options.backend.beforeReady(app)
-		}
-		else if (this.config.app?.name) {
-			try { app.setName(this.config.app.name) }
-			catch { /* best-effort */ }
+		} else if (this.config.app?.name) {
+			try {
+				app.setName(this.config.app.name)
+			} catch {
+				/* best-effort */
+			}
 		}
 		await app.whenReady()
 		this.bindAppLifecycle(app)
@@ -455,8 +424,11 @@ export class DeckApp {
 		if (app.requestSingleInstanceLock()) {
 			return true
 		}
-		try { app.quit() }
-		catch { /* best-effort */ }
+		try {
+			app.quit()
+		} catch {
+			/* best-effort */
+		}
 		return false
 	}
 
@@ -478,10 +450,6 @@ export class DeckApp {
 		if (this.options.backend) {
 			await this.options.backend.assemble(this._runtime)
 		}
-		if (this.config.setup) {
-			await this.config.setup(this._runtime)
-		}
-
 		this.lifecycle.enter('ready')
 	}
 
@@ -504,8 +472,11 @@ export class DeckApp {
 		if (quitOnAllClosed !== undefined) {
 			app.on('window-all-closed', () => {
 				if (quitOnAllClosed) {
-					try { app.quit() }
-					catch { /* best-effort */ }
+					try {
+						app.quit()
+					} catch {
+						/* best-effort */
+					}
 				}
 			})
 		}
@@ -579,49 +550,45 @@ export class DeckApp {
 	}
 
 	/**
-	 * Bind the main-frame cross-document navigation grant-reset
+	 * Bind the main-frame cross-document navigation slot-reset
 	 * hook on a control `wc`. On a MAIN-FRAME CROSS-DOCUMENT navigation
-	 * (`isMainFrame && !isInPlace`) this SYNCHRONOUSLY revokes the wc's capability
-	 * grants (`capability.revokeBySenderId`) and slot tokens, so the navigated-to
-	 * document can't inherit the prior page's privileges. Trust is LEFT INTACT (the
-	 * wc stays the framework's control surface) — we deliberately do NOT tear down
-	 * its `wcScope`, because that would dispose the trust lease and force an async
-	 * re-admit gap that breaks `runtime.grants.issue`. In-place (hash/pushState) and
-	 * sub-frame navigations are ignored; the initial document load is a no-op (no
-	 * grants exist yet).
+	 * (`isMainFrame && !isInPlace`) this SYNCHRONOUSLY revokes the wc's slot
+	 * tokens, so the navigated-to document can't inherit the prior page's
+	 * anchored-placement authorizations. Trust is LEFT INTACT (the wc stays the
+	 * framework's control surface) — we deliberately do NOT tear down its
+	 * `wcScope`, because that would dispose the trust lease and force an async
+	 * re-admit gap. In-place (hash/pushState) and sub-frame navigations are
+	 * ignored; the initial document load is a no-op (no slot tokens exist yet).
 	 *
 	 * Must be called AFTER {@link admitTrust} so the wc's `wcScope` exists. The
 	 * `wc.on` guard tolerates the minimal fakes that lack an EventEmitter surface.
 	 */
-	private bindNavigationGrantReset(wc: MinimalWebContents): void {
-		const on = (wc as unknown as { on?: (event: string, listener: (...a: unknown[]) => void) => unknown }).on
+	private bindNavigationSlotReset(wc: MinimalWebContents): void {
+		const on = (
+			wc as unknown as { on?: (event: string, listener: (...a: unknown[]) => void) => unknown }
+		).on
 		if (typeof on !== 'function') return
 		// Idempotent: bind at most one nav hook per wc (defends re-trust / re-adopt).
 		if (this.navHookBound.has(wc)) return
 		this.navHookBound.add(wc)
-		on.call(wc, 'did-start-navigation', (
-			_event: unknown,
-			_url: unknown,
-			isInPlace: unknown,
-			isMainFrame: unknown,
-		) => {
-			if (isMainFrame !== true || isInPlace === true) return
-			const rec = this.wcRecords.get(wc)
-			if (!rec) return
-			// Main-frame cross-document navigation: the navigated-to document must
-			// NOT inherit the prior page's privileges. SYNCHRONOUSLY revoke this
-			// wc's grants + slot tokens. Trust is LEFT INTACT — the wc is still the
-			// framework's control surface, so we do NOT tear down its wcScope. A
-			// `wcScope.reset()` would dispose the trust lease and require an ASYNC
-			// re-admit, opening a window where the wc has no usable wcScope —
-			// `runtime.grants.issue` would then fail mid-flight, and the very first
-			// `config.app.source` load (a main-frame cross-doc navigation) would
-			// trip it. Revoking exactly the privileges (grants + slot tokens) is the
-			// complete, gap-free fix; on the initial document load there are no
-			// grants yet → no-op.
-			this.capability.revokeBySenderId(wc.id)
-			this.revokeSlotTokensForWc(wc.id)
-		})
+		on.call(
+			wc,
+			'did-start-navigation',
+			(_event: unknown, _url: unknown, isInPlace: unknown, isMainFrame: unknown) => {
+				if (isMainFrame !== true || isInPlace === true) return
+				const rec = this.wcRecords.get(wc)
+				if (!rec) return
+				// Main-frame cross-document navigation: the navigated-to document must
+				// NOT inherit the prior page's anchored-placement authorizations.
+				// SYNCHRONOUSLY revoke this wc's slot tokens. Trust is LEFT INTACT — the
+				// wc is still the framework's control surface, so we do NOT tear down
+				// its wcScope. A `wcScope.reset()` would dispose the trust lease and
+				// require an ASYNC re-admit, opening a window where the wc has no
+				// usable wcScope; on the initial document load there are no slot
+				// tokens yet → no-op.
+				this.revokeSlotTokensForWc(wc.id)
+			},
+		)
 	}
 
 	/**
@@ -693,7 +660,7 @@ export class DeckApp {
 	 * `placeIn(deckWindow.window)` call shapes both valid (additive, no break).
 	 */
 	private resolveWindowArg(win: unknown): MinimalBrowserWindow {
-		const maybe = win as { webContents?: unknown, window?: unknown }
+		const maybe = win as { webContents?: unknown; window?: unknown }
 		if (maybe && maybe.webContents === undefined && maybe.window !== undefined) {
 			return maybe.window as MinimalBrowserWindow
 		}
@@ -717,8 +684,7 @@ export class DeckApp {
 			let decision: WindowCloseDecision
 			try {
 				decision = await decide()
-			}
-			catch (err) {
+			} catch (err) {
 				console.error('[electron-deck] per-window onClose decider threw; closing:', err)
 				decision = 'close'
 			}
@@ -751,9 +717,11 @@ export class DeckApp {
 			if (rec.closing) return // decision in flight
 			if (rec.committedClose) return // already committed to close
 			let settle!: (d: WindowCloseDecision) => void
-			rec.closing = new Promise<WindowCloseDecision>((res) => { settle = res })
+			rec.closing = new Promise<WindowCloseDecision>((res) => {
+				settle = res
+			})
 			void this.runWindowCloseDeciders(controlWc).then(
-				d => settle(d),
+				(d) => settle(d),
 				(err: unknown) => {
 					console.error('[electron-deck] per-window close decision rejected; closing:', err)
 					settle('close')
@@ -802,7 +770,10 @@ export class DeckApp {
 	 * @internal Lifetime accessors. The live shadow map mirroring `trackedWindows`,
 	 * the root Scope, and a consistency assertion.
 	 */
-	__lifetimeShadow(): Map<MinimalWebContents, { window: MinimalBrowserWindow, windowScope: Scope }> {
+	__lifetimeShadow(): Map<
+		MinimalWebContents,
+		{ window: MinimalBrowserWindow; windowScope: Scope }
+	> {
 		return this.lifetimeShadow
 	}
 
@@ -812,13 +783,11 @@ export class DeckApp {
 	}
 
 	/** @internal The per-trusted-wc trust records. */
-	__wcRecords(): Map<MinimalWebContents, { wcScope: Scope, leases: Set<Disposable>, windowScope: Scope }> {
+	__wcRecords(): Map<
+		MinimalWebContents,
+		{ wcScope: Scope; leases: Set<Disposable>; windowScope: Scope }
+	> {
 		return this.wcRecords
-	}
-
-	/** @internal The live capability policy (grant gate reads it). */
-	__capabilityPolicy(): CapabilityPolicy {
-		return this.capability.policy
 	}
 
 	/**
@@ -838,7 +807,9 @@ export class DeckApp {
 		}
 		for (const win of this.trackedWindows) {
 			if (!shadowWindows.has(win)) {
-				throw new Error('lifetime shadow inconsistent: a trackedWindows member is absent from the shadow')
+				throw new Error(
+					'lifetime shadow inconsistent: a trackedWindows member is absent from the shadow',
+				)
 			}
 		}
 	}
@@ -847,29 +818,8 @@ export class DeckApp {
 		if (this.config.events) {
 			this.bus.bindDeclaredEvents(this.config.events)
 		}
-		if (this.config.simulatorApis) {
-			for (const [name, handler] of Object.entries(this.config.simulatorApis)) {
-				const d = this.ipc.handle(
-					`${SIMULATOR_CHANNEL_PREFIX}${name}`,
-					handler as (...args: JsonValue[]) => MaybePromise<JsonValue>,
-				)
-				this.registry.add(d)
-			}
-		}
 		if (this.config.hostServices) {
 			for (const [name, handler] of Object.entries(this.config.hostServices)) {
-				// ENFORCE the layout.* boundary at registration. `layout.*` names
-				// are reserved for the grant-gated ControlBus (runtime.layout.command);
-				// they must NEVER be registered on the un-gated declarative hostServices
-				// route, or a privileged name would be reachable without a grant.
-				// Together with runtime.layout.command's throw, this makes the invariant
-				// `layout.* ⟺ gated` total.
-				if (name.startsWith('layout.')) {
-					throw new Error(
-						`config.hostServices: "layout.*" names are reserved for privileged ControlBus commands `
-						+ `(use runtime.layout.command); got: ${name}`,
-					)
-				}
 				const d = this.ipc.handle(
 					`${HOST_CHANNEL_PREFIX}${name}`,
 					handler as (...args: JsonValue[]) => MaybePromise<JsonValue>,
@@ -914,7 +864,7 @@ export class DeckApp {
 			get isDestroyed() {
 				return win.isDestroyed()
 			},
-			children: () => order.map(id => ({ id })),
+			children: () => order.map((id) => ({ id })),
 		}
 		const compositor = createCompositor(host)
 		// Owned AFTER the win.destroy own ⇒ runs BEFORE destroy (LIFO).
@@ -995,12 +945,12 @@ export class DeckApp {
 			main.webContents as unknown as MinimalWebContents,
 			this.createWindowSubstrate(main, mainWindowScope),
 		)
-		// Arm trust + grant revocation as the FIRST 'closed' listener — registered
+		// Arm trust revocation as the FIRST 'closed' listener — registered
 		// BEFORE the backend's onMainWindowCreated hook (which may register its own
 		// 'closed' listener) AND before admitTrust. This guarantees revokeWindowTrust
-		// (which synchronously drops BOTH trust leases AND capability grants for the
-		// window's wcs) runs FIRST in the 'closed' tick, so no other 'closed' listener
-		// — backend or framework — can observe a stale trust/grant for a wc whose id
+		// (which synchronously drops the trust leases of the window's wcs) runs FIRST
+		// in the 'closed' tick, so no other 'closed' listener
+		// — backend or framework — can observe stale trust for a wc whose id
 		// Electron may immediately reuse. Idempotent with the async wcScope cascade
 		// and the later close-decision handler (revoke is one-shot / by-senderId).
 		// Capture the main wc.id WHILE the window is alive: reading
@@ -1029,7 +979,7 @@ export class DeckApp {
 		// DeckWindow facade (newSession + per-window onClose) so `runtime.windows.main`
 		// resolves it and the close machine below can consult its per-window deciders.
 		const mainControlWc = main.webContents as unknown as MinimalWebContents
-		this.bindNavigationGrantReset(mainControlWc)
+		this.bindNavigationSlotReset(mainControlWc)
 		this.buildDeckWindow(main, mainControlWc, mainWindowScope)
 		this.mainControlWc = mainControlWc
 		// Let the backend mirror main-window trust into its domain set.
@@ -1041,20 +991,11 @@ export class DeckApp {
 		// — a main window it built itself.
 		this._notifyBackendTrusted(main.webContents)
 		this.pendingWindowCreated.push({ window: main, role: 'main' })
-		// Toolbar follows mainWindow resize
 		main.on('resize', () => {
 			// Backend repositions its overlays against the main window.
 			this.options.backend?.repositionOverlays?.(
 				main as unknown as Parameters<NonNullable<RuntimeBackend['repositionOverlays']>>[0],
 			)
-			if (!this.toolbarView || !this.config.toolbar) return
-			const b = main.getContentBounds()
-			this.toolbarView.setBounds({
-				x: 0,
-				y: 0,
-				width: b.width,
-				height: this.config.toolbar.height,
-			})
 		})
 		// Close-decision machine. `close` is cancelable: we always
 		// preventDefault first, then ask the backend whether to keep the window
@@ -1072,7 +1013,9 @@ export class DeckApp {
 			// the hook, so a 'close' re-entered during a synchronous hook body can't
 			// slip past [B] before the latch is set.
 			let settle!: (d: 'keep' | 'close') => void
-			this.closingDecisionPromise = new Promise<'keep' | 'close'>((res) => { settle = res })
+			this.closingDecisionPromise = new Promise<'keep' | 'close'>((res) => {
+				settle = res
+			})
 			// A LIVE per-window onClose decider STRICTLY supersedes
 			// backend.onMainWindowClose: when one is registered on the main window's
 			// DeckWindow, run the per-window deciders (registration order, any 'keep'
@@ -1085,18 +1028,16 @@ export class DeckApp {
 			const mainReg = this.windowRegistrations.get(mainControlWc)
 			if (mainReg && mainReg.deciders.length > 0) {
 				decide = this.runWindowCloseDeciders(mainControlWc)
-			}
-			else {
+			} else {
 				try {
 					decide = this.options.backend?.onMainWindowClose?.() ?? 'close'
-				}
-				catch (err) {
+				} catch (err) {
 					console.error('[electron-deck] onMainWindowClose threw (sync); closing:', err)
 					decide = 'close'
 				}
 			}
 			Promise.resolve(decide).then(
-				d => settle(d === 'keep' ? 'keep' : 'close'),
+				(d) => settle(d === 'keep' ? 'keep' : 'close'),
 				(err: unknown) => {
 					console.error('[electron-deck] onMainWindowClose threw; closing:', err)
 					settle('close')
@@ -1114,8 +1055,8 @@ export class DeckApp {
 		})
 		// 'closed' revokes trust + triggers shutdown. The 'keep' path never
 		// destroys, so it never reaches here. Close mainWindowScope and AWAIT
-		// its cascade BEFORE starting shutdown. The cascade closes the main +
-		// toolbar wcScopes (its children, LIFO) → disposes their trust leases →
+		// its cascade BEFORE starting shutdown. The cascade closes the main
+		// wcScope's children (LIFO) → disposes their trust leases →
 		// ref-count zeroes → untrusted. Awaiting to COMPLETION before `shutdown()`
 		// matters: a fire-and-forget `void close()` would pause at the
 		// async boundary between the two child wcScopes while shutdown's synchronous
@@ -1125,7 +1066,7 @@ export class DeckApp {
 		// `.finally` so it still runs if the cascade throws; rootScope.close() during
 		// shutdown is idempotent over the already-closed mainWindowScope.
 		main.on('closed', () => {
-			// Synchronously revoke main + toolbar trust the instant the window is
+			// Synchronously revoke main trust the instant the window is
 			// destroyed, so no async-cascade race can leave a destroyed wc trusted
 			// during a later beforeClose.
 			this.revokeWindowTrust(mainWindowScope)
@@ -1133,51 +1074,19 @@ export class DeckApp {
 			// already-revoked leases + win.destroy + wcRecords cleanup) and shutdown.
 			void mainWindowScope
 				.close()
-				.catch((e: unknown) => { console.error('[electron-deck] mainWindowScope.close() failed:', e) })
-				.finally(() => { void this.shutdown() })
+				.catch((e: unknown) => {
+					console.error('[electron-deck] mainWindowScope.close() failed:', e)
+				})
+				.finally(() => {
+					void this.shutdown()
+				})
 		})
-
-		// Toolbar contentWebview —— 装好 view + addChildView + setBounds + trust，
-		// 但 loadURL/loadFile 推迟到 loadAssembledSources() 在 wireTransport.start
-		// 之后调，避免 preload 先于 ipcMain handler 注册触发 invoke。
-		if (this.config.toolbar) {
-			const tb = this.config.toolbar
-			const view = new electron.WebContentsView({
-				webPreferences: { preload: tb.preloadPath },
-			})
-			this.toolbarView = view
-			main.contentView.addChildView(view)
-			const bounds = main.getContentBounds()
-			view.setBounds({ x: 0, y: 0, width: bounds.width, height: tb.height })
-			// toolbar lives in the main window → its wcScope parents under the SAME
-			// mainWindowScope, so the main window's close revokes toolbar trust too.
-			this.admitTrust(view.webContents as unknown as MinimalWebContents, mainWindowScope)
-			this.pendingWindowCreated.push({ window: main, role: 'toolbar' })
-		}
-
-		// Declared windows —— ctor + trust，loadURL 同样推迟
-		if (this.config.windows) {
-			for (const [key, contrib] of Object.entries(this.config.windows)) {
-				const win = this.constructWindow(contrib, /* autoTrust */ true, /* deferLoad */ true)
-				this.declaredWindows.set(key, win)
-				this.pendingWindowCreated.push({ window: win, role: 'host' })
-			}
-		}
 	}
 
 	/** 在 wireTransport.start 之后再 loadURL/loadFile，避免 preload 先于 ipcMain handler 注册触发 invoke。 */
 	private loadAssembledSources(): void {
-		if (this.toolbarView && this.config.toolbar) {
-			this.safeLoad(this.toolbarView.webContents, this.config.toolbar.source)
-		}
-		if (this.config.windows) {
-			for (const [key, contrib] of Object.entries(this.config.windows)) {
-				const win = this.declaredWindows.get(key)
-				if (win) this.safeLoad(win.webContents, contrib.source)
-			}
-		}
-		// config.app.source: auto-load the framework-built main window, mirroring the
-		// toolbar path. `this.mainWindow` is null under an `ownsWindows:true` backend
+		// config.app.source: auto-load the framework-built main window.
+		// `this.mainWindow` is null under an `ownsWindows:true` backend
 		// (constructRuntime returns early before building it), so this naturally
 		// skips that case — the backend builds + loads its own window.
 		if (this.mainWindow && this.config.app?.source) {
@@ -1197,8 +1106,7 @@ export class DeckApp {
 				console.error(`[electron-deck] loadURL("${source.url}") failed:`, err)
 				this.surfaceLoadFailed(source, err)
 			})
-		}
-		else {
+		} else {
 			wc.loadFile(source.file).catch((err: unknown) => {
 				console.error(`[electron-deck] loadFile("${source.file}") failed:`, err)
 				this.surfaceLoadFailed(source, err)
@@ -1241,8 +1149,8 @@ export class DeckApp {
 		//    replaces the gate outright. The internal `trustSet` is simply not the
 		//    authority on the override branch (`windows.trust()` writes it but the
 		//    consumer-supplied closure governs), which is the consumer's contract.
-		const trustedWebContents = wireOpts.trustedWebContents
-			?? ((): readonly MinimalWebContents[] => this.trustSet.snapshot())
+		const trustedWebContents =
+			wireOpts.trustedWebContents ?? ((): readonly MinimalWebContents[] => this.trustSet.snapshot())
 		const defaultSenderPolicy: SenderPolicy = wireOpts.trustedWebContents
 			? {
 					// override fanout source → derive the gate from the SAME closure.
@@ -1261,44 +1169,17 @@ export class DeckApp {
 		// Expose the live policy to buildRuntime (replaces `() => true` stub).
 		this.wireSenderPolicy = senderPolicy
 
-		// Construct the grant-gated ControlBus BEFORE the
-		// WireTransport. `CreateControlBusDeps.transport` is vestigial (the facade
-		// never calls back into the wire; the wire calls `dispatch`, not the
-		// reverse), so there is NO circular dependency: the ControlBus is built
-		// first, then the wire's `invokeHost` reads `this.controlBus` lazily at
-		// call time. Injecting `this.capability.policy` arms the grant gate.
-		this.controlBus = createControlBus({
-			bus: this.bus,
-			trustSet: this.trustSet,
-			policy: this.capability.policy,
-		})
-
 		const transport = new WireTransport({
 			ipcMain: wireOpts.ipcMain,
 			bus: this.bus,
 			senderPolicy,
 			trustedWebContents,
-			// The two-route boundary (「两条 invoke 路由的硬边界」): the wire's host `invokeHost`
-			// seam FORKS by command name.
-			//  - PRIVILEGED `layout.*` names route through `controlBus.dispatch`,
-			//    which applies the grant gate (DECK_FORBIDDEN when no live grant
-			//    covers (ctx.senderId, name)). These names MUST NOT be registered
-			//    in `hostServices` — they live only in the gated ControlBus command
-			//    table (`runtime.layout.command`).
-			//  - ORDINARY domain APIs keep the existing un-gated declarative
-			//    `hostServices` route over InMemoryTypedIpcRegistry (trusted may
-			//    call, no grant gate).
-			invokeHost: (name, args, ctx) => {
-				if (this.isPrivilegedCommandName(name)) {
-					return this.controlBus!.dispatch(name, args, ctx)
-				}
+			// Every invoke name routes through the un-gated declarative
+			// `hostServices` route over InMemoryTypedIpcRegistry (trusted may call).
+			invokeHost: (name, args) => {
 				return this.ipc.invoke<JsonValue>(`${HOST_CHANNEL_PREFIX}${name}`, ...args)
 			},
-			// simulator APIs are not privileged layout commands — unchanged.
-			invokeSimulator: (name, args, _ctx) =>
-				this.ipc.invoke<JsonValue>(`${SIMULATOR_CHANNEL_PREFIX}${name}`, ...args),
-			declaredEvents: () =>
-				this.config.events ? this.config.events.map(ev => ev.name) : [],
+			declaredEvents: () => (this.config.events ? this.config.events.map((ev) => ev.name) : []),
 		})
 		transport.start()
 		this.wireTransport = transport
@@ -1317,17 +1198,6 @@ export class DeckApp {
 	}
 
 	/**
-	 * The two-route boundary's privileged-name predicate (「两条 invoke 路由的硬边界」). A
-	 * PRIVILEGED command name — by convention `layout.*` — routes through the
-	 * grant-gated {@link ControlBus} (`controlBus.dispatch`). Ordinary domain
-	 * APIs (any other name) stay on the un-gated declarative `hostServices`
-	 * route. Privileged names MUST NOT be registered in `hostServices`.
-	 */
-	private isPrivilegedCommandName(name: string): boolean {
-		return name.startsWith('layout.')
-	}
-
-	/**
 	 * Warn ONCE about an invalid `keepAlive.max` (negative / non-integer /
 	 * NaN). Such a view is not keep-alive-managed (the group is skipped); warning
 	 * once avoids log spam when many views share the same bad config.
@@ -1337,8 +1207,41 @@ export class DeckApp {
 		if (this.warnedInvalidKeepAliveMax) return
 		this.warnedInvalidKeepAliveMax = true
 		console.warn(
-			`[electron-deck] runtime.view keepAlive.max must be a non-negative integer (got: ${max}); `
-			+ 'the view is NOT keep-alive-managed (no eviction).',
+			`[electron-deck] runtime.view keepAlive.max must be a non-negative integer (got: ${max}); ` +
+				'the view is NOT keep-alive-managed (no eviction).',
+		)
+	}
+
+	/**
+	 * Warn ONCE about a missing/empty `keepAlive.group` (grouping is explicit —
+	 * no longer inferred from `max`). Such a view is not keep-alive-managed.
+	 */
+	private warnedInvalidKeepAliveGroup = false
+	private warnInvalidKeepAliveGroup(group: unknown): void {
+		if (this.warnedInvalidKeepAliveGroup) return
+		this.warnedInvalidKeepAliveGroup = true
+		console.warn(
+			`[electron-deck] runtime.view keepAlive.group must be a non-empty string (got: ${JSON.stringify(group)}); ` +
+				'the view is NOT keep-alive-managed (no eviction).',
+		)
+	}
+
+	/**
+	 * Warn ONCE per `groupKey` when a later view names an already-established
+	 * group with a different `max`. First-declaration-wins: the group keeps the
+	 * `max` its first member set; later, conflicting `max` values are ignored.
+	 */
+	private readonly warnedKeepAliveGroupMaxConflict = new Set<string>()
+	private warnKeepAliveGroupMaxConflict(
+		groupKey: string,
+		establishedMax: number,
+		ignoredMax: number,
+	): void {
+		if (this.warnedKeepAliveGroupMaxConflict.has(groupKey)) return
+		this.warnedKeepAliveGroupMaxConflict.add(groupKey)
+		console.warn(
+			`[electron-deck] runtime.view keepAlive group "${groupKey}" already has max=${establishedMax} ` +
+				`(first declaration wins); ignoring conflicting max=${ignoredMax}.`,
 		)
 	}
 
@@ -1354,7 +1257,7 @@ export class DeckApp {
 	}
 
 	private constructWindow(
-		opts: WindowContribution | (WindowCreateOptions & { title?: string }),
+		opts: WindowCreateOptions & { title?: string },
 		autoTrust: boolean,
 		deferLoad = false,
 	): MinimalBrowserWindow {
@@ -1422,9 +1325,9 @@ export class DeckApp {
 			// Construction-time (window alive) → reading win.webContents is safe and
 			// keeps the Like type; the map key is the same object identity as `wc`.
 			this._notifyBackendTrusted(win.webContents)
-			// Main-frame cross-document navigation grant-reset on this window's
+			// Main-frame cross-document navigation slot-reset on this window's
 			// control wc (after admitTrust so its wcScope exists).
-			this.bindNavigationGrantReset(wc)
+			this.bindNavigationSlotReset(wc)
 		}
 		// Record the DeckWindow facade (newSession + per-window onClose) and
 		// arm the per-window cancelable close machine. The machine only preventDefaults
@@ -1477,7 +1380,9 @@ export class DeckApp {
 		// constructed main/toolbar/declared window) must NOT be re-adopted — that
 		// would replace its substrate and add a SECOND trust lease for the same wc.
 		if (this.windowSubstrates.has(wc)) {
-			throw new Error('runtime.windows.adopt: window is already framework-tracked (cannot adopt a framework-owned window)')
+			throw new Error(
+				'runtime.windows.adopt: window is already framework-tracked (cannot adopt a framework-owned window)',
+			)
 		}
 
 		// (1) windowScope — a child of rootScope so rootScope.close() (shutdown)
@@ -1512,8 +1417,7 @@ export class DeckApp {
 		}
 		if (typeof win.prependListener === 'function') {
 			win.prependListener('closed', revoke)
-		}
-		else {
+		} else {
 			// Real Electron BrowserWindow always has prependListener; a fake lacking it
 			// can't guarantee revoke-first, but trust must still be revoked on close.
 			win.on('closed', revoke)
@@ -1526,12 +1430,12 @@ export class DeckApp {
 		// combined with admitTrust's isDestroyed() guard, a window destroyed at any
 		// point can never leave a trusted-but-unrevoked wc.
 		this.admitTrust(wc, windowScope)
-		// Main-frame cross-document navigation grant-reset on the adopted
+		// Main-frame cross-document navigation slot-reset on the adopted
 		// control wc (after admitTrust so its wcScope exists). Record its
 		// DeckWindow facade + arm the per-window close machine (only preventDefaults
 		// when a live per-window decider exists, so an adopted window with no decider
 		// keeps the host's own close handling).
-		this.bindNavigationGrantReset(wc)
+		this.bindNavigationSlotReset(wc)
 		this.buildDeckWindow(win, wc, windowScope)
 		this.armSubWindowCloseMachine(win, wc, windowScope)
 		// Also run the synchronous revoke during the windowScope's teardown cascade
@@ -1568,31 +1472,25 @@ export class DeckApp {
 	}
 
 	/**
-	 * Synchronously revoke BOTH trust leases AND capability
-	 * grants for every wc admitted under `windowScope` (the window's control wc +
-	 * any siblings like the toolbar wc). Called from the window's 'closed' handler
-	 * so both authorizations are gone the instant the window is destroyed,
-	 * closing every async-cascade race (a destroyed wc can never be observed trusted OR granted
-	 * by a later shutdown/beforeClose, nor by a NEW window that reuses the same
-	 * wc.id before the async scope cascade revokes it). The leases are ALSO owned
-	 * by their wcScope, so the async `windowScope.close()` still runs (it disposes
-	 * the already-disposed leases idempotently, plus win.destroy + wcRecords
-	 * cleanup) and remains the teardown/partial-init fallback for paths where no
-	 * 'closed' fires (cleanupOnError, shutdown of a never-closed window).
-	 * `lease.dispose()` is synchronous (trustSet ref-count--) and one-shot, so no
-	 * double-decrement; `revokeBySenderId` is likewise idempotent, so the grant's
-	 * own async `senderScope.on('closed')` revoke later becomes a no-op.
+	 * Synchronously revoke trust leases for every wc admitted under
+	 * `windowScope` (the window's control wc + any siblings). Called from the
+	 * window's 'closed' handler so trust is gone the instant the window is
+	 * destroyed, closing every async-cascade race (a destroyed wc can never be
+	 * observed trusted by a later shutdown/beforeClose, nor by a NEW window
+	 * that reuses the same wc.id before the async scope cascade revokes it).
+	 * The leases are ALSO owned by their wcScope, so the async
+	 * `windowScope.close()` still runs (it disposes the already-disposed
+	 * leases idempotently, plus win.destroy + wcRecords cleanup) and remains
+	 * the teardown/partial-init fallback for paths where no 'closed' fires
+	 * (cleanupOnError, shutdown of a never-closed window). `lease.dispose()`
+	 * is synchronous (trustSet ref-count--) and one-shot, so no double-decrement.
 	 */
 	private revokeWindowTrust(windowScope: Scope): void {
-		for (const [wc, rec] of this.wcRecords) {
+		for (const [, rec] of this.wcRecords) {
 			if (rec.windowScope === windowScope) {
 				for (const lease of rec.leases) {
 					lease.dispose()
 				}
-				// wc.id-reuse safety: synchronously drop this wc's grants too,
-				// mirroring the trust-lease revocation above. `wc.id` is the
-				// senderId the grant was issued with.
-				this.capability.revokeBySenderId(wc.id)
 			}
 		}
 	}
@@ -1608,7 +1506,7 @@ export class DeckApp {
 	private ensureSlotChannelsArmed(): void {
 		this.wireTransport?.armSlotChannels(
 			(senderId, rawSnapshot) => this.handleSnapshot(senderId, rawSnapshot),
-			senderId => this.handleLayoutSubscribe(senderId),
+			(senderId) => this.handleLayoutSubscribe(senderId),
 		)
 	}
 
@@ -1616,7 +1514,7 @@ export class DeckApp {
 	 * slot-token apply path (`__electron-deck:snapshot`). The renderer publishes a
 	 * whole window-level desired-placement table; each entry's slotToken is the
 	 * credential. Steps:
-	 *   1. AUTHORIZE + clean: `cleanSnapshot` keeps only views whose token is known
+	 *   1. AUTHORIZE + clean: `authorizeSnapshot` keeps only views whose token is known
 	 *      AND authorized to `senderId` (anti-spoof), deriving each view's identity
 	 *      (viewId) + z-order (zone→layer) from the registry — never from the
 	 *      renderer-reported fields. A non-empty snapshot that fully fails
@@ -1627,7 +1525,7 @@ export class DeckApp {
 	 *   3. DISPATCH the ops onto each view's `applyPlacement` sink.
 	 */
 	private handleSnapshot(senderId: number, rawSnapshot: unknown): void {
-		const clean = cleanSnapshot(rawSnapshot, (slotToken) => {
+		const clean = authorizeSnapshot(rawSnapshot, (slotToken) => {
 			const entry = this.slotTokens.get(slotToken)
 			if (!entry || entry.authorizedWcId !== senderId) return null
 			return { viewId: entry.viewId, layer: entry.zone }
@@ -1647,7 +1545,7 @@ export class DeckApp {
 		for (const entry of this.slotTokens.values()) {
 			if (entry.authorizedWcId === senderId) applyByViewId.set(entry.viewId, entry.apply)
 		}
-		dispatchOps(ops, state, (viewId) => applyByViewId.get(viewId) ?? null)
+		applyReconciledPlacements(ops, state, (viewId) => applyByViewId.get(viewId) ?? null)
 	}
 
 	/**
@@ -1701,19 +1599,15 @@ export class DeckApp {
 			this.revokeWindowTrust(shadowEntry.windowScope)
 			void shadowEntry.windowScope.close()
 		}
-		for (const [key, w] of this.declaredWindows) {
-			if (w === win) {
-				this.declaredWindows.delete(key)
-				break
-			}
-		}
 		// Trust revocation is a pure Scope-teardown effect — the
 		// `void shadowEntry.windowScope.close()` above cascades into this wc's
 		// wcScope, disposing every lease → ref-count zeroes → untrusted (wc.id-reuse
 		// + leak safety).
 		// Undo the backend trust mirror for THIS window now (not at teardown).
 		this.backendTrustDisposables.get(wc)?.dispose()
-		this.emitFrameworkEvent('window-closed', { window: win as unknown as FrameworkEvents['window-closed']['window'] })
+		this.emitFrameworkEvent('window-closed', {
+			window: win as unknown as FrameworkEvents['window-closed']['window'],
+		})
 	}
 
 	/**
@@ -1754,8 +1648,7 @@ export class DeckApp {
 		for (const fn of Array.from(set)) {
 			try {
 				fn(payload as unknown)
-			}
-			catch (err) {
+			} catch (err) {
 				console.error(`[electron-deck] framework listener for "${event}" threw:`, err)
 			}
 		}
@@ -1775,8 +1668,7 @@ export class DeckApp {
 		if (cur === 'ready') {
 			this.lifecycle.enter('drain')
 			this.lifecycle.enter('cleanup')
-		}
-		else {
+		} else {
 			// 紧急 shutdown（尚未到 ready）
 			this.lifecycle._force('cleanup')
 		}
@@ -1793,8 +1685,11 @@ export class DeckApp {
 		// Skip when shutdown was DRIVEN BY `will-quit` (the app is already quitting):
 		// re-calling `app.quit()` mid-quit re-enters the quit sequence.
 		if (!this.quitInitiated) {
-			try { this.options.electron?.app?.quit() }
-			catch (e) { console.error('[electron-deck] app.quit() failed:', e) }
+			try {
+				this.options.electron?.app?.quit()
+			} catch (e) {
+				console.error('[electron-deck] app.quit() failed:', e)
+			}
 		}
 	}
 
@@ -1819,17 +1714,6 @@ export class DeckApp {
 		// trusted through beforeClose (their wc is still usable) and are revoked when
 		// rootScope.close() below destroys them (→ 'closed' → revokeWindowTrust).
 
-		// beforeClose await + timeout
-		if (this.config.lifecycle?.beforeClose) {
-			const timeoutMs = this.config.lifecycle.timeoutMs ?? 10_000
-			try {
-				await runWithTimeout(this.config.lifecycle.beforeClose(), timeoutMs)
-			}
-			catch (e) {
-				console.error('[electron-deck] lifecycle.beforeClose failed/timed out:', e)
-			}
-		}
-
 		// backend.onShutdown — AWAITED exactly once (runShutdownCleanup runs once,
 		// fenced by shutdown()'s shutdownPromise), consistently with beforeClose.
 		// Best-effort: a throw/reject is logged and never aborts the rest of
@@ -1838,8 +1722,7 @@ export class DeckApp {
 		if (onShutdown) {
 			try {
 				await onShutdown.call(this.options.backend)
-			}
-			catch (e) {
+			} catch (e) {
 				console.error('[electron-deck] backend.onShutdown failed:', e)
 			}
 		}
@@ -1859,16 +1742,14 @@ export class DeckApp {
 		// discipline. No consumer contract pins inter-window destroy order at app
 		// shutdown.
 		//
-		// NOTE (`mainWindow`/`toolbarView` nulled AFTER close, not before): real
+		// NOTE (`mainWindow` nulled AFTER close, not before): real
 		// Electron fires `'closed'` synchronously inside `win.destroy()`, so a host
 		// `window-closed` listener runs DURING rootScope.close()'s cascade. Nulling
-		// these refs before close would expose a prematurely-null ref to such a
+		// this ref before close would expose a prematurely-null ref to such a
 		// listener, so we null AFTER close.
 		await this.rootScope.close()
 		this.mainWindow = null
-		this.toolbarView = null
 		this.trackedWindows.clear()
-		this.declaredWindows.clear()
 		this.lifetimeShadow.clear()
 		// Sub-window substrates self-delete per-close in
 		// handleSubWindowClosed, but the MAIN window's substrate entry is never
@@ -1914,10 +1795,11 @@ export class DeckApp {
 		}
 
 		const trackedWindows = this.trackedWindows
-		const declaredWindows = this.declaredWindows
 		const getMainWindow = (): MinimalBrowserWindow | null => this.mainWindow
-		const getToolbarView = (): MinimalWebContentsView | null => this.toolbarView
-		const constructWindow = (opts: WindowCreateOptions, autoTrust: boolean): MinimalBrowserWindow => {
+		const constructWindow = (
+			opts: WindowCreateOptions,
+			autoTrust: boolean,
+		): MinimalBrowserWindow => {
 			const win = this.constructWindow(opts, autoTrust)
 			// runtime.windows.create() runs in setup/ready phase — emit
 			// window-created in real time (no replay needed).
@@ -1944,8 +1826,7 @@ export class DeckApp {
 						role: item.role,
 					})
 				}
-			}
-			else if (event === 'load-failed') {
+			} else if (event === 'load-failed') {
 				if (this.pendingLoadFailed.length === 0) return
 				const queue = this.pendingLoadFailed.splice(0)
 				for (const item of queue) {
@@ -1964,17 +1845,12 @@ export class DeckApp {
 				if (!mw) return electronUnavailable('mainWindow')
 				return mw as unknown as typeof runtime.mainWindow
 			},
-			get toolbarView() {
-				return (getToolbarView() ?? null) as unknown as typeof runtime.toolbarView
-			},
 			ipc,
 			get rawIpcMain() {
 				if (!wireIpcMain) return rawIpcMainUnavailable()
 				return wireIpcMain as unknown as typeof import('electron').ipcMain
 			},
 			call: {
-				simulator: async (name, ...args) =>
-					ipc.invoke<JsonValue>(`${SIMULATOR_CHANNEL_PREFIX}${name}`, ...args),
 				host: async (name, ...args) =>
 					ipc.invoke<JsonValue>(`${HOST_CHANNEL_PREFIX}${name}`, ...args),
 			},
@@ -1988,21 +1864,22 @@ export class DeckApp {
 					const wc = win.webContents as unknown as MinimalWebContents
 					const reg = this.windowRegistrations.get(wc)
 					if (!reg) {
-						throw new Error('runtime.windows.create: DeckWindow registration missing (internal invariant)')
+						throw new Error(
+							'runtime.windows.create: DeckWindow registration missing (internal invariant)',
+						)
 					}
 					return reg.deckWindow
 				},
 				get main(): DeckWindow | null {
 					return getMainDeckWindow()
 				},
-				get: (id): typeof runtime.mainWindow | undefined => {
-					const w = declaredWindows.get(id)
-					return w ? (w as unknown as typeof runtime.mainWindow) : undefined
-				},
-				all: (): typeof runtime.mainWindow[] => {
-					const result: typeof runtime.mainWindow[] = []
+				all: (): DeckWindow[] => {
+					const result: DeckWindow[] = []
 					for (const w of trackedWindows) {
-						if (!w.isDestroyed()) result.push(w as unknown as typeof runtime.mainWindow)
+						if (w.isDestroyed()) continue
+						const wc = w.webContents as unknown as MinimalWebContents
+						const reg = this.windowRegistrations.get(wc)
+						if (reg) result.push(reg.deckWindow)
 					}
 					return result
 				},
@@ -2019,10 +1896,10 @@ export class DeckApp {
 					if (tracked) {
 						const lease = this.admitTrust(wc, tracked.windowScope)
 						// A window constructed `autoTrust:false` then trusted late
-						// here MUST also get the navigation grant-reset hook, else its
-						// control page could navigate away carrying its grants. Idempotent,
+						// here MUST also get the navigation slot-reset hook, else its
+						// control page could navigate away carrying its slot tokens. Idempotent,
 						// so a window already auto-trusted (hook bound) is unaffected.
-						this.bindNavigationGrantReset(wc)
+						this.bindNavigationSlotReset(wc)
 						return lease
 					}
 					// An ADOPTED window is not in lifetimeShadow (only framework-built
@@ -2035,7 +1912,7 @@ export class DeckApp {
 					const adopted = this.wcRecords.get(wc)
 					if (adopted) {
 						const lease = this.admitTrust(wc, adopted.windowScope)
-						this.bindNavigationGrantReset(wc)
+						this.bindNavigationSlotReset(wc)
 						return lease
 					}
 					return this._trustWebContents(wc)
@@ -2057,8 +1934,8 @@ export class DeckApp {
 					const resolved = this.sessions.get(opts.scope)
 					if (!resolved) {
 						throw new Error(
-							'runtime.view: `scope` must be a DeckSession from runtime.scopes.create() '
-							+ '(a foreign/raw Scope is rejected)',
+							'runtime.view: `scope` must be a DeckSession from runtime.scopes.create() ' +
+								'(a foreign/raw Scope is rejected)',
 						)
 					}
 					displayScope = resolved
@@ -2108,7 +1985,8 @@ export class DeckApp {
 				}
 				const nativeView = {
 					ref: { id: viewId } as NativeViewRef,
-					setBounds: (b: { x: number, y: number, width: number, height: number }) => wcv.setBounds(b),
+					setBounds: (b: { x: number; y: number; width: number; height: number }) =>
+						wcv.setBounds(b),
 					// Owned by the viewScope (AFTER detach, via view-handle's teardown order), so
 					// an explicit dispose / window-close cascade / explicit-scope close
 					// destroys the wc, not just detaches it.
@@ -2121,7 +1999,10 @@ export class DeckApp {
 						// `wc &&` guard (same idiom as closeNativeWc above): after teardown
 						// Electron may have nulled `wcv.webContents`, so re-reading + calling
 						// `.capturePage()` would throw a raw TypeError. Reject cleanly instead.
-						const wc = wcv.webContents as unknown as { isDestroyed?(): boolean, capturePage(): Promise<unknown> } | null
+						const wc = wcv.webContents as unknown as {
+							isDestroyed?(): boolean
+							capturePage(): Promise<unknown>
+						} | null
 						if (!wc || wc.isDestroyed?.()) {
 							return Promise.reject(new Error('ViewHandle.capturePage: native view destroyed'))
 						}
@@ -2129,7 +2010,7 @@ export class DeckApp {
 					},
 				}
 				// keepAlive「opt-in helper：runtime.view({ keepAlive })」: opt-in LRU group, only when configured. Views sharing
-				// the same `max` form one group keyed `lru:${max}`.
+				// the same `group` name form one group keyed `lru:${group}`.
 				//
 				// Validate `max`. A negative `max` would make the eviction
 				// `while (hidden.length > max)` loop evict every hidden view (and a
@@ -2144,12 +2025,31 @@ export class DeckApp {
 				if (keepAlive && !keepAliveMaxValid) {
 					this.warnInvalidKeepAliveMax(keepAlive.max)
 				}
-				const groupKey = keepAlive && keepAliveMaxValid ? `lru:${keepAlive.max}` : null
-				const keepAliveGroup = (): { hidden: string[], handles: Map<string, DeckViewHandle> } => {
+				// Grouping is explicit (`keepAlive.group`) — no longer inferred from
+				// `max`. A missing/empty `group` is likewise NOT keep-alive-managed.
+				const keepAliveGroupValid = keepAlive
+					? typeof keepAlive.group === 'string' && keepAlive.group.length > 0
+					: false
+				if (keepAlive && keepAliveMaxValid && !keepAliveGroupValid) {
+					this.warnInvalidKeepAliveGroup(keepAlive.group)
+				}
+				const groupKey =
+					keepAlive && keepAliveMaxValid && keepAliveGroupValid ? `lru:${keepAlive.group}` : null
+				const keepAliveGroup = (): {
+					max: number
+					hidden: string[]
+					handles: Map<string, DeckViewHandle>
+				} => {
 					let g = this.keepAliveGroups.get(groupKey!)
 					if (!g) {
-						g = { hidden: [], handles: new Map() }
+						// First view to join this group establishes its `max`.
+						g = { max: keepAlive!.max, hidden: [], handles: new Map() }
 						this.keepAliveGroups.set(groupKey!, g)
+					} else if (g.max !== keepAlive!.max) {
+						// A later view names the same group with a different `max`.
+						// First-declaration-wins: keep the group's established `max`,
+						// warn once per group so the conflict isn't silent.
+						this.warnKeepAliveGroupMaxConflict(groupKey!, g.max, keepAlive!.max)
 					}
 					return g
 				}
@@ -2175,10 +2075,21 @@ export class DeckApp {
 				const inner = createViewHandle({
 					nativeView,
 					scope: displayScope,
-					// Fire group cleanup on viewScope teardown (covers window-close,
-					// explicit dispose, AND LRU eviction). Idempotent with the hostHandle
-					// .dispose() call below.
-					onDispose: () => removeFromKeepAliveGroup(viewId),
+					// Fire on EVERY viewScope teardown — a window-close cascade tears down
+					// viewScope directly, WITHOUT going through hostHandle.dispose() below,
+					// so this is the only place a cascade-torn-down view's `disposed` +
+					// `slotToken` bookkeeping gets synced. Mirrors hostHandle.dispose()'s own
+					// ordering (disposed first, then token revoke, then LRU) so a frame that
+					// lands mid-cascade sees the same guards it would after an explicit
+					// dispose().
+					onDispose: () => {
+						disposed = true
+						if (slotToken) {
+							this.slotTokens.delete(slotToken)
+							slotToken = undefined
+						}
+						removeFromKeepAliveGroup(viewId)
+					},
 				})
 				// Remember WHICH substrate this view was placed into, so
 				// dispose() can unregister its WCV from that substrate's registry +
@@ -2192,10 +2103,20 @@ export class DeckApp {
 				// One placeIn per host handle. A second placeIn THROWS (re-placement
 				// is moveTo's job) — never overwrite the inner current/viewScope.
 				let placed = false
+				// Set at the START of dispose() (before `inner.dispose()` runs), so a
+				// concurrent applyPlacement — public or via the slot-token `apply`
+				// callback — short-circuits instead of racing the teardown: it must
+				// neither touch a group the view is being removed from nor throw the
+				// anchor-placed guard once `slotToken` below is cleared.
+				let disposed = false
 				// Mint + register + push a slot-token anchor for an anchored placement on
 				// `controlWc`/`anchor`. Shared by placeIn (first placement) and moveTo
 				// (re-anchor for the dest window). Sets the captured `slotToken`.
-				const mintSlotToken = (controlWc: MinimalWebContents, anchor: string, zone: number): void => {
+				const mintSlotToken = (
+					controlWc: MinimalWebContents,
+					anchor: string,
+					zone: number,
+				): void => {
 					// The wire's Snapshot / LayoutSubscribe channels are
 					// armed eagerly at framework start() (see bindWireTransport).
 					// This call is kept for safety/idempotency — it is a no-op when the
@@ -2223,9 +2144,69 @@ export class DeckApp {
 						authorizedWcId,
 						zone,
 						resend,
-						apply: p => { hostHandle.applyPlacement(p as ViewPlacement) },
+						apply: (p) => {
+							applyPlacementInternal(p as ViewPlacement)
+						},
 					})
 					resend()
+				}
+				// The shared placement path: `inner.applyPlacement` + keepAlive LRU
+				// bookkeeping. Called from BOTH the page-driven slot-token `apply`
+				// callback above (anchor-placed views) and the public
+				// `hostHandle.applyPlacement` below (host-driven views) — the guard
+				// distinguishing the two lives only at the public entry point.
+				const applyPlacementInternal = (p: ViewPlacement): DeckViewHandle => {
+					// Disposed: never reaches `inner` (its own guard would also drop it,
+					// but `disposed` is set BEFORE `inner.dispose()` runs — see below —
+					// so this short-circuit closes the window where a concurrent
+					// applyPlacement could otherwise resurrect the view into the LRU
+					// group after `removeFromKeepAliveGroup` already ran).
+					if (disposed) return hostHandle
+					const accepted = inner.applyPlacement(p)
+					// A frame `inner` itself dropped (mid-moveTo migration, or
+					// already-disposed) must NOT be treated as applied — it never
+					// touched the visible/hidden state, so the LRU bookkeeping below
+					// would otherwise mark a still-visible (or already-gone) view
+					// evictable off a frame that never took effect.
+					if (!accepted) return hostHandle
+					// keepAlive「opt-in helper：runtime.view({ keepAlive })」: maintain this group's LRU of HIDDEN views.
+					if (groupKey) {
+						const group = keepAliveGroup()
+						const dropFromHidden = (): void => {
+							const i = group.hidden.indexOf(viewId)
+							if (i >= 0) group.hidden.splice(i, 1)
+						}
+						if (p.visible) {
+							// Recently used + currently visible: never evictable.
+							dropFromHidden()
+						} else {
+							// Append only on the VISIBLE→HIDDEN transition. A repeated
+							// `visible:false` for an ALREADY-hidden view is a no-op for LRU
+							// ordering — re-appending would move it to most-recently-hidden,
+							// corrupting "least-recently-VISIBLE" order. Membership guard:
+							// push only if not already in the hidden list.
+							if (!group.hidden.includes(viewId)) {
+								group.hidden.push(viewId)
+							}
+							// Over budget: evict the FRONT (least-recently-visible) hidden
+							// view -> dispose it (its WebContents is destroyed). `group.max` is
+							// the group's own established max (first-declaration-wins), not
+							// necessarily this call's `keepAlive.max`.
+							while (group.hidden.length > group.max) {
+								const victimId = group.hidden.shift()!
+								const victim = group.handles.get(victimId)
+								// A fire-and-forget eviction: catch the victim's dispose
+								// rejection (its native teardown may throw) and log it, so an
+								// eviction never leaks an unhandled promise rejection.
+								if (victim) {
+									void victim.dispose().catch((e) => {
+										console.error('[electron-deck] keepAlive eviction dispose failed:', e)
+									})
+								}
+							}
+						}
+					}
+					return hostHandle
 				}
 				// Chainable host-API wrapper: placeIn resolves the target window's
 				// per-window substrate, registers the native view, then delegates to
@@ -2236,7 +2217,9 @@ export class DeckApp {
 						// BEFORE any substrate registration so a rejected re-placeIn leaves
 						// no partial state. moveTo() is the only migration path.
 						if (placed) {
-							throw new Error('DeckViewHandle.placeIn: view already placed — use moveTo() to migrate')
+							throw new Error(
+								'DeckViewHandle.placeIn: view already placed — use moveTo() to migrate',
+							)
 						}
 						const targetWin = this.resolveWindowArg(win)
 						const controlWc = targetWin.webContents
@@ -2303,8 +2286,7 @@ export class DeckApp {
 								{ compositor: destSub.compositor, windowScope: destSub.windowScope },
 								{ zone: moveOpts.zone, rehome: moveOpts.rehome },
 							)
-						}
-						catch (e) {
+						} catch (e) {
 							// Dest failed → inner rolled back to src. The dest Compositor
 							// snapshots/rolls back its OWN tracked order, but a native
 							// addChildView that throws MID-APPLY may have leaked the WCV into
@@ -2347,69 +2329,74 @@ export class DeckApp {
 						}
 					},
 					applyPlacement: (p) => {
-						inner.applyPlacement(p)
-						// keepAlive「opt-in helper：runtime.view({ keepAlive })」: maintain this group's LRU of HIDDEN views.
-						if (groupKey) {
-							const group = keepAliveGroup()
-							const dropFromHidden = (): void => {
-								const i = group.hidden.indexOf(viewId)
-								if (i >= 0) group.hidden.splice(i, 1)
-							}
-							if (p.visible) {
-								// Recently used + currently visible: never evictable.
-								dropFromHidden()
-							}
-							else {
-								// Append only on the VISIBLE→HIDDEN transition. A repeated
-								// `visible:false` for an ALREADY-hidden view is a no-op for LRU
-								// ordering — re-appending would move it to most-recently-hidden,
-								// corrupting "least-recently-VISIBLE" order. Membership guard:
-								// push only if not already in the hidden list.
-								if (!group.hidden.includes(viewId)) {
-									group.hidden.push(viewId)
-								}
-								// Over budget: evict the FRONT (least-recently-visible) hidden
-								// view -> dispose it (its WebContents is destroyed). `keepAlive.max`
-								// is a validated non-negative integer here (groupKey is null for an
-								// invalid max, so this block never runs for one).
-								while (keepAlive && group.hidden.length > keepAlive.max) {
-									const victimId = group.hidden.shift()!
-									const victim = group.handles.get(victimId)
-									// A fire-and-forget eviction: catch the victim's dispose
-									// rejection (its native teardown may throw) and log it, so an
-									// eviction never leaks an unhandled promise rejection.
-									if (victim) {
-										void victim.dispose().catch((e) => {
-											console.error('[electron-deck] keepAlive eviction dispose failed:', e)
-										})
-									}
-								}
-							}
+						// Disposed: a late frame is idempotent no-op IPC, same as every
+						// other post-dispose call on this handle — not an anchor-placed
+						// error. Checked FIRST so it wins over the anchor guard below
+						// (an anchor-placed view's `slotToken` closure var is cleared on
+						// dispose, but check `disposed` directly rather than depend on
+						// that ordering).
+						if (disposed) return hostHandle
+						// Placement is either/or: a view anchored via a non-empty
+						// `placeIn`/`moveTo` anchor is PAGE-DRIVEN (the renderer drives it
+						// through the slot-token `apply` path, which calls
+						// `applyPlacementInternal` directly). The host calling the PUBLIC
+						// `applyPlacement` on such a view would fight the page for control
+						// of the same placement — reject it with a clear error instead of
+						// silently taking effect. `slotToken` is set exactly while a
+						// non-empty anchor is live (minted in mintSlotToken, cleared on
+						// dispose / re-anchor), so it doubles as the anchor-placed flag.
+						if (slotToken) {
+							throw new Error(
+								'DeckViewHandle.applyPlacement: view is anchor-placed (placeIn/moveTo with ' +
+									'a non-empty anchor) — placement is page-driven; the host cannot call ' +
+									'applyPlacement() on it',
+							)
 						}
-						return hostHandle
+						return applyPlacementInternal(p)
 					},
 					// Detach (inner, idempotent) THEN unregister from the
 					// substrate so the disposed view leaves `wcvById` + `order`.
 					// `unregisterView` is itself idempotent (Map.delete + guarded
 					// splice), so a double-dispose is harmless.
 					dispose: async () => {
-						await inner.dispose()
-						// Dispose already closes the WC via closeNativeWc
-						// below, so the rootScope guard is now redundant — disarm + drop it
-						// (no double-close, and no disposer left on the long-lived rootScope).
-						disarmRootClose()
-						// keepAlive「保活寿命归 Scope、淘汰策略归 host」: catch-all destroy for a NEVER-PLACED view (no
-						// viewScope ran the destroy own). Guarded -> a no-op when the
-						// viewScope already closed the wc (never double-closed).
-						closeNativeWc()
-						placedSubstrate?.unregisterView(viewId)
-						// Revoke the slot token so a stale `place` after dispose drops.
-						if (slotToken) this.slotTokens.delete(slotToken)
-						// keepAlive「opt-in helper：runtime.view({ keepAlive })」: drop this view from its LRU group. Idempotent
-						// + redundant-but-safe for placed views (the viewScope's onDispose
-						// already ran it on inner.dispose above); REQUIRED for a never-placed
-						// keepAlive view whose viewScope never existed (no onDispose fired).
-						removeFromKeepAliveGroup(viewId)
+						// Set BEFORE `inner.dispose()` so a concurrent applyPlacement
+						// (public or slot-token `apply`) sees it immediately — dispose
+						// itself awaits the migrationLock (view-handle.ts's `withLock`),
+						// so there is a real window where teardown is pending.
+						disposed = true
+						try {
+							await inner.dispose()
+							// Dispose already closes the WC via closeNativeWc
+							// below, so the rootScope guard is now redundant — disarm + drop it
+							// (no double-close, and no disposer left on the long-lived rootScope).
+							disarmRootClose()
+							// keepAlive「保活寿命归 Scope、淘汰策略归 host」: catch-all destroy for a NEVER-PLACED view (no
+							// viewScope ran the destroy own). Guarded -> a no-op when the
+							// viewScope already closed the wc (never double-closed).
+							closeNativeWc()
+							placedSubstrate?.unregisterView(viewId)
+						} finally {
+							// Token revoke + LRU cleanup must run even if `inner.dispose()`
+							// (native teardown) throws — otherwise a rejected dispose leaves the
+							// slot token replayable and the view stuck registered in its
+							// keepAlive group. The rejection itself still propagates to the
+							// caller (finally never swallows it).
+							//
+							// Revoke the slot token so a stale `place` after dispose drops.
+							// Also clear the closure var — `slotToken` doubles as the
+							// anchor-placed flag on the public applyPlacement guard above, so
+							// leaving it set would make that guard misfire on a disposed view
+							// (though `disposed` is now checked first and wins regardless).
+							if (slotToken) {
+								this.slotTokens.delete(slotToken)
+								slotToken = undefined
+							}
+							// keepAlive「opt-in helper：runtime.view({ keepAlive })」: drop this view from its LRU group. Idempotent
+							// + redundant-but-safe for placed views (the viewScope's onDispose
+							// already ran it on inner.dispose above); REQUIRED for a never-placed
+							// keepAlive view whose viewScope never existed (no onDispose fired).
+							removeFromKeepAliveGroup(viewId)
+						}
 					},
 					// Additive handle accessors — delegate to the inner ViewHandle, which
 					// owns the native WebContentsView, the live-bounds tracking, and the
@@ -2434,9 +2421,11 @@ export class DeckApp {
 					// session's close() then fences the WebContents close (it does not
 					// resolve until dispose settles). CATCH rejection so a dispose failure
 					// is logged, not an unhandled promise rejection.
-					displayScope.own(() => hostHandle.dispose().catch((e) => {
-						console.error('[electron-deck] view session-scope dispose failed:', e)
-					}))
+					displayScope.own(() =>
+						hostHandle.dispose().catch((e) => {
+							console.error('[electron-deck] view session-scope dispose failed:', e)
+						}),
+					)
 				}
 				return hostHandle
 			},
@@ -2455,51 +2444,6 @@ export class DeckApp {
 					}
 					this.sessions.set(session, scope)
 					return session
-				},
-			},
-			grants: {
-				issue: (controlWc, opts): Disposable => {
-					const wc = controlWc as unknown as MinimalWebContents
-					const rec = this.wcRecords.get(wc)
-					if (!rec) {
-						// Cannot grant an untrusted sender — there is no wcScope to bind
-						// the grant's lifetime to (wc.id-reuse safety REQUIRES the grant
-						// die with the wc). Refuse rather than mint an unrevocable grant.
-						throw new Error('runtime.grants.issue: webContents is not trusted (no wcScope to bind the grant to)')
-					}
-					// `targetScope` is optional + reserved (not consulted at
-					// dispatch). When supplied it is a DeckSession; resolve it to the
-					// internal Scope for storage, ignore an unresolvable/foreign one
-					// (the grant gate doesn't read it yet).
-					const targetScope = opts.targetScope ? this.sessions.get(opts.targetScope) : undefined
-					return this.capability.issue({
-						senderId: wc.id,
-						senderScope: rec.wcScope,
-						targetScope,
-						commands: new Set(opts.commands),
-					})
-				},
-			},
-			layout: {
-				// Register a PRIVILEGED (`layout.*`) command into the
-				// grant-gated ControlBus command table. A real webview→main invoke of
-				// this name (after the wire's trust + main-frame gate) reaches the
-				// handler ONLY when a live grant covers (senderId, name); otherwise
-				// ControlBus.dispatch throws DECK_FORBIDDEN.
-				command: (
-					name: string,
-					handler: (...args: JsonValue[]) => JsonValue | Promise<JsonValue>,
-				): Disposable => {
-					// ENFORCE the layout.* boundary (not just convention). A
-					// privileged command name MUST start with `layout.` so it always
-					// routes to the grant-gated ControlBus dispatch (isPrivilegedCommandName
-					// forks `layout.*` there). Reject any other name at registration.
-					if (!name.startsWith('layout.')) {
-						throw new Error(
-							`runtime.layout.command: privileged command names must start with "layout." (got: ${name})`,
-						)
-					}
-					return this.controlBus!.command(name, handler)
 				},
 			},
 			context,
@@ -2528,21 +2472,8 @@ export class DeckApp {
 					},
 				}
 			},
-			add: d => registry.add(d),
+			add: (d) => registry.add(d),
 		}
 		return runtime
-	}
-}
-
-async function runWithTimeout<T>(work: MaybePromise<T>, timeoutMs: number): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined
-	const timeout = new Promise<never>((_, rej) => {
-		timer = setTimeout(() => rej(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs)
-	})
-	try {
-		return await Promise.race([Promise.resolve(work), timeout])
-	}
-	finally {
-		if (timer !== undefined) clearTimeout(timer)
 	}
 }

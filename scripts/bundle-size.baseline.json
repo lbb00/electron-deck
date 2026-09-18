@@ -2,8 +2,8 @@
 	".": 16913,
 	"./main": 5532,
 	"./preload": 1078,
-	"./client": 2798,
-	"./client/browser": 2798,
+	"./client": 3040,
+	"./client/browser": 3040,
 	"./host": 3848,
 	"./layout": 5593,
 	"./dock-react": 6232

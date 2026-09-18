@@ -10,17 +10,25 @@ import test from 'node:test'
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const wrapper = join(repo, 'scripts/check-dockable-e2e.js')
 const demoMain = join(repo, 'examples/dockable-demo/main.js')
-const stubbornElectron = `#!/usr/bin/env node
-const { spawn } = require('node:child_process')
-const { writeFileSync } = require('node:fs')
-const helper = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000)'], {
-  stdio: 'inherit',
-})
-writeFileSync(process.env.DECK_DEMO_SHOTS_DIR + '/child.pid', String(process.pid))
-writeFileSync(process.env.DECK_DEMO_SHOTS_DIR + '/e2e-result.json', '{"success":true}')
-console.log('[fixture] ready')
-helper.unref()
+// The wrapper starts its termination clock the moment it spawns this stub, so
+// anything slow here races that clock: a `#!/usr/bin/env node` cold start takes
+// ~400ms on a loaded machine, which is most of the shortened timeout the tests
+// below use. A shell stub has the pid marker on disk within milliseconds. The
+// helper ignores SIGTERM and stays in this process group, so only a SIGKILL
+// aimed at the group clears it.
+// It deliberately never writes a result file: the wrapper finishes as soon as
+// one appears, so a stub that reports success would leave the timeout and
+// interrupt paths untested whenever it won that race.
+const stubbornElectron = `#!/bin/sh
+"$DECK_E2E_NODE" -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000)' &
+echo $$ > "$DECK_DEMO_SHOTS_DIR/child.pid"
+echo '[fixture] ready'
+wait
 `
+// This stub has to stay on Node: the helper needs a process group of its own to
+// survive the SIGKILL the wrapper aims at Electron's group, and there is no
+// portable shell equivalent of spawn's `detached`. Its caller pays for the cold
+// start with a wider timeout instead.
 const detachedPipeElectron = `#!/usr/bin/env node
 const { spawn } = require('node:child_process')
 const { writeFileSync } = require('node:fs')
@@ -34,7 +42,10 @@ helper.unref()
 process.exit(0)
 `
 
-async function writeFixture({ pathWithSpaces = false, shortTimeout = false, electronSource }) {
+// timeoutMs shortens the wrapper's 60s Electron timeout so a test can reach the
+// termination path in seconds. It has to stay above the stub's own startup cost,
+// because the clock starts when the stub is spawned, not when it is ready.
+async function writeFixture({ pathWithSpaces = false, timeoutMs = 0, electronSource }) {
 	const fixture = await mkdtemp(join(tmpdir(), pathWithSpaces ? 'electron deck e2e fixture ' : 'electron-deck-e2e-fixture-'))
 	const script = await readFile(wrapper, 'utf8')
 	await Promise.all([
@@ -44,7 +55,7 @@ async function writeFixture({ pathWithSpaces = false, shortTimeout = false, elec
 		mkdir(join(fixture, 'node_modules/.bin'), { recursive: true }),
 	])
 	await Promise.all([
-		writeFile(join(fixture, 'scripts/check-dockable-e2e.js'), shortTimeout ? script.replace('}, 60_000)', '}, 500)') : script),
+		writeFile(join(fixture, 'scripts/check-dockable-e2e.js'), timeoutMs ? script.replace('}, 60_000)', `}, ${timeoutMs})`) : script),
 		writeFile(join(fixture, 'examples/dockable-demo/main.js'), ''),
 		writeFile(join(fixture, 'examples/dockable-demo/app.bundle.js'), ''),
 		writeFile(join(fixture, 'dist/index.js'), ''),
@@ -56,7 +67,9 @@ async function writeFixture({ pathWithSpaces = false, shortTimeout = false, elec
 function runNode(script, { cwd, env }) {
 	const child = spawn(process.execPath, [script], {
 		cwd,
-		env: { ...process.env, ...env },
+		// Shell stubs start their helpers through this rather than a PATH lookup,
+		// which keeps a version-manager shim off the startup path.
+		env: { ...process.env, DECK_E2E_NODE: process.execPath, ...env },
 		stdio: ['ignore', 'pipe', 'pipe'],
 		detached: process.platform !== 'win32',
 	})
@@ -139,7 +152,7 @@ printf '{"success":true}' > "$DECK_DEMO_SHOTS_DIR/e2e-result.json"
 })
 
 test('forces wrapper exit when a detached Electron helper holds its output pipes', { skip: process.platform === 'win32' }, async () => {
-	const fixture = await writeFixture({ shortTimeout: true, electronSource: detachedPipeElectron })
+	const fixture = await writeFixture({ timeoutMs: 3_000, electronSource: detachedPipeElectron })
 	const output = join(fixture, 'output')
 	const { child, getOutput } = runNode(join(fixture, 'scripts/check-dockable-e2e.js'), {
 		cwd: fixture,
@@ -148,7 +161,7 @@ test('forces wrapper exit when a detached Electron helper holds its output pipes
 	try {
 		const { code } = await Promise.race([
 			once(child, 'close').then(([exitCode]) => ({ code: exitCode })),
-			new Promise((_, reject) => setTimeout(() => reject(new Error('wrapper did not force exit')), 10_000)),
+			new Promise((_, reject) => setTimeout(() => reject(new Error('wrapper did not force exit')), 15_000)),
 		])
 		assert.notEqual(code, 0, getOutput())
 		const runs = await readdir(output)
@@ -163,7 +176,7 @@ test('forces wrapper exit when a detached Electron helper holds its output pipes
 
 test('finishes the hard-exit log when pipe data arrives during shutdown', { skip: process.platform === 'win32' }, async () => {
 	const fixture = await writeFixture({
-		shortTimeout: true,
+		timeoutMs: 500,
 		electronSource: `#!/bin/sh
 printf '{"success":true}' > "$DECK_DEMO_SHOTS_DIR/e2e-result.json"
 `,
@@ -208,7 +221,7 @@ log.end = (done) => {
 
 test('forces a timed-out Electron process group to exit', { skip: process.platform === 'win32' }, async () => {
 	const fixture = await writeFixture({
-		shortTimeout: true,
+		timeoutMs: 3_000,
 		electronSource: stubbornElectron,
 	})
 	const output = join(fixture, 'output')
@@ -331,10 +344,10 @@ writeFileSync(process.env.DECK_DEMO_SHOTS_DIR + '/e2e-metrics.json', JSON.string
   samples: [
     ...['before-drag', 'after-drag', 'repeat-drag-0-before', 'repeat-drag-0-after'].map((label) => ({
       label,
-      processRoleToPid: [{ role: 'main', pid: 1 }, { role: 'native-simulator', pid: 3 }],
+      processRoleToPid: [{ role: 'main', pid: 1 }, { role: 'native-preview', pid: 3 }],
       processes: [
         { pid: 1, roles: ['main'], cpuPercent: 0, memory: { workingSetSizeKiB: 1 } },
-        { pid: 3, roles: ['native-simulator'], cpuPercent: 0, memory: { workingSetSizeKiB: 1 } },
+        { pid: 3, roles: ['native-preview'], cpuPercent: 0, memory: { workingSetSizeKiB: 1 } },
       ],
     })),
   ],
@@ -368,12 +381,12 @@ writeFileSync(process.env.DECK_DEMO_SHOTS_DIR + '/e2e-metrics.json', JSON.string
     processRoleToPid: [
       { role: 'main', pid: 1 },
       { role: 'control-renderer', pid: 2 },
-      { role: 'native-simulator', pid: 3 },
+      { role: 'native-preview', pid: 3 },
     ],
     processes: [
       { pid: 1, roles: ['main'], cpuPercent: 0, memory: { workingSetSizeKiB: 1 } },
       { pid: 2, roles: ['control-renderer'], cpuPercent: 0, memory: { workingSetSizeKiB: 1 } },
-      { pid: 3, roles: ['native-simulator'], cpuPercent: 0, memory: {} },
+      { pid: 3, roles: ['native-preview'], cpuPercent: 0, memory: {} },
     ],
   })),
 }))
@@ -387,7 +400,7 @@ writeFileSync(process.env.DECK_DEMO_SHOTS_DIR + '/e2e-metrics.json', JSON.string
 	try {
 		const [{ code }] = await once(child, 'close')
 		assert.notEqual(code, 0, getOutput())
-		assert.match(getOutput(), /missing native-simulator working-set metric/)
+		assert.match(getOutput(), /missing native-preview working-set metric/)
 	} finally {
 		await closeProcessTree(child)
 		await rm(fixture, { recursive: true, force: true })

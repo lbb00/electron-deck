@@ -25,7 +25,7 @@ import {
 	serializeLayout,
 	setConstraint,
 	setSizes,
-	validateTree,
+	collectTreeProblems,
 } from './index.js'
 import { allPanels, expectRejects, split, structuralProblems, tabs, tree } from './_fixtures.js'
 
@@ -87,7 +87,7 @@ function constrainedSplit(): SplitNode {
 }
 
 /** Build a raw root then force-cast (bypasses readonly type guards) — for the
- * deliberately-malformed validateTree cases. Mirrors serialize.test.ts `bad`. */
+ * deliberately-malformed collectTreeProblems cases. Mirrors serialize.test.ts `bad`. */
 function bad(root: unknown): LayoutTree {
 	return { version: 1, root } as unknown as LayoutTree
 }
@@ -108,9 +108,9 @@ describe('T1 constraints — backward compatibility (field absent)', () => {
 		expect(s.constraints).toBeUndefined()
 	})
 
-	it('validateTree still returns [] for a legacy tree (no constraints)', () => {
+	it('collectTreeProblems still returns [] for a legacy tree (no constraints)', () => {
 		const t = legacyTree()
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 	})
 })
 
@@ -128,13 +128,13 @@ describe('T1 constraints — serialize/parse round-trip (field present)', () => 
 	it('a parsed constrained tree validates clean', () => {
 		const t = tree(constrainedSplit())
 		const back = parseLayout(serializeLayout(t))
-		expect(validateTree(back, knownOf(back))).toEqual([])
+		expect(collectTreeProblems(back, knownOf(back))).toEqual([])
 	})
 })
 
-// ───────────────────────── 3. validateTree on constrained trees ─────────────────────────
+// ───────────────────────── 3. collectTreeProblems on constrained trees ─────────────────────────
 
-describe('T1 constraints — validateTree rules', () => {
+describe('T1 constraints — collectTreeProblems rules', () => {
 	it('OK: constraints length == children length, each null or {fixedPx:finite>0}', () => {
 		const t = tree({
 			kind: 'split',
@@ -144,7 +144,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1, 1],
 			constraints: [{ fixedPx: 100 }, null, { fixedPx: 0.5 }],
 		})
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 		// also survives a real parse (default-DENY path)
 		expect(() => parseLayout(serializeLayout(t))).not.toThrow()
 	})
@@ -158,7 +158,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 100 }], // wrong length (1 != 2)
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		const joined = problems.join('\n')
 		expect(joined).toContain('sX')
@@ -176,7 +176,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 0 }, null],
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		expect(problems.join('\n')).toContain('sZero')
 		expect(problems.join('\n')).toContain('constraint')
@@ -192,7 +192,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: -10 }],
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		expect(problems.join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(t)))
@@ -207,7 +207,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: NaN }, null],
 		})
-		expect(validateTree(nan, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(nan, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(nan)))
 
 		const inf = bad({
@@ -218,7 +218,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: Infinity }],
 		})
-		expect(validateTree(inf, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(inf, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(inf)))
 	})
 
@@ -231,7 +231,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{}, null], // fixedPx missing entirely
 		})
-		expect(validateTree(missing, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(missing, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(missing)))
 
 		const nonNumber = bad({
@@ -242,7 +242,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: '240' }, null], // string, not a number
 		})
-		expect(validateTree(nonNumber, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(nonNumber, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(nonNumber)))
 	})
 
@@ -257,7 +257,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 200, mode: 'x' }, null], // extra `mode` key
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		const joined = problems.join('\n')
 		expect(joined).toContain('sExtra')
@@ -277,7 +277,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: -5 }, null], // malformed constraint (fixedPx <= 0)
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		const joined = problems.join('\n')
 		// children problem is present...
 		expect(joined).toContain('children')
@@ -297,7 +297,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 100 }, { fixedPx: 200 }], // no flexible child
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		const joined = problems.join('\n')
 		expect(joined).toContain('sAllFixed')
 		expect(joined).toContain('constraint')
@@ -313,7 +313,7 @@ describe('T1 constraints — validateTree rules', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 100 }, null], // one flexible child present
 		})
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 	})
 })
 
@@ -333,7 +333,7 @@ describe('T1 constraints — setConstraint mutation', () => {
 		expect(s.constraints!.length).toBe(s.children.length)
 		// still a structurally-sound, valid tree
 		expect(structuralProblems(out)).toEqual([])
-		expect(validateTree(out, knownOf(out))).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out))).toEqual([])
 	})
 
 	it('clears a child constraint back to null', () => {
@@ -343,7 +343,7 @@ describe('T1 constraints — setConstraint mutation', () => {
 		// ALL-NULL CHOICE: array is KEPT (not dropped), filled with null.
 		expect(s.constraints).toEqual([null, null])
 		expect(s.constraints!.length).toBe(s.children.length)
-		expect(validateTree(out, knownOf(out))).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out))).toEqual([])
 	})
 
 	it('updates an existing child constraint without disturbing siblings', () => {
@@ -365,11 +365,11 @@ describe('T1 constraints — setConstraint mutation', () => {
 		const out = setConstraint(t, 's0', 1, { fixedPx: 200 })
 		const s = out.root as SplitNode
 		expect(s.constraints).toEqual([{ fixedPx: 100 }, { fixedPx: 200 }, { fixedPx: 300 }, null])
-		expect(validateTree(out, knownOf(out))).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out))).toEqual([])
 	})
 
 	// M3: pinning the LAST flexible child of a split would make every child fixed —
-	// a tree validateTree rejects (rrp needs >= 1 weight-sized child). setConstraint
+	// a tree collectTreeProblems rejects (rrp needs >= 1 weight-sized child). setConstraint
 	// must NO-OP in that case (you cannot pin the last flexible child) and return the
 	// input tree unchanged rather than emit an unrestorable layout.
 	it('no-ops when pinning the sole remaining flexible child (would be all-fixed)', () => {
@@ -384,7 +384,7 @@ describe('T1 constraints — setConstraint mutation', () => {
 		const out = setConstraint(t, 's0', 1, { fixedPx: 200 })
 		// unchanged input (no-op) — still valid, sole flexible child preserved.
 		expect(out).toBe(t)
-		expect(validateTree(out, knownOf(out))).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out))).toEqual([])
 	})
 
 	it('throws when the split id is not found', () => {
@@ -451,7 +451,7 @@ describe('T1 constraints — existing mutations preserve constraints', () => {
 		// sizes alignment also preserved (sanity, mirrors the constraint slot rule).
 		expect(s.sizes.length).toBe(s.children.length)
 		expect(structuralProblems(out)).toEqual([])
-		expect(validateTree(out, knownOf(out))).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out))).toEqual([])
 	})
 })
 
@@ -473,7 +473,7 @@ describe('T1 constraints — existing mutations preserve constraints', () => {
 describe('T2 minPx — serialize / parse round-trip', () => {
 	// 1. A split carrying a `{ minPx: N }` on one child (and null/weight on the
 	// other) round-trips through serialize -> parse with the constraint intact,
-	// and validateTree returns [].
+	// and collectTreeProblems returns [].
 	it('a {minPx} child survives serialize -> parse unchanged and validates clean', () => {
 		const t = tree({
 			kind: 'split',
@@ -487,7 +487,7 @@ describe('T2 minPx — serialize / parse round-trip', () => {
 		expect(back).toEqual(t)
 		const s = back.root as SplitNode
 		expect(s.constraints).toEqual([{ minPx: 375 }, null])
-		expect(validateTree(back, knownOf(back))).toEqual([])
+		expect(collectTreeProblems(back, knownOf(back))).toEqual([])
 	})
 
 	it('a mix of {fixedPx} and {minPx} across children round-trips and validates clean', () => {
@@ -501,11 +501,11 @@ describe('T2 minPx — serialize / parse round-trip', () => {
 		})
 		const back = parseLayout(serializeLayout(t))
 		expect(back).toEqual(t)
-		expect(validateTree(back, knownOf(back))).toEqual([])
+		expect(collectTreeProblems(back, knownOf(back))).toEqual([])
 	})
 })
 
-describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
+describe('T2 minPx — collectTreeProblems accepts minPx, rejects malformed', () => {
 	// 2. `{ minPx: 375 }` is VALID.
 	it('OK: a single {minPx} constraint with a flexible/null sibling', () => {
 		const t = tree({
@@ -516,7 +516,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 375 }, null],
 		})
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 		expect(() => parseLayout(serializeLayout(t))).not.toThrow()
 	})
 
@@ -530,7 +530,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 10, minPx: 20 }, null],
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		const joined = problems.join('\n')
 		expect(joined).toContain('sBoth')
@@ -548,7 +548,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 0 }, null],
 		})
-		expect(validateTree(zero, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(zero, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(zero)))
 
 		const neg = bad({
@@ -559,7 +559,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: -5 }, null],
 		})
-		expect(validateTree(neg, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(neg, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(neg)))
 	})
 
@@ -572,7 +572,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 'x' }, null],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(t, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(t)))
 	})
 
@@ -585,7 +585,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: NaN }, null],
 		})
-		expect(validateTree(nan, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(nan, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(nan)))
 
 		const inf = bad({
@@ -596,7 +596,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: Infinity }, null],
 		})
-		expect(validateTree(inf, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
+		expect(collectTreeProblems(inf, new Set(['p1', 'p2'])).join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(inf)))
 	})
 
@@ -610,7 +610,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{}, null],
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		expect(problems.join('\n')).toContain('constraint')
 		expectRejects(() => parseLayout(JSON.stringify(t)))
@@ -629,7 +629,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 375 }, null],
 		})
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 	})
 
 	it('OK: split [ {minPx:375}, null ] — the null child is the weight-sized one', () => {
@@ -641,7 +641,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 375 }, null],
 		})
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 		expect(() => parseLayout(serializeLayout(t))).not.toThrow()
 	})
 
@@ -657,7 +657,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 375 }, { fixedPx: 100 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2'])).join('\n')).toContain('sAllPx')
+		expect(collectTreeProblems(t, new Set(['p1', 'p2'])).join('\n')).toContain('sAllPx')
 		expectRejects(() => parseLayout(JSON.stringify(t)))
 	})
 
@@ -670,7 +670,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 375 }, { minPx: 200 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2'])).join('\n')).toContain('sAllPx')
+		expect(collectTreeProblems(t, new Set(['p1', 'p2'])).join('\n')).toContain('sAllPx')
 		expectRejects(() => parseLayout(JSON.stringify(t)))
 	})
 
@@ -684,7 +684,7 @@ describe('T2 minPx — validateTree accepts minPx, rejects malformed', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 100 }, { fixedPx: 200 }],
 		})
-		const problems = validateTree(t, new Set(['p1', 'p2']))
+		const problems = collectTreeProblems(t, new Set(['p1', 'p2']))
 		expect(problems.length).toBeGreaterThan(0)
 		expect(problems.join('\n')).toContain('sAllFixed')
 		expectRejects(() => parseLayout(JSON.stringify(t)))
@@ -705,7 +705,7 @@ describe('T2 minPx — setConstraint sets a minPx constraint', () => {
 		expect(s.constraints).toEqual([{ minPx: 400 }, null])
 		expect(s.constraints!.length).toBe(s.children.length)
 		expect(structuralProblems(out)).toEqual([])
-		expect(validateTree(out, knownOf(out))).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out))).toEqual([])
 	})
 
 	// `minPx` is PX-SIZED (excluded from the weight pool), so pinning EVERY child

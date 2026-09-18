@@ -65,8 +65,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       expect(publish).not.toHaveBeenCalled()
@@ -76,8 +76,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -95,8 +95,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       const first = makeView('a')
       const last: DesiredView = {
@@ -118,8 +118,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       publisher.set(makeView('b'))
@@ -130,12 +130,12 @@ describe('createPlacementPublisher', () => {
       expect(ids).toEqual(['a', 'b'])
     })
 
-    it('only calls requestFrame once per dirty frame regardless of set call count', () => {
+    it('only calls schedulePublish once per dirty frame regardless of set call count', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       publisher.set(makeView('b'))
@@ -151,8 +151,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       publisher.set(makeView('b'))
@@ -172,8 +172,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -192,8 +192,8 @@ describe('createPlacementPublisher', () => {
       createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       // No set/remove calls — flush should be a no-op.
       raf.flushFrame()
@@ -204,8 +204,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -225,8 +225,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -237,8 +237,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -259,8 +259,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 42,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -271,8 +271,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 7,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -288,12 +288,12 @@ describe('createPlacementPublisher', () => {
   // ── Contract 7: dispose ──────────────────────────────────────────────────
 
   describe('dispose', () => {
-    it('calls cancelFrame for the pending frame when disposed', () => {
+    it('calls cancelScheduledPublish for the pending frame when disposed', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       expect(raf.pending).toBe(1)
@@ -301,7 +301,7 @@ describe('createPlacementPublisher', () => {
       expect(raf.cancel).toHaveBeenCalled()
     })
 
-    it('does not cancel another publisher\'s default task when only requestFrame is injected', async () => {
+    it('does not cancel another publisher\'s default task when only schedulePublish is injected', async () => {
       // Scheduler ids are meaningful only to the scheduler that issued them.
       // A partial override must therefore not pair its id with the shared
       // default cancel function: this publisher's dispose used to cancel the
@@ -316,7 +316,7 @@ describe('createPlacementPublisher', () => {
       const partialPublisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: partialRequest,
+        schedulePublish: partialRequest,
       })
 
       defaultPublisher.set(makeView('default'))
@@ -329,9 +329,9 @@ describe('createPlacementPublisher', () => {
       expect(publish).toHaveBeenCalledOnce()
     })
 
-    it('does not pass a default task id to an unmatched cancelFrame', () => {
+    it('does not pass a default task id to an unmatched cancelScheduledPublish', () => {
       const unrelatedCancel = vi.fn()
-      const publisher = createPlacementPublisher({ generation: 1, publish, cancelFrame: unrelatedCancel })
+      const publisher = createPlacementPublisher({ generation: 1, publish, cancelScheduledPublish: unrelatedCancel })
       publisher.set(makeView('a'))
       publisher.dispose()
       expect(unrelatedCancel).not.toHaveBeenCalled()
@@ -350,8 +350,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.dispose()
       expect(publish).toHaveBeenCalledOnce()
@@ -365,8 +365,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: () => currentGen,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       currentGen = 11
       publisher.dispose()
@@ -377,8 +377,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -392,7 +392,7 @@ describe('createPlacementPublisher', () => {
     it('does not publish again when the pre-dispose frame callback fires after dispose', () => {
       // Capture the callback before disposal so we can call it manually,
       // simulating a rAF callback that was already queued by the platform
-      // and fires despite cancelFrame having been invoked.
+      // and fires despite cancelScheduledPublish having been invoked.
       let captured: (() => void) | undefined
       const customRequest = vi.fn((cb: () => void): number => {
         captured = cb
@@ -401,8 +401,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: customRequest,
-        cancelFrame: vi.fn(),
+        schedulePublish: customRequest,
+        cancelScheduledPublish: vi.fn(),
       })
       publisher.set(makeView('a'))
       publisher.dispose()
@@ -419,8 +419,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.dispose()
       expect(publish).toHaveBeenCalledOnce()
@@ -434,8 +434,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.dispose()
       expect(publish).toHaveBeenCalledOnce()
@@ -448,8 +448,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.dispose()
       raf.request.mockClear()
@@ -467,8 +467,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
 
       // Frame 1
@@ -486,15 +486,15 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
       expect(raf.request).toHaveBeenCalledTimes(1)
 
       publisher.set(makeView('b'))
-      // A second requestFrame call must have been made.
+      // A second schedulePublish call must have been made.
       expect(raf.request).toHaveBeenCalledTimes(2)
     })
   })
@@ -507,8 +507,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: () => currentGen,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
 
       publisher.set(makeView('a'))
@@ -525,8 +525,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 99,
         publish,
-        requestFrame: raf.request,
-        cancelFrame: raf.cancel,
+        schedulePublish: raf.request,
+        cancelScheduledPublish: raf.cancel,
       })
       publisher.set(makeView('a'))
       raf.flushFrame()
@@ -534,13 +534,13 @@ describe('createPlacementPublisher', () => {
     })
   })
 
-  // ── Contract 10: reentrant scheduling (synchronous requestFrame) ────────
+  // ── Contract 10: reentrant scheduling (synchronous schedulePublish) ────────
   //
-  // A synchronous requestFrame runs flush() INSIDE the call that requests it.
+  // A synchronous schedulePublish runs flush() INSIDE the call that requests it.
   // The scheduler must not treat the frame it just consumed as still pending,
   // or every later set()/remove() would be dropped as "already scheduled".
 
-  describe('reentrant scheduling with a synchronous requestFrame', () => {
+  describe('reentrant scheduling with a synchronous schedulePublish', () => {
     it('publishes separately for two set() calls that each synchronously flush', () => {
       const sync = vi.fn((cb: () => void): number => {
         cb()
@@ -549,8 +549,8 @@ describe('createPlacementPublisher', () => {
       const publisher = createPlacementPublisher({
         generation: 1,
         publish,
-        requestFrame: sync,
-        cancelFrame: vi.fn(),
+        schedulePublish: sync,
+        cancelScheduledPublish: vi.fn(),
       })
 
       publisher.set(makeView('a'))
@@ -571,8 +571,8 @@ describe('createPlacementPublisher', () => {
     const publisher = createPlacementPublisher({
       generation: 1,
       publish,
-      requestFrame: request,
-      cancelFrame: raf.cancel,
+      schedulePublish: request,
+      cancelScheduledPublish: raf.cancel,
     })
 
     expect(() => publisher.set(makeView('a'))).toThrow('scheduler unavailable')
@@ -584,7 +584,7 @@ describe('createPlacementPublisher', () => {
 
   // ── Contract 11: default scheduler (MessageChannel post-task) ───────────
   //
-  // With no requestFrame/cancelFrame injected, the publisher falls back to
+  // With no schedulePublish/cancelScheduledPublish injected, the publisher falls back to
   // its own MessageChannel-based scheduler — available in vitest's node
   // environment — instead of requestAnimationFrame.
 

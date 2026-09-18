@@ -1,10 +1,14 @@
 {
   "name": "electron-deck",
   "version": "0.2.1",
-  "description": "Layout-as-data deck framework for Electron: dockable panels whose native WebContentsViews follow the DOM, behind a single `electronDeck(config)` entry.",
+  "description": "Host-shell framework for Electron: multi-window orchestration, native WebContentsViews that follow the DOM, overlays, popouts and cross-process IPC behind one `electronDeck(config)` entry — plus a browser-only dock layout engine.",
   "keywords": [
     "electron",
+    "host-shell",
+    "framework",
     "webcontentsview",
+    "multi-window",
+    "ipc",
     "dock",
     "layout",
     "react"
@@ -75,10 +79,11 @@
     "check:docs-api-sync": "node scripts/check-docs-api-sync.js",
     "check:browser-purity": "node scripts/check-browser-purity.js",
     "check:file-extensions": "node scripts/check-file-extensions.js",
+    "check:banner": "node --test scripts/check-banner-animation.test.js",
     "check:bundle-size": "node --test scripts/check-bundle-size.test.js && node scripts/check-bundle-size.js",
     "check:tree-shaking": "node --test scripts/check-tree-shaking.test.js && node scripts/check-tree-shaking.js",
     "check:e2e": "node examples/dockable-demo/bundle.js && node --test scripts/check-dockable-e2e.test.js && node scripts/check-dockable-e2e.js",
-    "test": "node scripts/check-trust-seal.js && node scripts/check-docs-api-sync.js && node scripts/check-browser-purity.js && node scripts/check-file-extensions.js && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
+    "test": "node scripts/check-trust-seal.js && node scripts/check-docs-api-sync.js && node scripts/check-browser-purity.js && node scripts/check-file-extensions.js && pnpm run check:banner && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
     "test:dev": "vitest",
     "test:coverage": "vitest run --coverage && vitest run --config vitest.dock-react.config.ts --coverage --coverage.reportsDirectory=./coverage/dock-react",
     "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
@@ -90,7 +95,7 @@
   },
   "dependencies": {
     "react-resizable-panels": "^4.10.0",
-    "view-anchor": "^0.2.1"
+    "view-anchor": "1.0.0-beta.1"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.2",
@@ -113,7 +118,7 @@
     "vitest": "^4.1.4"
   },
   "peerDependencies": {
-    "electron": "^43.2.0",
+    "electron": ">=30.5.1",
     "react": ">=18"
   },
   "peerDependenciesMeta": {

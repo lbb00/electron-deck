@@ -113,8 +113,8 @@ importers:
         specifier: ^4.10.0
         version: 4.12.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       view-anchor:
-        specifier: ^0.2.1
-        version: 0.2.1(react@18.3.1)
+        specifier: 1.0.0-beta.1
+        version: 1.0.0-beta.1(react@18.3.1)
     devDependencies:
       '@changesets/cli':
         specifier: ^3.0.2
@@ -1477,9 +1477,8 @@ packages:
     resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
 
-  view-anchor@0.2.1:
-    resolution: {integrity: sha512-JWJ7Xn0t0PINRX+FwuR/3mx0mVR5lu6pgqm2vPQNfVfQHtGG6Nymit5WvBMPk76DYkGrupIaxUSWAcATD9uoZQ==}
-    engines: {node: '>=24'}
+  view-anchor@1.0.0-beta.1:
+    resolution: {integrity: sha512-rFZIJUAFbQqz+CblXQgdBFhu/Jxq69QgT5AYNBm0Caa2qiFRA2jgFYuoMxbMcBIYt1RO+V9FAHH5Y2aHijUhaQ==}
     peerDependencies:
       react: '>=18'
     peerDependenciesMeta:
@@ -2672,7 +2671,7 @@ snapshots:
 
   undici@7.29.1: {}
 
-  view-anchor@0.2.1(react@18.3.1):
+  view-anchor@1.0.0-beta.1(react@18.3.1):
     optionalDependencies:
       react: 18.3.1
 

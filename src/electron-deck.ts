@@ -4,13 +4,13 @@ import type { MinimalElectron } from './internal/electron-types.js'
 import type { MinimalIpcMain } from './internal/wire-transport.js'
 import { DeckApp } from './internal/deck-app.js'
 import type { DeckAppOptions } from './internal/deck-app.js'
-import type { DeckConfig, DeckOptions, HostEvent, JsonValue, Runtime, ToolbarContribution } from './types.js'
+import type { DeckConfig, DeckOptions, HostEvent, JsonValue, Runtime } from './types.js'
 
 /**
  * `electronDeck(config, options?)` 是 framework 唯一入口（见 README §3）。
  *
  * - Invalid config → reject `TypeError`，phase 不前进
- * - Valid config → 装配 runtime + 调 `config.setup(runtime)` await 完成 →
+ * - Valid config → 装配 runtime + 调 `config.backend.assemble(runtime)` await 完成 →
  *   resolve。不接 Electron 时，resolve 后 framework 仍持有运行时；
  *   接 Electron app lifecycle 后，由 Electron event loop 撑住进程，
  *   `electronDeck()` 同样 resolve（host 的 main 文件不需 await 阻塞）。
@@ -30,7 +30,7 @@ export async function electronDeck(config: DeckConfig, options?: DeckOptions): P
 	validateConfig(config)
 	const resolved = await resolveAppOptions(options)
 	if (config.backend) {
-		(resolved as Mutable<DeckAppOptions>).backend = config.backend
+		;(resolved as Mutable<DeckAppOptions>).backend = config.backend
 	}
 	const app = new DeckApp(config, resolved)
 	await app.start()
@@ -44,11 +44,15 @@ export async function electronDeck(config: DeckConfig, options?: DeckOptions): P
  * SUSPENDS module evaluation on the whenReady gate — but Electron's `ready` only
  * fires once module evaluation finishes, so the gate never resolves: HARD DEADLOCK.
  *
- * `startElectronDeck` returns a plain handle SYNCHRONOUSLY (NOT a thenable), so a
- * host's top-level `await handle.ready` never sits on the whenReady gate. Assembly
- * still runs STRICTLY AFTER `app.whenReady()` resolves (gating intact inside
- * `app.start()`); `handle.ready` resolves with the {@link Runtime}; `handle.dispose()`
- * tears the app down even if called before the in-flight start finished.
+ * `startElectronDeck` returns a plain handle SYNCHRONOUSLY (NOT a thenable), so
+ * module evaluation is never blocked by the call itself — the host gets the
+ * handle back immediately and can keep running top-level code. `handle.ready`
+ * still only resolves AFTER `app.whenReady()` (gating intact inside
+ * `app.start()`), so a top-level `await handle.ready` deadlocks IDENTICALLY to
+ * `await electronDeck(config)` — the fix is to never await `ready` at module top
+ * level; defer it into an event handler or other post-ready code instead.
+ * `handle.ready` resolves with the {@link Runtime}; `handle.dispose()` tears the
+ * app down even if called before the in-flight start finished.
  *
  * Invalid config throws a `TypeError` synchronously (matching `electronDeck`'s
  * validate-first contract) — the error surfaces, never silently deadlocks.
@@ -60,7 +64,7 @@ export async function electronDeck(config: DeckConfig, options?: DeckOptions): P
 export function startElectronDeck(
 	config: DeckConfig,
 	options?: DeckOptions,
-): { ready: Promise<Runtime>, dispose(): Promise<void> } {
+): { ready: Promise<Runtime>; dispose(): Promise<void> } {
 	// Validate config SYNCHRONOUSLY (before returning the handle) — invalid configs
 	// surface a TypeError at the call, never a silent deadlock.
 	validateConfig(config)
@@ -69,7 +73,7 @@ export function startElectronDeck(
 	const startPromise: Promise<DeckApp> = (async () => {
 		const resolved = await resolveAppOptions(options)
 		if (config.backend) {
-			(resolved as Mutable<DeckAppOptions>).backend = config.backend
+			;(resolved as Mutable<DeckAppOptions>).backend = config.backend
 		}
 		app = new DeckApp(config, resolved)
 		// `app.start()` internally `await app.whenReady()` THEN assembles — gating
@@ -78,7 +82,7 @@ export function startElectronDeck(
 		return app
 	})()
 
-	const ready = startPromise.then(a => a.runtime)
+	const ready = startPromise.then((a) => a.runtime)
 	// Mark `ready` as handled so a fire-and-forget caller (who never reads `ready`,
 	// e.g. `startElectronDeck(...)` then `dispose()`) does NOT trigger an
 	// unhandledRejection if startup fails — which under strict Electron handling can
@@ -97,8 +101,7 @@ export function startElectronDeck(
 			const started = await startPromise.catch(() => null)
 			if (started) {
 				await started.shutdown()
-			}
-			else if (app) {
+			} else if (app) {
 				// start threw post-construction → still tear down the partially-built app.
 				await app.shutdown()
 			}
@@ -126,32 +129,35 @@ async function resolveAppOptions(opts?: DeckOptions): Promise<DeckAppOptions> {
 	let imported: unknown
 	try {
 		imported = await import('electron')
-	}
-	catch (e) {
+	} catch (e) {
 		throw new Error(
-			'electronDeck(): unable to load electron — pass options.electron / options.ipcMain '
-			+ 'for non-Electron environments. Underlying: ' + String(e),
+			'electronDeck(): unable to load electron — pass options.electron / options.ipcMain ' +
+				'for non-Electron environments. Underlying: ' +
+				String(e),
 			{ cause: e },
 		)
 	}
 
-	const m = imported as { ipcMain?: unknown, BrowserWindow?: unknown, WebContentsView?: unknown }
-	const resolvedElectron = opts?.electron ?? (asMinimalElectron(m))
+	const m = imported as { ipcMain?: unknown; BrowserWindow?: unknown; WebContentsView?: unknown }
+	const resolvedElectron = opts?.electron ?? asMinimalElectron(m)
 	const resolvedIpcMain = opts?.ipcMain ?? (m.ipcMain as MinimalIpcMain | undefined)
 
 	if (!resolvedIpcMain || !resolvedElectron.BrowserWindow || !resolvedElectron.WebContentsView) {
 		throw new Error(
-			'electronDeck(): loaded "electron" but it does not expose the main-process surface '
-			+ '(ipcMain / BrowserWindow / WebContentsView). This typically means you are running '
-			+ 'outside an Electron main process (e.g. vitest under node). Pass options.electron '
-			+ 'and options.ipcMain to inject a fake.',
+			'electronDeck(): loaded "electron" but it does not expose the main-process surface ' +
+				'(ipcMain / BrowserWindow / WebContentsView). This typically means you are running ' +
+				'outside an Electron main process (e.g. vitest under node). Pass options.electron ' +
+				'and options.ipcMain to inject a fake.',
 		)
 	}
 
 	return buildAppOptions(resolvedElectron, resolvedIpcMain, opts)
 }
 
-function asMinimalElectron(m: { BrowserWindow?: unknown, WebContentsView?: unknown }): MinimalElectron {
+function asMinimalElectron(m: {
+	BrowserWindow?: unknown
+	WebContentsView?: unknown
+}): MinimalElectron {
 	// We do not validate shape here — `resolveAppOptions` does the BrowserWindow /
 	// WebContentsView presence check before returning. Cast is intentional.
 	return m as unknown as MinimalElectron
@@ -165,12 +171,13 @@ function buildAppOptions(
 	const wireTransport: DeckAppOptions['wireTransport'] = { ipcMain }
 	const out: DeckAppOptions = { electron, wireTransport }
 	if (opts?.trustedWebContents) {
-		(out.wireTransport as Mutable<NonNullable<DeckAppOptions['wireTransport']>>)
-			.trustedWebContents = opts.trustedWebContents
+		;(
+			out.wireTransport as Mutable<NonNullable<DeckAppOptions['wireTransport']>>
+		).trustedWebContents = opts.trustedWebContents
 	}
 	if (opts?.senderPolicy) {
-		(out.wireTransport as Mutable<NonNullable<DeckAppOptions['wireTransport']>>)
-			.senderPolicy = opts.senderPolicy
+		;(out.wireTransport as Mutable<NonNullable<DeckAppOptions['wireTransport']>>).senderPolicy =
+			opts.senderPolicy
 	}
 	return out
 }
@@ -193,25 +200,25 @@ export function validateConfig(config: DeckConfig): void {
 
 	validateBackendField(config.backend)
 
-	if (config.simulatorApis !== undefined) {
-		validateHandlerMap('simulatorApis', config.simulatorApis)
-	}
 	if (config.hostServices !== undefined) {
 		validateHandlerMap('hostServices', config.hostServices)
 	}
 	if (config.events !== undefined) {
 		validateEventsField(config.events)
 	}
-	if (config.toolbar !== undefined) {
-		validateToolbarField(config.toolbar)
-	}
 }
 
 function validateBackendField(backend: DeckConfig['backend']): void {
 	if (backend === undefined) return
 	const candidate = backend as { assemble?: unknown }
-	if (candidate === null || typeof candidate !== 'object' || typeof candidate.assemble !== 'function') {
-		throw new TypeError('config.backend must be a RuntimeBackend (an object with an assemble() function)')
+	if (
+		candidate === null ||
+		typeof candidate !== 'object' ||
+		typeof candidate.assemble !== 'function'
+	) {
+		throw new TypeError(
+			'config.backend must be a RuntimeBackend (an object with an assemble() function)',
+		)
 	}
 }
 
@@ -239,8 +246,8 @@ function assertAllHostEvents(events: readonly unknown[]): void {
 	for (const ev of events) {
 		if (!isHostEvent(ev)) {
 			throw new TypeError(
-				'events: every entry must be a HostEvent produced by defineEvent() — '
-				+ 'duck-typed shapes are rejected to avoid bind-time failures',
+				'events: every entry must be a HostEvent produced by defineEvent() — ' +
+					'duck-typed shapes are rejected to avoid bind-time failures',
 			)
 		}
 	}
@@ -256,40 +263,13 @@ function assertUniqueEventNames(events: readonly HostEvent<JsonValue>[]): void {
 	}
 }
 
-function validateToolbarField(toolbar: ToolbarContribution): void {
-	assertToolbarSourceShape(toolbar.source)
-	if (typeof toolbar.preloadPath !== 'string' || toolbar.preloadPath.length === 0) {
-		throw new TypeError('toolbar.preloadPath is required and must be a non-empty string')
-	}
-	if (typeof toolbar.height !== 'number' || !Number.isFinite(toolbar.height) || toolbar.height <= 0) {
-		throw new TypeError('toolbar.height is required and must be a positive finite number')
-	}
-}
-
-function assertToolbarSourceShape(source: unknown): void {
-	if (source === null || typeof source !== 'object') {
-		throw new TypeError('toolbar.source must be { url } or { file }')
-	}
-	const hasUrl = 'url' in source && typeof (source as { url?: unknown }).url === 'string'
-	const hasFile = 'file' in source && typeof (source as { file?: unknown }).file === 'string'
-	if (hasUrl && hasFile) {
-		throw new TypeError('toolbar.source must be either { url } or { file }, not both')
-	}
-	if (!hasUrl && !hasFile) {
-		throw new TypeError('toolbar.source must be { url } or { file }')
-	}
-}
-
 /**
  * publish-time guard：HostEvent 未在 `config.events` 中显式列出时阻止 publish。
  * 避免 module-load-order 隐式注册。
  *
  * @internal exported for tests
  */
-export function assertEventDeclared(
-	declared: ReadonlySet<string>,
-	eventName: string,
-): void {
+export function assertEventDeclared(declared: ReadonlySet<string>, eventName: string): void {
 	if (!declared.has(eventName)) {
 		throw new UndeclaredHostEventError(eventName)
 	}

@@ -14,7 +14,7 @@
  *  - `WireTransport`            — the wire protocol (probe / invoke / event fanout)
  *  - `EventBus`                 — declared-event publisher fan-out
  *  - `InMemoryTypedIpcRegistry` — main-process handler/invoke registry the
- *                                 transport routes host/simulator kinds through
+ *                                 transport routes host invokes through
  *
  * The `electronDeck(config)` orchestration lives in this package's root entry
  * (`electron-deck`, see `src/index.ts`); it stays domain-neutral and

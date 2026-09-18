@@ -51,7 +51,7 @@ function normalize(node: LayoutNode): LayoutNode | null {
 	if (!hadConstraints) return rebuilt
 	// M3 repair: dropping children can leave a multi-child split whose survivors
 	// are ALL px-sized (`fixedPx` or `minPx` — the sole flexible/`null` child was
-	// the one removed). That tree is rejected by validateTree (rrp needs >= 1
+	// the one removed). That tree is rejected by collectTreeProblems (rrp needs >= 1
 	// weight-sized child). Deterministically clear the LAST survivor's constraint
 	// so >= 1 flexible child remains.
 	const allFixed = keptConstraints.length > 0 && !keptConstraints.some(c => c === null)
@@ -228,7 +228,7 @@ export function setConstraint(
 	// count as "constrained" here (the check is `c !== null`, not a `fixedPx`
 	// check), so setting EITHER kind of constraint on the LAST unconstrained
 	// child is a NO-OP: it would leave 0 weight-sized children, and
-	// `validateTree`/`parseLayout` later rejects a fully px-sized split (rrp
+	// `collectTreeProblems`/`parseLayout` later rejects a fully px-sized split (rrp
 	// requires >= 1 weight-sized child).
 	if (base.length > 0 && base.every(c => c !== null)) {
 		return t
@@ -356,8 +356,8 @@ export function movePanel(
  * of that tree's internal shape (row, column, or arbitrarily nested).
  *
  * Use for panels whose home position is "beside the rest of the layout as a
- * whole" (e.g. re-showing a hidden simulator column that must sit alongside
- * editor + debug together, not nested inside just one of them). Splitting into
+ * whole" (e.g. re-showing a hidden preview column that must sit alongside
+ * doc + notes together, not nested inside just one of them). Splitting into
  * a single sibling's slot instead of the whole tree is what let a `minPx` floor
  * on the new panel consume that one sibling's entire (already-narrower) slot,
  * squeezing it to zero rendered width.
@@ -395,12 +395,12 @@ export function wrapRoot(
  * one member (leaving its siblings behind in the original group) — this takes
  * a GROUP id directly and never touches the group's contents. Use it when the
  * new panel's home is "beside this specific region as a whole" (e.g. the
- * editor reopening beside the multi-tab debug region): resolving that through
+ * doc reopening beside the multi-tab notes region): resolving that through
  * `splitPanel` against one of the region's tabs would sever that one tab from
  * its siblings into its own group, exactly the failure `wrapRoot` fixed for
  * "beside the whole tree" — this is the same fix scoped to one known group
  * instead of the root, since wrapping the whole tree would also drag in
- * siblings the caller never meant to move (e.g. the simulator column).
+ * siblings the caller never meant to move (e.g. the preview column).
  */
 export function splitGroup(
 	t: LayoutTree,

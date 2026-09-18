@@ -1,13 +1,13 @@
 /**
  * GAP #4 — serialize / parse / validate: acyclicity + structural integrity.
  *
- * parseLayout MUST throw on every illegal tree below; validateTree MUST return
+ * parseLayout MUST throw on every illegal tree below; collectTreeProblems MUST return
  * a non-empty problem list for the same. A valid tree round-trips through
- * serialize -> parse and validateTree returns [].
+ * serialize -> parse and collectTreeProblems returns [].
  */
 import { describe, expect, it } from 'vitest'
 import type { LayoutNode, LayoutTree, SplitNode } from './types.js'
-import { parseLayout, serializeLayout, validateTree } from './index.js'
+import { parseLayout, serializeLayout, collectTreeProblems } from './index.js'
 import { allPanels, expectRejects, split, tabs, tree } from './_fixtures.js'
 
 // A canonical valid tree: a row split of two tabgroups.
@@ -38,16 +38,16 @@ describe('serializeLayout / parseLayout — happy path', () => {
 	})
 })
 
-describe('validateTree — happy path', () => {
+describe('collectTreeProblems — happy path', () => {
 	it('returns [] for a valid tree with matching knownPanelIds', () => {
 		const t = validTree()
-		expect(validateTree(t, knownOf(t))).toEqual([])
+		expect(collectTreeProblems(t, knownOf(t))).toEqual([])
 	})
 })
 
 // ───────────────────────── illegal trees ─────────────────────────
 //
-// For each, both: parseLayout(JSON) throws, and validateTree returns non-empty.
+// For each, both: parseLayout(JSON) throws, and collectTreeProblems returns non-empty.
 
 /** Build a raw object then force-cast (bypasses the readonly type guards). */
 function bad(root: unknown): LayoutTree {
@@ -55,8 +55,8 @@ function bad(root: unknown): LayoutTree {
 }
 
 function expectRejected(t: LayoutTree, known: ReadonlySet<string>): void {
-	// validateTree: non-empty problem list.
-	expect(validateTree(t, known).length).toBeGreaterThan(0)
+	// collectTreeProblems: non-empty problem list.
+	expect(collectTreeProblems(t, known).length).toBeGreaterThan(0)
 	// parseLayout: throws on the serialized form. Some bad trees (cycles, shared
 	// refs) can't go through JSON.stringify, so serialize them defensively.
 	let json: string
@@ -65,16 +65,16 @@ function expectRejected(t: LayoutTree, known: ReadonlySet<string>): void {
 	}
 	catch {
 		// Cyclic structure — JSON can't represent it, so parseLayout can't receive
-		// it as a string. The validateTree assertion above already pins rejection.
+		// it as a string. The collectTreeProblems assertion above already pins rejection.
 		return
 	}
 	expectRejects(() => parseLayout(json))
 }
 
-describe('GAP #4 — validateTree + parseLayout reject illegal structure', () => {
+describe('GAP #4 — collectTreeProblems + parseLayout reject illegal structure', () => {
 	it('unknown kind (default-DENY)', () => {
 		const t = bad({ kind: 'frobnicate', id: 'x' })
-		expect(validateTree(t, new Set()).length).toBeGreaterThan(0)
+		expect(collectTreeProblems(t, new Set()).length).toBeGreaterThan(0)
 		expectRejects(() => parseLayout(JSON.stringify(t)))
 	})
 
@@ -189,7 +189,7 @@ describe('GAP #4 — validateTree + parseLayout reject illegal structure', () =>
 	it('orphan panel: a panel in the tree not in knownPanelIds', () => {
 		const t = validTree() // panels p1,p2,p3
 		const known = new Set(['p1', 'p2']) // p3 missing -> orphan
-		const problems = validateTree(t, known)
+		const problems = collectTreeProblems(t, known)
 		expect(problems.length).toBeGreaterThan(0)
 		expect(problems.join('\n')).toContain('p3')
 	})
@@ -197,7 +197,7 @@ describe('GAP #4 — validateTree + parseLayout reject illegal structure', () =>
 	it('valid tree with a SUPERSET knownPanelIds is still ok (extra known panels allowed)', () => {
 		const t = validTree()
 		const known = new Set([...allPanels(t), 'extra-not-in-tree'])
-		expect(validateTree(t, known)).toEqual([])
+		expect(collectTreeProblems(t, known)).toEqual([])
 	})
 })
 
@@ -218,7 +218,7 @@ describe('parseLayout — input hardening', () => {
 
 // ─────────────────────── characterization tests ───────────────────────
 //
-// Lock the CURRENT observable behavior of collectProblems / validateTree /
+// Lock the CURRENT observable behavior of collectProblems / collectTreeProblems /
 // parseLayout so that a structural refactor cannot silently change any branch.
 // Each test pins an exact problem string or throw message captured from the
 // running implementation.
@@ -228,21 +228,21 @@ function raw(root: unknown): LayoutTree {
 	return { version: 1, root } as unknown as LayoutTree
 }
 
-describe('validateTree — top-level guards (exact messages)', () => {
+describe('collectTreeProblems — top-level guards (exact messages)', () => {
 	it('returns [tree is not an object] for a null tree', () => {
-		expect(validateTree(null as unknown as LayoutTree, new Set())).toEqual([
+		expect(collectTreeProblems(null as unknown as LayoutTree, new Set())).toEqual([
 			'tree is not an object',
 		])
 	})
 
 	it('returns [unsupported version: 2] for version 2', () => {
 		const t = { version: 2, root: tabs('g1', ['p'], 'p') } as unknown as LayoutTree
-		expect(validateTree(t, new Set(['p']))).toEqual(['unsupported version: 2'])
+		expect(collectTreeProblems(t, new Set(['p']))).toEqual(['unsupported version: 2'])
 	})
 
 	it('returns [unsupported version: undefined] for a tree with no version field', () => {
 		const t = { root: tabs('g1', ['p'], 'p') } as unknown as LayoutTree
-		expect(validateTree(t, new Set(['p']))).toEqual(['unsupported version: undefined'])
+		expect(collectTreeProblems(t, new Set(['p']))).toEqual(['unsupported version: undefined'])
 	})
 })
 
@@ -283,7 +283,7 @@ describe('collectProblems — non-object node branch', () => {
 		)
 		// Inject a non-object second child via a double-cast to bypass the readonly typed array.
 		;(t.root as unknown as { children: unknown[] }).children[1] = 42
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual(['node is not an object: 42'])
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual(['node is not an object: 42'])
 	})
 
 	it('null child of split → "node is not an object: null"', () => {
@@ -291,7 +291,7 @@ describe('collectProblems — non-object node branch', () => {
 			split('s', 'row', [tabs('g1', ['p1'], 'p1'), tabs('g2', ['p2'], 'p2')]),
 		)
 		;(t.root as unknown as { children: unknown[] }).children[1] = null
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual(['node is not an object: null'])
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual(['node is not an object: null'])
 	})
 
 	it('undefined child of split → "node is not an object: undefined"', () => {
@@ -299,7 +299,7 @@ describe('collectProblems — non-object node branch', () => {
 			split('s', 'row', [tabs('g1', ['p1'], 'p1'), tabs('g2', ['p2'], 'p2')]),
 		)
 		;(t.root as unknown as { children: unknown[] }).children[1] = undefined
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'node is not an object: undefined',
 		])
 	})
@@ -308,7 +308,7 @@ describe('collectProblems — non-object node branch', () => {
 describe('collectProblems — missing / duplicate node id', () => {
 	it('tabs node with no id → "node missing string id (kind=tabs)"', () => {
 		const t = raw({ kind: 'tabs', panels: ['p1'], active: 'p1' })
-		expect(validateTree(t, new Set(['p1']))).toContain('node missing string id (kind=tabs)')
+		expect(collectTreeProblems(t, new Set(['p1']))).toContain('node missing string id (kind=tabs)')
 	})
 
 	it('split node with no id → "node missing string id (kind=split)"', () => {
@@ -318,7 +318,7 @@ describe('collectProblems — missing / duplicate node id', () => {
 			children: [tabs('g1', ['p1'], 'p1'), tabs('g2', ['p2'], 'p2')],
 			sizes: [1, 1],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toContain(
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toContain(
 			'node missing string id (kind=split)',
 		)
 	})
@@ -327,23 +327,23 @@ describe('collectProblems — missing / duplicate node id', () => {
 describe('collectProblems — tabs node: panels validation', () => {
 	it('panels is not an array → "tabs g: panels is not an array"', () => {
 		const t = raw({ kind: 'tabs', id: 'g', panels: 'bad', active: 'p1' })
-		expect(validateTree(t, new Set(['p1']))).toEqual(['tabs g: panels is not an array'])
+		expect(collectTreeProblems(t, new Set(['p1']))).toEqual(['tabs g: panels is not an array'])
 	})
 
 	it('non-string panel id in array → "tabs g: non-string panel id"', () => {
 		const t = raw({ kind: 'tabs', id: 'g', panels: [42, 'p1'], active: 'p1' })
-		expect(validateTree(t, new Set(['p1']))).toContain('tabs g: non-string panel id')
+		expect(collectTreeProblems(t, new Set(['p1']))).toContain('tabs g: non-string panel id')
 	})
 
 	it('tabs active is non-string → "tabs g: active 42 not in panels"', () => {
 		const t = raw({ kind: 'tabs', id: 'g', panels: ['p1'], active: 42 })
-		expect(validateTree(t, new Set(['p1']))).toEqual(['tabs g: active 42 not in panels'])
+		expect(collectTreeProblems(t, new Set(['p1']))).toEqual(['tabs g: active 42 not in panels'])
 	})
 
 	it('duplicate panel id within same group → "duplicate panel id across groups: p1"', () => {
 		// The panelOwners map triggers even within the same tabgroup on the second occurrence.
 		const t = raw({ kind: 'tabs', id: 'g', panels: ['p1', 'p1'], active: 'p1' })
-		expect(validateTree(t, new Set(['p1']))).toContain('duplicate panel id across groups: p1')
+		expect(collectTreeProblems(t, new Set(['p1']))).toContain('duplicate panel id across groups: p1')
 	})
 })
 
@@ -356,7 +356,7 @@ describe('collectProblems — split: orientation', () => {
 			children: [tabs('g1', ['p1'], 'p1'), tabs('g2', ['p2'], 'p2')],
 			sizes: [1, 1],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toContain(
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toContain(
 			'split s: invalid orientation diagonal',
 		)
 	})
@@ -370,7 +370,7 @@ describe('collectProblems — split: sizes', () => {
 			orientation: 'row',
 			children: [tabs('g1', ['p1'], 'p1'), tabs('g2', ['p2'], 'p2')],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toContain(
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toContain(
 			'split s: sizes missing != children 2',
 		)
 	})
@@ -386,7 +386,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: 'bad',
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'split s: constraints is not an array',
 		])
 	})
@@ -400,7 +400,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, 42],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			"split s: constraint is not null nor an object: 42",
 		])
 	})
@@ -414,7 +414,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: 100, minPx: 50 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			"split s: constraint must have exactly one of 'fixedPx' or 'minPx', got [fixedPx, minPx]",
 		])
 	})
@@ -428,7 +428,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, {}],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			"split s: constraint must have exactly one of 'fixedPx' or 'minPx', got []",
 			"split s: constraint minPx must be a finite number > 0, got undefined",
 		])
@@ -443,7 +443,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { badKey: 100 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			"split s: constraint must have exactly one of 'fixedPx' or 'minPx', got [badKey]",
 			"split s: constraint minPx must be a finite number > 0, got undefined",
 		])
@@ -458,7 +458,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: 100, extra: 'bad' }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			"split s: constraint must have exactly one of 'fixedPx' or 'minPx', got [fixedPx, extra]",
 		])
 	})
@@ -472,7 +472,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: -1 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'split s: constraint fixedPx must be a finite number > 0, got -1',
 		])
 	})
@@ -486,7 +486,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { minPx: 0 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'split s: constraint minPx must be a finite number > 0, got 0',
 		])
 	})
@@ -500,7 +500,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: Number.NaN }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'split s: constraint fixedPx must be a finite number > 0, got NaN',
 		])
 	})
@@ -514,7 +514,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [{ fixedPx: 100 }, { fixedPx: 200 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'split s: all children are px-sized constraints; at least one must be weight-sized',
 		])
 	})
@@ -528,7 +528,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [{ minPx: 100 }, { minPx: 200 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([
 			'split s: all children are px-sized constraints; at least one must be weight-sized',
 		])
 	})
@@ -542,7 +542,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1, 1],
 			constraints: [{ fixedPx: 100 }, { fixedPx: 200 }, null],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2', 'p3']))).toEqual([])
+		expect(collectTreeProblems(t, new Set(['p1', 'p2', 'p3']))).toEqual([])
 	})
 
 	it('constraints length < children length → "split s: constraints 1 != children 2"', () => {
@@ -554,7 +554,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toContain(
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toContain(
 			'split s: constraints 1 != children 2',
 		)
 	})
@@ -568,7 +568,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toContain(
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toContain(
 			'split s: constraints 0 != children 2',
 		)
 	})
@@ -582,7 +582,7 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { minPx: 100 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([])
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([])
 	})
 
 	it('[null, {fixedPx: 100}] is valid — no problems', () => {
@@ -594,6 +594,6 @@ describe('collectProblems — split: constraints validation', () => {
 			sizes: [1, 1],
 			constraints: [null, { fixedPx: 100 }],
 		})
-		expect(validateTree(t, new Set(['p1', 'p2']))).toEqual([])
+		expect(collectTreeProblems(t, new Set(['p1', 'p2']))).toEqual([])
 	})
 })

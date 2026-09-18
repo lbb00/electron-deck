@@ -3,8 +3,8 @@
  *
  * 责任：
  * - 在 `ipcMain.handle('__electron-deck:invoke')` / `'__electron-deck:probe'` 上路由
- *   webview → main 的 RPC 请求，按 `senderPolicy` gating + kind 派发到 host /
- *   simulator handler，序列化成 `InvokeResponse` 帧。
+ *   webview → main 的 RPC 请求，按 `senderPolicy` gating + kind 派发到 host
+ *   handler，序列化成 `InvokeResponse` 帧。
  * - 订阅 framework `EventBus`，把 declared `HostEvent.publish(payload)` 通过
  *   `webContents.send('__electron-deck:event', envelope)` 推送给所有 trusted
  *   webContents。
@@ -52,7 +52,7 @@ export interface FrameRef {
 
 /**
  * Per-invoke context threaded from {@link WireTransport.handleInvoke} into the
- * host/simulator invoke seams. Constructed ONLY after the wire's trust gate +
+ * host invoke seam. Constructed ONLY after the wire's trust gate +
  * main-frame gate have both passed, so `senderId` is a real trusted webContents
  * id (never undefined). The grant gate (in `ControlBus.dispatch`) reads
  * this; it is a REQUIRED param so a missing call
@@ -95,8 +95,6 @@ export interface WireTransportDeps {
 	/** 路由 host kind 调用；handler 抛错由 WireTransport 接住 → InvokeFailure。
 	 *  `ctx` 必填：携带已过 trust + main-frame gate 的 senderId（授权门读它）。 */
 	readonly invokeHost: (name: string, args: readonly JsonValue[], ctx: InvokeCtx) => Promise<JsonValue>
-	/** 路由 simulator kind 调用；同上（`ctx` 必填）。 */
-	readonly invokeSimulator: (name: string, args: readonly JsonValue[], ctx: InvokeCtx) => Promise<JsonValue>
 	/**
 	 * 已声明的 event name 集合，作为 wire fanout 的 allowlist。**必填，
 	 * default-deny** —— 未在该集合内的 event name 不会跨进程下发（防止
@@ -350,16 +348,12 @@ export class WireTransport {
 		}
 
 		// Both gates passed → senderId is a real trusted number. Build the ctx once
-		// and thread it into either seam (the grant gate reads ctx.senderId).
+		// and thread it into the seam (the grant gate reads ctx.senderId).
 		const ctx: InvokeCtx = { senderId, senderFrame: senderFrame ?? null }
 
 		try {
 			if (req.kind === 'host') {
 				const result = await this.deps.invokeHost(req.name, req.args, ctx)
-				return { ok: true, result }
-			}
-			if (req.kind === 'simulator') {
-				const result = await this.deps.invokeSimulator(req.name, req.args, ctx)
 				return { ok: true, result }
 			}
 			return failure(req.name, `unknown invoke kind: ${String(req.kind)}`, DECK_CODE.UnknownKind)
@@ -460,7 +454,7 @@ function validateRequest(raw: unknown): ValidationResult {
 	if (!Array.isArray(args)) {
 		return { ok: false, name, message: 'invoke request.args must be an array' }
 	}
-	// kind 字符串但值非 host/simulator 不在这里 reject —— handler 走 UNKNOWN_KIND 路径
+	// kind 字符串但值非 host 不在这里 reject —— handler 走 UNKNOWN_KIND 路径
 	return {
 		ok: true,
 		req: {

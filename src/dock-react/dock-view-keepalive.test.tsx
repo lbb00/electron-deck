@@ -82,7 +82,7 @@ function makeNativeTree(): LayoutTree {
 			orientation: 'column',
 			sizes: [1],
 			children: [
-				{ kind: 'tabs', id: 'g', panels: ['nativeCam', 'logs'], active: 'nativeCam' },
+				{ kind: 'tabs', id: 'g', panels: ['nativeCam', 'output'], active: 'nativeCam' },
 			],
 		},
 	}
@@ -93,7 +93,7 @@ function makeRegistry(): PanelRegistry {
 	reg.register({ kind: 'dom', id: 'a', title: 'A' })
 	reg.register({ kind: 'dom', id: 'b', title: 'B' })
 	reg.register({ kind: 'dom', id: 'c', title: 'C' })
-	reg.register({ kind: 'dom', id: 'logs', title: 'Logs' })
+	reg.register({ kind: 'dom', id: 'output', title: 'Output' })
 	reg.register({
 		kind: 'native',
 		id: 'nativeCam',
@@ -364,7 +364,7 @@ describe('<DockView> native panels are EXEMPT from keepalive (A3)', () => {
 		bind.mockClear()
 
 		// Switch active away from the native panel to the dom sibling.
-		act(() => { model.apply((t) => setActive(t, 'g', 'logs')) })
+		act(() => { model.apply((t) => setActive(t, 'g', 'output')) })
 
 		// The native slot UNMOUNTED (not kept alive) → unbound + removed.
 		const nullCall = bind.mock.calls.find((c) => c[0] === 'nativeCam' && c[1] === null)

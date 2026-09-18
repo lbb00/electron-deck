@@ -46,7 +46,7 @@ import { DockView, computeFlexiblePercentages } from './index.js'
 
 // ───────────────────────── fixtures ─────────────────────────
 
-/** root split[row] -> [ tabs g-left(sim) | tabs g-right(editor, debug) ] */
+/** root split[row] -> [ tabs g-left(preview) | tabs g-right(doc, notes) ] */
 function makeTree(): LayoutTree {
 	return {
 		version: 1,
@@ -56,12 +56,12 @@ function makeTree(): LayoutTree {
 			orientation: 'row',
 			sizes: [1, 1],
 			children: [
-				{ kind: 'tabs', id: 'g-left', panels: ['sim'], active: 'sim' },
+				{ kind: 'tabs', id: 'g-left', panels: ['preview'], active: 'preview' },
 				{
 					kind: 'tabs',
 					id: 'g-right',
-					panels: ['editor', 'debug'],
-					active: 'editor',
+					panels: ['doc', 'notes'],
+					active: 'doc',
 				},
 			],
 		},
@@ -78,7 +78,7 @@ function makeNativeTree(): LayoutTree {
 			orientation: 'column',
 			sizes: [1],
 			children: [
-				{ kind: 'tabs', id: 'g', panels: ['nativeCam', 'logs'], active: 'nativeCam' },
+				{ kind: 'tabs', id: 'g', panels: ['nativeCam', 'output'], active: 'nativeCam' },
 			],
 		},
 	}
@@ -86,10 +86,10 @@ function makeNativeTree(): LayoutTree {
 
 function makeRegistry(): PanelRegistry {
 	const reg = createPanelRegistry()
-	reg.register({ kind: 'dom', id: 'sim', title: 'Simulator' })
-	reg.register({ kind: 'dom', id: 'editor', title: 'Editor' })
-	reg.register({ kind: 'dom', id: 'debug', title: 'Debug' })
-	reg.register({ kind: 'dom', id: 'logs', title: 'Logs' })
+	reg.register({ kind: 'dom', id: 'preview', title: 'Preview' })
+	reg.register({ kind: 'dom', id: 'doc', title: 'Doc' })
+	reg.register({ kind: 'dom', id: 'notes', title: 'Notes' })
+	reg.register({ kind: 'dom', id: 'output', title: 'Output' })
 	reg.register({
 		kind: 'native',
 		id: 'nativeCam',
@@ -162,19 +162,19 @@ describe('<DockView> tab strip', () => {
 	it('renders one tab button per panel in each group', () => {
 		const { container } = renderDock({ model: createLayoutModel(makeTree()), registry: makeRegistry() })
 		const right = container.querySelector('[data-deck-group="g-right"]')!
-		expect(right.querySelector('[data-deck-tab="editor"]')).not.toBeNull()
-		expect(right.querySelector('[data-deck-tab="debug"]')).not.toBeNull()
-		expect(container.querySelector('[data-deck-tab="sim"]')).not.toBeNull()
+		expect(right.querySelector('[data-deck-tab="doc"]')).not.toBeNull()
+		expect(right.querySelector('[data-deck-tab="notes"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-tab="preview"]')).not.toBeNull()
 	})
 
 	// BUG: impl marks the wrong tab active (or marks none), so the active-tab
 	// affordance is wrong and the body shown won't match the highlighted tab.
 	it('marks the active tab data-active="true" and others "false"', () => {
 		const { container } = renderDock({ model: createLayoutModel(makeTree()), registry: makeRegistry() })
-		const editorTab = container.querySelector('[data-deck-tab="editor"]')!
-		const debugTab = container.querySelector('[data-deck-tab="debug"]')!
-		expect(editorTab.getAttribute('data-active')).toBe('true')
-		expect(debugTab.getAttribute('data-active')).toBe('false')
+		const docTab = container.querySelector('[data-deck-tab="doc"]')!
+		const notesTab = container.querySelector('[data-deck-tab="notes"]')!
+		expect(docTab.getAttribute('data-active')).toBe('true')
+		expect(notesTab.getAttribute('data-active')).toBe('false')
 	})
 })
 
@@ -186,13 +186,13 @@ describe('<DockView> active body rendering', () => {
 	// the kept-but-hidden behavior is pinned by dock-view-keepalive.test.tsx.)
 	it('keeps the active DOM body visible and the inactive one mounted-but-hidden', () => {
 		const { container } = renderDock({ model: createLayoutModel(makeTree()), registry: makeRegistry() })
-		// g-right active=editor => editor body visible, debug body kept but hidden.
-		const editorBody = container.querySelector<HTMLElement>('[data-deck-panel-body="editor"]')
-		const debugBody = container.querySelector<HTMLElement>('[data-deck-panel-body="debug"]')
-		expect(editorBody).not.toBeNull()
-		expect(debugBody).not.toBeNull()
-		expect(editorBody!.style.display).not.toBe('none')
-		expect(debugBody!.style.display).toBe('none')
+		// g-right active=doc => doc body visible, notes body kept but hidden.
+		const docBody = container.querySelector<HTMLElement>('[data-deck-panel-body="doc"]')
+		const notesBody = container.querySelector<HTMLElement>('[data-deck-panel-body="notes"]')
+		expect(docBody).not.toBeNull()
+		expect(notesBody).not.toBeNull()
+		expect(docBody!.style.display).not.toBe('none')
+		expect(notesBody!.style.display).toBe('none')
 	})
 
 	// BUG: impl ignores renderDomPanel and renders its own placeholder, so the
@@ -211,12 +211,12 @@ describe('<DockView> active body rendering', () => {
 			registry: makeRegistry(),
 			renderDomPanel,
 		})
-		const body = container.querySelector('[data-deck-panel-body="editor"]')!
-		expect(body.querySelector('[data-test-marker="editor"]')).not.toBeNull()
-		expect(body.textContent).toContain('custom-editor')
+		const body = container.querySelector('[data-deck-panel-body="doc"]')!
+		expect(body.querySelector('[data-test-marker="doc"]')).not.toBeNull()
+		expect(body.textContent).toContain('custom-doc')
 		// active panel rendered with active:true; inactive (kept-alive) with active:false.
-		expect(renderDomPanel).toHaveBeenCalledWith('editor', { active: true })
-		expect(renderDomPanel).toHaveBeenCalledWith('debug', { active: false })
+		expect(renderDomPanel).toHaveBeenCalledWith('doc', { active: true })
+		expect(renderDomPanel).toHaveBeenCalledWith('notes', { active: false })
 	})
 
 	// BUG: impl renders a native panel via renderDomPanel (wrong) instead of an
@@ -258,27 +258,27 @@ describe('<DockView> tab click interaction', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
 
-		// before: editor active (visible), debug kept-but-hidden (A3 keepalive).
-		const editorBefore = container.querySelector<HTMLElement>('[data-deck-panel-body="editor"]')!
-		const debugBefore = container.querySelector<HTMLElement>('[data-deck-panel-body="debug"]')!
-		expect(editorBefore.style.display).not.toBe('none')
-		expect(debugBefore.style.display).toBe('none')
+		// before: doc active (visible), notes kept-but-hidden (A3 keepalive).
+		const docBefore = container.querySelector<HTMLElement>('[data-deck-panel-body="doc"]')!
+		const notesBefore = container.querySelector<HTMLElement>('[data-deck-panel-body="notes"]')!
+		expect(docBefore.style.display).not.toBe('none')
+		expect(notesBefore.style.display).toBe('none')
 
-		const debugTab = container.querySelector('[data-deck-tab="debug"]')!
+		const notesTab = container.querySelector('[data-deck-tab="notes"]')!
 		act(() => {
-			fireEvent.click(debugTab)
+			fireEvent.click(notesTab)
 		})
 
-		// model's canonical tree now has debug active in g-right.
+		// model's canonical tree now has notes active in g-right.
 		const grp = (model.get().root as any).children.find((c: any) => c.id === 'g-right')
-		expect(grp.active).toBe('debug')
+		expect(grp.active).toBe('notes')
 
 		// DOM re-rendered: VISIBILITY swapped (both bodies stay mounted under keepalive).
-		const debugAfter = container.querySelector<HTMLElement>('[data-deck-panel-body="debug"]')!
-		const editorAfter = container.querySelector<HTMLElement>('[data-deck-panel-body="editor"]')!
-		expect(debugAfter.style.display).not.toBe('none')
-		expect(editorAfter.style.display).toBe('none')
-		expect(container.querySelector('[data-deck-tab="debug"]')!.getAttribute('data-active')).toBe('true')
+		const notesAfter = container.querySelector<HTMLElement>('[data-deck-panel-body="notes"]')!
+		const docAfter = container.querySelector<HTMLElement>('[data-deck-panel-body="doc"]')!
+		expect(notesAfter.style.display).not.toBe('none')
+		expect(docAfter.style.display).toBe('none')
+		expect(container.querySelector('[data-deck-tab="notes"]')!.getAttribute('data-active')).toBe('true')
 	})
 
 	// BUG: impl fires setActive on a tab that's already active (needless churn)
@@ -286,15 +286,15 @@ describe('<DockView> tab click interaction', () => {
 	it('clicking the already-active tab keeps it active and does not error', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
-		const editorTab = container.querySelector('[data-deck-tab="editor"]')!
+		const docTab = container.querySelector('[data-deck-tab="doc"]')!
 		act(() => {
-			fireEvent.click(editorTab)
+			fireEvent.click(docTab)
 		})
 		const grp = (model.get().root as any).children.find((c: any) => c.id === 'g-right')
-		expect(grp.active).toBe('editor')
+		expect(grp.active).toBe('doc')
 		// the OTHER group is untouched.
 		const left = (model.get().root as any).children.find((c: any) => c.id === 'g-left')
-		expect(left.active).toBe('sim')
+		expect(left.active).toBe('preview')
 	})
 })
 
@@ -304,16 +304,16 @@ describe('<DockView> external reactivity', () => {
 	it('re-renders when an EXTERNAL model.apply(setActive) changes the tree', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
-		// A3 keepalive: debug is kept-but-hidden before the external activation.
-		expect(container.querySelector<HTMLElement>('[data-deck-panel-body="debug"]')!.style.display).toBe('none')
+		// A3 keepalive: notes is kept-but-hidden before the external activation.
+		expect(container.querySelector<HTMLElement>('[data-deck-panel-body="notes"]')!.style.display).toBe('none')
 
 		act(() => {
-			model.apply((t) => setActive(t, 'g-right', 'debug'))
+			model.apply((t) => setActive(t, 'g-right', 'notes'))
 		})
 
 		// External setActive flips visibility (both bodies stay mounted).
-		expect(container.querySelector<HTMLElement>('[data-deck-panel-body="debug"]')!.style.display).not.toBe('none')
-		expect(container.querySelector<HTMLElement>('[data-deck-panel-body="editor"]')!.style.display).toBe('none')
+		expect(container.querySelector<HTMLElement>('[data-deck-panel-body="notes"]')!.style.display).not.toBe('none')
+		expect(container.querySelector<HTMLElement>('[data-deck-panel-body="doc"]')!.style.display).toBe('none')
 	})
 
 	// BUG: impl throws or fails to re-render on a setSizes apply, breaking the
@@ -341,7 +341,7 @@ describe('<DockView> external reactivity', () => {
 		const { unmount } = renderDock({ model, registry: makeRegistry() })
 		unmount()
 		expect(() => {
-			model.apply((t) => setActive(t, 'g-right', 'debug'))
+			model.apply((t) => setActive(t, 'g-right', 'notes'))
 		}).not.toThrow()
 	})
 })
@@ -369,13 +369,13 @@ describe('<DockView> native slot lifecycle', () => {
 
 		// switch the group's active away from the native panel to the dom sibling.
 		act(() => {
-			model.apply((t) => setActive(t, 'g', 'logs'))
+			model.apply((t) => setActive(t, 'g', 'output'))
 		})
 
 		const nullCall = bind.mock.calls.find((c) => c[0] === 'nativeCam' && c[1] === null)
 		expect(nullCall).toBeTruthy()
 		// and the slot is gone from the DOM.
-		// (asserted indirectly: a dom body for `logs` is now present instead)
+		// (asserted indirectly: a dom body for `output` is now present instead)
 	})
 
 	// BUG: impl binds only once and never re-binds on re-activation, so toggling
@@ -386,7 +386,7 @@ describe('<DockView> native slot lifecycle', () => {
 		renderDock({ model, registry: makeRegistry(), bindNativeSlot: bind })
 
 		act(() => {
-			model.apply((t) => setActive(t, 'g', 'logs'))
+			model.apply((t) => setActive(t, 'g', 'output'))
 		})
 		bind.mockClear()
 		act(() => {
@@ -422,37 +422,37 @@ describe('<DockView> stale-tab safety (M3)', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
 
-		// Capture the debug tab BEFORE the external mutation (the "stale" handle).
-		const staleDebugTab = container.querySelector('[data-deck-tab="debug"]')
+		// Capture the notes tab BEFORE the external mutation (the "stale" handle).
+		const staleNotesTab = container.querySelector('[data-deck-tab="notes"]')
 
-		// EXTERNAL structural mutation: move 'debug' out of g-right into g-left.
-		// g-right now holds only ['editor']; g-left holds ['sim','debug'].
+		// EXTERNAL structural mutation: move 'notes' out of g-right into g-left.
+		// g-right now holds only ['doc']; g-left holds ['preview','notes'].
 		act(() => {
-			model.apply((t) => movePanel(t, 'debug', { groupId: 'g-left' }))
+			model.apply((t) => movePanel(t, 'notes', { groupId: 'g-left' }))
 		})
 
 		// Clicking the (now possibly detached) captured node must never throw.
 		expect(() => {
 			act(() => {
-				if (staleDebugTab) fireEvent.click(staleDebugTab)
+				if (staleNotesTab) fireEvent.click(staleNotesTab)
 			})
 		}).not.toThrow()
 
-		// And clicking whatever debug tab the CURRENT render shows must not throw
-		// and must activate debug in its new home (g-left), driven through the model.
-		const liveDebugTab = container.querySelector('[data-deck-tab="debug"]')!
+		// And clicking whatever notes tab the CURRENT render shows must not throw
+		// and must activate notes in its new home (g-left), driven through the model.
+		const liveNotesTab = container.querySelector('[data-deck-tab="notes"]')!
 		expect(() => {
 			act(() => {
-				fireEvent.click(liveDebugTab)
+				fireEvent.click(liveNotesTab)
 			})
 		}).not.toThrow()
 
 		const root = model.get().root as any
 		const left = root.children.find((c: any) => c.id === 'g-left')
 		const right = root.children.find((c: any) => c.id === 'g-right')
-		expect(left.panels).toContain('debug')
-		expect(left.active).toBe('debug') // clicking the live tab activated it
-		expect(right.active).toBe('editor') // the other group untouched / sane
+		expect(left.panels).toContain('notes')
+		expect(left.active).toBe('notes') // clicking the live tab activated it
+		expect(right.active).toBe('doc') // the other group untouched / sane
 	})
 
 	// M3 (drag/closePanel race): a "fails-now" reproduction of the stale-closure

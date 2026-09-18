@@ -8,7 +8,7 @@
 // worst case degrades from a stuck view to a one-tick flicker.
 //
 // Domain-neutral: view ids are opaque strings and per-view host specifics ride
-// on the `Extra` type parameter (e.g. a simulator's zoom), so the same core
+// on the `Extra` type parameter (e.g. a preview pane's zoom), so the same core
 // serves any electron-deck host. Side-effect free — it only computes ops; a
 // thin host executor applies them.
 
@@ -21,7 +21,7 @@ export interface DesiredView<Extra = unknown> {
   placement: Placement
   // z-order; larger paints on top.
   layer: number
-  // Host-specific extras carried through to setBounds (e.g. simulator zoom).
+  // Host-specific extras carried through to setBounds (e.g. preview zoom).
   extra?: Extra
 }
 
