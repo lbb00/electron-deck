@@ -10,8 +10,8 @@
  * and execute only reconcile. No BrowserWindow is created.
  *
  * Usage (requires explicit GC for comparable RSS baselines):
- *   electron --js-flags=--expose-gc bench/electron-main-worker-crossover.mjs
- *   DECK_CROSSOVER_OUTPUT=/tmp/crossover.json electron --js-flags=--expose-gc bench/electron-main-worker-crossover.mjs
+ *   electron --js-flags=--expose-gc bench/electron-main-worker-crossover.js
+ *   DECK_CROSSOVER_OUTPUT=/tmp/crossover.json electron --js-flags=--expose-gc bench/electron-main-worker-crossover.js
  *
  * This models the real main-thread security/apply boundary but not native
  * WebContentsView work: `dispatchOps` is real production code and its sink is
@@ -70,7 +70,7 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 } else if (isMainThread) {
 	const main = async () => {
 	const { app, utilityProcess } = await import('electron')
-	const { createApplyRecorder, waitForExit } = await import('./electron-main-worker-crossover.utility.mjs')
+	const { createApplyRecorder, waitForExit } = await import('./electron-main-worker-crossover.utility.js')
 	const holdFrameworkQuit = event => event.preventDefault()
 	app.on('before-quit', holdFrameworkQuit)
 	const earlyOutputPath = requestedOutputPath
@@ -140,7 +140,7 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 			return { kind: 'worker_threads', pid: process.pid, request, close: async () => { const exited = waitForExit(worker, requestTimeoutMs, 'worker_threads'); await Promise.all([exited, worker.terminate()]) } }
 		}
 		const createUtilityProcess = async () => {
-			const child = utilityProcess.fork(fileURLToPath(new URL('./electron-main-worker-crossover.utility.mjs', import.meta.url)), [], { env: { ...process.env, DECK_CROSSOVER_LAYOUT_ENTRY: layoutEntry } })
+			const child = utilityProcess.fork(fileURLToPath(new URL('./electron-main-worker-crossover.utility.js', import.meta.url)), [], { env: { ...process.env, DECK_CROSSOVER_LAYOUT_ENTRY: layoutEntry } })
 			const pending = new Map()
 			const rejectPending = error => { for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error) }; pending.clear() }
 			child.on('message', (...args) => {

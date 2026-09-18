@@ -19,7 +19,7 @@ export type Orientation = 'row' | 'column'
  *    excluded from the flexible weight pool (it never receives a share of the
  *    weight-driven remainder) — but unlike `fixedPx` it has no upper bound, so
  *    the user can still drag it wider than the floor. Use for a panel that must
- *    keep a minimum size while still being draggable (e.g. a simulator column
+ *    keep a minimum size while still being draggable (e.g. a preview column
  *    floored at the device width).
  *
  * KEY SEMANTIC: "is this child px-sized?" === "is the constraint non-null?"
@@ -69,18 +69,28 @@ export interface LayoutTree {
  * Per-panel drag/drop capability policy. All fields are OPTIONAL and
  * DEFAULT-PERMISSIVE, so existing registrations keep today's behavior (a fully
  * draggable, closable panel that may move/split freely). The fields are orthogonal:
- * `draggable` governs whether the panel is a drag SOURCE / drop ANCHOR at all;
- * `dropPolicy` governs where a draggable panel may LAND; `closable` governs
- * whether DockView exposes the panel's close affordance.
+ * `draggable` governs whether the panel is a drag SOURCE; `acceptsDrops` governs
+ * whether a group anchored on this panel is a valid drop TARGET; `dropPolicy`
+ * governs where a draggable panel may LAND; `closable` governs whether DockView
+ * exposes the panel's close affordance.
  */
 export interface PanelCapabilities {
 	/**
-	 * When `false`: the panel's tab cannot be picked up (its tab is not
-	 * `draggable`) AND it is not a valid drop ANCHOR — no other panel may
-	 * join/split against the group while this panel is that group's active tab.
+	 * When `false`: the panel's tab cannot be picked up — it is not `draggable`
+	 * and a drag gesture cannot start from it. Does NOT affect whether other
+	 * panels may be dropped onto it as a target; see `acceptsDrops` for that.
 	 * `undefined` is treated as `true`.
 	 */
 	readonly draggable?: boolean
+	/**
+	 * When `false`: a group whose ACTIVE panel is this one is not a valid drop
+	 * ANCHOR — no other panel may join/split against it, in any zone. `undefined`
+	 * falls back to `draggable` (then to `true`) — a panel already marked
+	 * `draggable: false` stays a locked anchor too unless `acceptsDrops` is set
+	 * explicitly, so existing `draggable: false` registrations keep their current
+	 * "nothing can dock onto me either" behavior without a silent change.
+	 */
+	readonly acceptsDrops?: boolean
 	/**
 	 * Drop/move policy for THIS panel when it is the one being dragged:
 	 *  - `'free'` (default): may move to any group or edge-split anywhere.
@@ -98,7 +108,7 @@ export interface PanelCapabilities {
 	 * When `true`, this panel contributes NO tab to the group's tab strip. A
 	 * group whose every panel hides its tab renders no tab strip at all (its body
 	 * fills the whole region). Use for structural/chrome-owning panels that carry
-	 * their own header (e.g. a simulator panel that draws its own device picker),
+	 * their own header (e.g. a preview panel that draws its own device picker),
 	 * where the engine tab would be redundant. `undefined` is treated as `false`.
 	 */
 	readonly hideTab?: boolean

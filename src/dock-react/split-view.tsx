@@ -50,7 +50,7 @@ export function SplitView(props: SplitViewProps): ReactNode {
 
 	// Bug #1 defense A: the minimum % a flexible child may shrink to. rrp's default
 	// flexible `minSize` is 0% (a panel can be dragged to nothing); this floors it
-	// so the simulator/editor can never be pulled to 0 width. Unitless string =
+	// so a fixed-size pane can never be pulled to 0 width. Unitless string =
 	// percentage (same convention as `defaultSize` above; a px `minSize` next to a
 	// %-`defaultSize` is misparsed by rrp). The floor is keyed on the COUNT of
 	// flexible children in THIS split (the same value the write-back clamp uses).
@@ -242,7 +242,7 @@ export function SplitView(props: SplitViewProps): ReactNode {
 	// `minPx` child, since the user may have legitimately dragged it wider than
 	// its floor by then — see `MeasuredContainer`.
 	//
-	// Returns `stuck: true` when nothing needed pushing OR the push is confirmed
+	// Returns `settled: true` when nothing needed pushing OR the push is confirmed
 	// (by re-reading `getLayout()`) to have taken hold — `false` when rrp is not
 	// ready yet (`groupRef` unpopulated) or SILENTLY CLAMPED our push back to a
 	// stale constraint (empirically: right after a fresh mount, rrp's own
@@ -250,10 +250,10 @@ export function SplitView(props: SplitViewProps): ReactNode {
 	// reflect the same bad initial measurement, and `validatePanelGroupLayout`
 	// rejects a legitimate corrective value against it — the constraint only
 	// self-corrects once rrp's ResizeObserver re-measures on a LATER frame). The
-	// `childCountKey` effect below retries (bounded) on `stuck: false`.
-	const runSync = useCallback((isFreshRemount: boolean): { pushed: boolean; stuck: boolean } => {
+	// `childCountKey` effect below retries (bounded) on `settled: false`.
+	const runSync = useCallback((isFreshRemount: boolean): { pushed: boolean; settled: boolean } => {
 		const api = groupRef.current
-		if (!api) return { pushed: false, stuck: false }
+		if (!api) return { pushed: false, settled: false }
 		const cur = nodeRef.current
 		const curChildIds = cur.children.map((c) => c.id)
 
@@ -269,21 +269,21 @@ export function SplitView(props: SplitViewProps): ReactNode {
 		// live-trusting behavior, which in turn returns null for any fixed child; but
 		// `setLayout` is a no-op under jsdom anyway. In a real renderer both are populated.
 		const targetMap = buildSetLayoutMap(curChildIds, cur.sizes, cur.constraints, live, measured)
-		if (!targetMap) return { pushed: false, stuck: false }
+		if (!targetMap) return { pushed: false, settled: false }
 
 		// SET-side redundant-push skip: don't re-push a layout the live Group already
 		// satisfies. This is the loop break on the SET side — pushing an identical
 		// layout would re-emit `onLayoutChanged`, but its flexible ratios match the
 		// model so the normalized compare in `handleLayoutChanged` skips the write-back
 		// anyway; this skip just avoids the redundant work.
-		if (layoutsEquivalent(live, targetMap, curChildIds)) return { pushed: false, stuck: true }
+		if (layoutsEquivalent(live, targetMap, curChildIds)) return { pushed: false, settled: true }
 
 		api.setLayout(targetMap)
-		// Confirm the push actually stuck — rrp's `setLayout` validates the
+		// Confirm the push actually settled — rrp's `setLayout` validates the
 		// incoming layout against its OWN panel constraints and silently clamps
 		// anything that violates them (see the doc comment above).
-		const stuck = layoutsEquivalent(api.getLayout(), targetMap, curChildIds)
-		return { pushed: true, stuck }
+		const settled = layoutsEquivalent(api.getLayout(), targetMap, curChildIds)
+		return { pushed: true, settled }
 	}, [])
 
 	// Re-run the sync whenever the model's raw weights change (every external
@@ -306,14 +306,14 @@ export function SplitView(props: SplitViewProps): ReactNode {
 	// (an ordinary weight change) or a brand new one (`key={node.children.length}`
 	// just remounted it, or this is the very first mount — seeded `null` so the
 	// initial sync is ALSO treated as fresh, covering a session that restores
-	// straight into a shape prone to Bug #3, e.g. `belowSimulator`).
+	// straight into a shape prone to Bug #3, e.g. `belowPreview`).
 	const prevChildCountKeyRef = useRef<number | null>(null)
 	// Bug #3 defense (continued from `runSync`'s doc comment): an ordinary
 	// (non-remount) sync sticks synchronously today — pinned so this fix does
 	// not add latency to that already-working path. A FRESH remount's push can
 	// get silently clamped by a stale rrp constraint that only self-corrects a
 	// couple of animation frames later; retry (bounded, empirically converges
-	// within 2 frames) until `runSync` confirms the push stuck, rather than
+	// within 2 frames) until `runSync` confirms the push settled, rather than
 	// hard-coding an exact frame count that could be too short on a slower host.
 	const MAX_FRESH_REMOUNT_SYNC_ATTEMPTS = 8
 	useEffect(() => {
@@ -331,8 +331,8 @@ export function SplitView(props: SplitViewProps): ReactNode {
 		const tick = (): void => {
 			if (cancelled) return
 			attempts += 1
-			const { stuck } = runSync(true)
-			if (!stuck && attempts < MAX_FRESH_REMOUNT_SYNC_ATTEMPTS) {
+			const { settled } = runSync(true)
+			if (!settled && attempts < MAX_FRESH_REMOUNT_SYNC_ATTEMPTS) {
 				rafId = requestAnimationFrame(tick)
 			}
 		}
@@ -371,7 +371,7 @@ export function SplitView(props: SplitViewProps): ReactNode {
 				// changes — an ordinary weight resize never changes the key, so this
 				// adds NO remount on drags. The model→view sync (runSync) re-binds
 				// `groupRef` on remount and re-pushes the model's weights via the
-				// `sizesKey` effect; the simulator/console native overlay re-anchors via
+				// `sizesKey` effect; the native overlay re-anchors via
 				// its slot ref callback (same path as a tab switch). See
 				// dock-view-robustness.test.tsx "3 → 2" for the regression.
 				key={node.children.length}

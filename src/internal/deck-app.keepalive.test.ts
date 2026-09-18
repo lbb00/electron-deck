@@ -13,11 +13,14 @@
  * idempotent (never double-closed).
  *
  * PART 2 — opt-in LRU helper (「opt-in helper：runtime.view({ keepAlive })」). `runtime.view({ keepAlive:{policy:'lru',
- * max:N} })` tracks a per-policy-group LRU of HIDDEN views; making a view visible
- * marks it recently-used; when the count of HIDDEN keep-alive views in a group
- * exceeds `max`, the LEAST-recently-visible HIDDEN view is disposed (its
- * WebContents destroyed). Visible views are NEVER evicted. Omitting `keepAlive`
- * → the framework evicts nothing.
+ * max:N, group:'name'} })` tracks a per-`group`-name LRU of HIDDEN views; making
+ * a view visible marks it recently-used; when the count of HIDDEN keep-alive
+ * views in a group exceeds `max`, the LEAST-recently-visible HIDDEN view is
+ * disposed (its WebContents destroyed). Visible views are NEVER evicted.
+ * Omitting `keepAlive` → the framework evicts nothing. A `group` is established
+ * by its first member's `max`; a later view naming the same group with a
+ * DIFFERENT `max` keeps the established value (first-declaration-wins) and
+ * warns once per group.
  *
  * Fakes: replicated minimally from deck-app.host-view.test.ts. The fake
  * `webContents` is EXTENDED with a `close: vi.fn()` spy that flips the
@@ -155,7 +158,9 @@ function createFakeElectron(
 				removeChildView: vi.fn(),
 			}
 			this.contentView = cv as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
@@ -163,15 +168,17 @@ function createFakeElectron(
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
 			this._lastCloseEvent = null
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -221,8 +228,8 @@ function createFakeElectron(
 // `keepAlive` (`ViewCreateOptions`) and `webContents.close`
 // (`MinimalWebContentsLike`) are reached through loose views so the suite runs
 // regardless of whether those types declare them.
-type Bounds = { x: number, y: number, width: number, height: number }
-type Placement = { visible: true, bounds: Bounds } | { visible: false }
+type Bounds = { x: number; y: number; width: number; height: number }
+type Placement = { visible: true; bounds: Bounds } | { visible: false }
 interface ViewSource {
 	url?: string
 	file?: string
@@ -230,6 +237,7 @@ interface ViewSource {
 interface KeepAliveSpec {
 	policy: 'lru'
 	max: number
+	group: string
 }
 interface HostViewHandle {
 	placeIn(win: unknown, opts: { zone?: number }): HostViewHandle
@@ -237,11 +245,11 @@ interface HostViewHandle {
 	// the cross-window move surface (typed loosely here, same escape-hatch pattern
 	// as deck-app.move.test.ts) so the keepAlive group staleness pin can move a
 	// hidden view.
-	moveTo(win: unknown, opts: { zone?: number, anchor?: string, rehome?: boolean }): Promise<void>
+	moveTo(win: unknown, opts: { zone?: number; anchor?: string; rehome?: boolean }): Promise<void>
 	dispose(): Promise<void>
 }
 interface RuntimeWithView {
-	view(spec: { source: ViewSource, scope?: unknown, keepAlive?: KeepAliveSpec }): HostViewHandle
+	view(spec: { source: ViewSource; scope?: unknown; keepAlive?: KeepAliveSpec }): HostViewHandle
 	// the sealed session factory — the ONLY legitimate source of a `scope`.
 	scopes: { create(): { dispose(): Promise<void> } }
 }
@@ -257,7 +265,10 @@ function lastWcv(electron: FakeElectron): FakeWebContentsView {
 	return wcv
 }
 
-const VISIBLE = (b: Bounds = { x: 0, y: 0, width: 10, height: 10 }): Placement => ({ visible: true, bounds: b })
+const VISIBLE = (b: Bounds = { x: 0, y: 0, width: 10, height: 10 }): Placement => ({
+	visible: true,
+	bounds: b,
+})
 const HIDDEN: Placement = { visible: false }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -267,7 +278,7 @@ const HIDDEN: Placement = { visible: false }
 // ═════════════════════════════════════════════════════════════════════════════
 describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is destroyed, not leaked', () => {
 	// ── #1 (CRITICAL) — explicit dispose destroys the native WebContents. ──────
-	it('#1 [CRITICAL] dispose() closes the placed view\'s native webContents exactly once', async () => {
+	it("#1 [CRITICAL] dispose() closes the placed view's native webContents exactly once", async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
@@ -286,7 +297,7 @@ describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is dest
 	})
 
 	// ── #2 (CRITICAL) — window close destroys every placed view's WebContents. ──
-	it('#2 [CRITICAL] closing the window (windowScope cascade) destroys the placed view\'s webContents', async () => {
+	it("#2 [CRITICAL] closing the window (windowScope cascade) destroys the placed view's webContents", async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
@@ -303,7 +314,7 @@ describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is dest
 
 		expect(wcv.webContents.close).not.toHaveBeenCalled()
 		win._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// The window's close cascaded into the view's scope → WebContents destroyed.
 		expect(wcv.webContents.close).toHaveBeenCalled()
@@ -333,7 +344,7 @@ describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is dest
 		// wc already destroyed (guard: if (!isDestroyed()) close()) → still 1 call.
 		await expect(handle.dispose()).resolves.toBeUndefined()
 		expect(() => win._emit('closed')).not.toThrow()
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(wcv.webContents.close).toHaveBeenCalledTimes(1)
 
@@ -342,7 +353,7 @@ describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is dest
 
 	// ── #4 — explicit opts.scope close destroys the wc (backstop); and without
 	//        an explicit scope, app.shutdown still destroys it. ─────────────────
-	it('#4 an explicit opts.scope (session) closing destroys the view\'s webContents (home-scope backstop)', async () => {
+	it("#4 an explicit opts.scope (session) closing destroys the view's webContents (home-scope backstop)", async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
@@ -360,7 +371,7 @@ describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is dest
 		// dispose the SESSION (→ its internal scope.close()) → home-scope backstop
 		// closes the view's native WebContents.
 		await session.dispose()
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(wcv.webContents.close).toHaveBeenCalled()
 		expect(wcv.webContents.isDestroyed()).toBe(true)
@@ -368,7 +379,7 @@ describe('keepAlive — Part 1 lifetime/leak fix: the native WebContents is dest
 		await app.shutdown()
 	})
 
-	it('#4b without an explicit scope (rootScope default), app.shutdown() still destroys the view\'s webContents', async () => {
+	it("#4b without an explicit scope (rootScope default), app.shutdown() still destroys the view's webContents", async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
@@ -452,7 +463,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
 
-		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 2 }
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 2, group: 'a-group' }
 		const a = withView(app.runtime).view({ source: { url: 'data:text/html,a' }, keepAlive })
 		const wcvA = lastWcv(electron)
 		const b = withView(app.runtime).view({ source: { url: 'data:text/html,b' }, keepAlive })
@@ -467,13 +478,13 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		// Hide in a known order: A first (least recent), then B, then C.
 		a.applyPlacement(HIDDEN) // hidden group: [A]            (1 ≤ max)
 		b.applyPlacement(HIDDEN) // hidden group: [A, B]         (2 ≤ max)
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// A and B still alive at this point (within max).
 		expect(wcvA.webContents.close).not.toHaveBeenCalled()
 		expect(wcvB.webContents.close).not.toHaveBeenCalled()
 
 		c.applyPlacement(HIDDEN) // hidden group exceeds max=2 → evict LEAST-recent = A
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// A (least-recently-hidden) is disposed → its WebContents destroyed.
 		expect(wcvA.webContents.close).toHaveBeenCalled()
@@ -491,7 +502,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
 
-		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1 }
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1, group: 'b-group' }
 		const a = withView(app.runtime).view({ source: { url: 'data:text/html,a' }, keepAlive })
 		const wcvA = lastWcv(electron)
 		const b = withView(app.runtime).view({ source: { url: 'data:text/html,b' }, keepAlive })
@@ -507,7 +518,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		a.applyPlacement(VISIBLE())
 		b.applyPlacement(HIDDEN) // hidden group: [B]            (1 ≤ max)
 		c.applyPlacement(HIDDEN) // hidden group exceeds max=1 → evict least-recent HIDDEN = B
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// A (visible) is NEVER evicted.
 		expect(wcvA.webContents.close).not.toHaveBeenCalled()
@@ -529,7 +540,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		// max:-1 is invalid (negative). The view is NOT keep-alive-managed, so the
 		// `while (hidden.length > max)` loop must never run (a negative max would
 		// otherwise evict EVERY hidden view / spin).
-		const keepAlive: KeepAliveSpec = { policy: 'lru', max: -1 }
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: -1, group: 'ka4-group' }
 		const a = withView(app.runtime).view({ source: { url: 'data:text/html,a' }, keepAlive })
 		const wcvA = lastWcv(electron)
 		const b = withView(app.runtime).view({ source: { url: 'data:text/html,b' }, keepAlive })
@@ -540,7 +551,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 
 		a.applyPlacement(HIDDEN)
 		b.applyPlacement(HIDDEN)
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// Nothing was evicted: an invalid max disables keep-alive management entirely.
 		expect(wcvA.webContents.close).not.toHaveBeenCalled()
@@ -570,7 +581,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
 
-		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1 }
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1, group: 'ka2-group' }
 
 		// A: placed + hidden in a runtime-created popout window so its viewScope is a
 		// child of THAT window's scope (closing the window cascades into it).
@@ -581,12 +592,12 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		const wcvA = lastWcv(electron)
 		a.placeIn(win as unknown as Runtime['mainWindow'], { zone: 0 })
 		a.applyPlacement(HIDDEN) // hidden group `lru:1`: [A]  (1 ≤ max)
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(wcvA.webContents.close).not.toHaveBeenCalled() // within budget, alive
 
 		// Close the WINDOW (cascade) — NOT an explicit a.dispose().
 		win._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// (1) lifetime: A's WebContents destroyed by the window-scope cascade.
 		expect(wcvA.webContents.close).toHaveBeenCalledTimes(1)
 		expect(wcvA.webContents.isDestroyed()).toBe(true)
@@ -601,14 +612,14 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		c.placeIn(app.runtime.mainWindow, { zone: 0 })
 
 		b.applyPlacement(HIDDEN) // live hidden: [B]            (1 ≤ max)
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// If A had leaked into the group, [A,B] would already exceed max=1 and evict
 		// the front (A or a corrupted entry) here. With a clean group, B is alone.
 		expect(wcvB.webContents.close).not.toHaveBeenCalled()
 		expect(wcvA.webContents.close).toHaveBeenCalledTimes(1) // A NOT re-disposed
 
 		c.applyPlacement(HIDDEN) // live hidden exceeds max=1 → evict least-recent = B
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// Eviction was over LIVE views only: B (the first live least-recent) is the
 		// victim; C survives; A is untouched (still exactly one close).
 		expect(wcvB.webContents.close).toHaveBeenCalledTimes(1)
@@ -638,7 +649,7 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		a.applyPlacement(HIDDEN)
 		b.applyPlacement(HIDDEN)
 		c.applyPlacement(HIDDEN)
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// No keepAlive policy → the framework evicts NOTHING (pure host management).
 		expect(wcvA.webContents.close).not.toHaveBeenCalled()
@@ -662,12 +673,12 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 	// max=1 → evicts A (a moved, VISIBLE view — corruption). With the fix, A is
 	// gone: hiding B is within budget (no evict), and only hiding C (live [B,C]
 	// exceeds max=1) evicts B. A is NEVER disposed (still live in winB). ──────────
-	it('a hidden keepAlive view that is moved is no longer in the group\'s hidden/evictable set', async () => {
+	it("a hidden keepAlive view that is moved is no longer in the group's hidden/evictable set", async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
 		await app.start()
 
-		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1 }
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1, group: 'move-group' }
 		const winB = app.runtime.windows.create({
 			source: { url: 'http://localhost:5173/winB.html' },
 		}).window as unknown as FakeBrowserWindow
@@ -677,13 +688,13 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		const wcvA = lastWcv(electron)
 		a.placeIn(app.runtime.mainWindow, { zone: 0 })
 		a.applyPlacement(HIDDEN)
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(wcvA.webContents.close).not.toHaveBeenCalled() // within budget
 
 		// Move A to winB — it re-mounts VISIBLE there, so it must leave the group's
 		// hidden list (no longer evictable).
 		await a.moveTo(winB as unknown as Runtime['mainWindow'], { zone: 0 })
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(wcvA.webContents.close).not.toHaveBeenCalled() // the move did not dispose A
 
 		// Now exercise the SAME group with B then C. If A leaked into hidden, hiding
@@ -696,16 +707,93 @@ describe('keepAlive — Part 2 opt-in LRU helper', () => {
 		c.placeIn(app.runtime.mainWindow, { zone: 0 })
 
 		b.applyPlacement(HIDDEN) // live hidden: [B] (1 ≤ max) → no evict if A is gone
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(wcvB.webContents.close).not.toHaveBeenCalled()
 		expect(wcvA.webContents.close).not.toHaveBeenCalled() // A NOT evicted (it left hidden)
 
 		c.applyPlacement(HIDDEN) // live hidden exceeds max=1 → evict least-recent = B
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(wcvB.webContents.close).toHaveBeenCalledTimes(1) // B is the victim, not A
 		expect(wcvC.webContents.close).not.toHaveBeenCalled()
 		expect(wcvA.webContents.close).not.toHaveBeenCalled() // A still live in winB
 
+		await app.shutdown()
+	})
+
+	// ── group `max` conflict: first-declaration-wins, warn once per group. ──────
+	//
+	// Grouping is by `keepAlive.group` name, not `max`. The FIRST view to join a
+	// group establishes its `max`; a later view naming the SAME group with a
+	// DIFFERENT `max` does NOT change the group's budget — it is warned once and
+	// otherwise ignored. Observable via eviction: group max is 1 (set by A); C
+	// joins the same group claiming max=99, but the group still evicts at 1.
+	it('KA-5) a later view naming an existing group with a different max is ignored (first-declaration-wins); warned once', async () => {
+		const electron = createFakeElectron()
+		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
+		await app.start()
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+		const a = withView(app.runtime).view({
+			source: { url: 'data:text/html,a' },
+			keepAlive: { policy: 'lru', max: 1, group: 'shared-group' },
+		})
+		const wcvA = lastWcv(electron)
+		const b = withView(app.runtime).view({
+			source: { url: 'data:text/html,b' },
+			// Same group, different max — the group already exists (max:1, from A),
+			// so this max is ignored (not overwritten).
+			keepAlive: { policy: 'lru', max: 99, group: 'shared-group' },
+		})
+		const wcvB = lastWcv(electron)
+
+		a.placeIn(app.runtime.mainWindow, { zone: 0 })
+		b.placeIn(app.runtime.mainWindow, { zone: 0 })
+
+		a.applyPlacement(HIDDEN) // group hidden: [A] (1 ≤ established max=1)
+		await new Promise((r) => setTimeout(r, 0))
+		expect(wcvA.webContents.close).not.toHaveBeenCalled()
+
+		// B's conflicting max:99 must have been WARNED about (not silently accepted).
+		expect(warn).toHaveBeenCalled()
+
+		b.applyPlacement(HIDDEN) // group hidden exceeds the established max=1 → evict A
+		await new Promise((r) => setTimeout(r, 0))
+
+		// The group evicted at its ESTABLISHED max (1), not B's claimed max (99) —
+		// proof the conflicting max never took effect.
+		expect(wcvA.webContents.close).toHaveBeenCalled()
+		expect(wcvB.webContents.close).not.toHaveBeenCalled()
+
+		warn.mockRestore()
+		await app.shutdown()
+	})
+
+	// ── a missing/empty group is NOT keep-alive-managed (no eviction), warned once. ─
+	it('KA-6) keepAlive without a valid group is NOT managed: hiding views evicts nothing; warned once', async () => {
+		const electron = createFakeElectron()
+		const app = new DeckApp({}, { electron, wireTransport: { ipcMain: createFakeIpcMain() } })
+		await app.start()
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+		// group:'' is present but empty — invalid, same as omitting it.
+		const keepAlive: KeepAliveSpec = { policy: 'lru', max: 1, group: '' }
+		const a = withView(app.runtime).view({ source: { url: 'data:text/html,a' }, keepAlive })
+		const wcvA = lastWcv(electron)
+		const b = withView(app.runtime).view({ source: { url: 'data:text/html,b' }, keepAlive })
+		const wcvB = lastWcv(electron)
+
+		a.placeIn(app.runtime.mainWindow, { zone: 0 })
+		b.placeIn(app.runtime.mainWindow, { zone: 0 })
+
+		a.applyPlacement(HIDDEN)
+		b.applyPlacement(HIDDEN)
+		await new Promise((r) => setTimeout(r, 0))
+
+		expect(wcvA.webContents.close).not.toHaveBeenCalled()
+		expect(wcvB.webContents.close).not.toHaveBeenCalled()
+		expect(warn).toHaveBeenCalled()
+
+		warn.mockRestore()
 		await app.shutdown()
 	})
 })

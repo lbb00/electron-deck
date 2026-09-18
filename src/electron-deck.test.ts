@@ -32,14 +32,8 @@ describe('validateConfig', () => {
 	it('accepts a fully-populated minimal valid config', () => {
 		const ev = defineEvent<JsonValue>('ok-event')
 		const cfg: DeckConfig = {
-			simulatorApis: { foo: () => null },
 			hostServices: { bar: () => null },
 			events: [ev],
-			toolbar: {
-				source: { url: 'http://localhost:5173/toolbar' },
-				preloadPath: '/abs/preload.js',
-				height: 40,
-			},
 		}
 		expect(() => validateConfig(cfg)).not.toThrow()
 	})
@@ -56,44 +50,15 @@ describe('validateConfig', () => {
 		expect(() => validateConfig(42 as any)).toThrow(TypeError)
 	})
 
-	it('throws TypeError when a simulatorApis value is not a function', () => {
-		expect(() =>
-			validateConfig({
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				simulatorApis: { broken: 'oops' as any },
-			}),
-		).toThrow(TypeError)
-	})
-
-	it('rejects array as simulatorApis/hostServices (typeof [] === object)', () => {
+	it('rejects array as hostServices (typeof [] === object)', () => {
 		// review-driven: `typeof [] === 'object'`，如果元素都是 function 会
 		// 静默通过，但产生数字键的 API 名 "0", "1"。validator 必须显式拒。
-		expect(() =>
-			validateConfig({
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				simulatorApis: [() => null] as any,
-			}),
-		).toThrow(TypeError)
 		expect(() =>
 			validateConfig({
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 				hostServices: [() => null] as any,
 			}),
 		).toThrow(TypeError)
-	})
-
-	it('simulatorApis error message names the offending field', () => {
-		try {
-			validateConfig({
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				simulatorApis: { brokenField: 123 as any },
-			})
-			throw new Error('expected validateConfig to throw')
-		}
-		catch (err) {
-			expect(err).toBeInstanceOf(TypeError)
-			expect((err as Error).message).toContain('brokenField')
-		}
 	})
 
 	it('throws TypeError when a hostServices value is not a function', () => {
@@ -112,8 +77,7 @@ describe('validateConfig', () => {
 				hostServices: { weirdField: null as any },
 			})
 			throw new Error('expected validateConfig to throw')
-		}
-		catch (err) {
+		} catch (err) {
 			expect(err).toBeInstanceOf(TypeError)
 			expect((err as Error).message).toContain('weirdField')
 		}
@@ -176,123 +140,15 @@ describe('validateConfig', () => {
 		).toThrow(Error)
 	})
 
-	it('throws TypeError when toolbar.source has neither url nor file', () => {
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					// eslint-disable-next-line @typescript-eslint/no-explicit-any
-					source: {} as any,
-					preloadPath: '/abs/preload.js',
-					height: 40,
-				},
-			}),
-		).toThrow(TypeError)
-	})
-
-	it('throws TypeError when toolbar.source has BOTH url and file', () => {
-		// review-driven: source 必须互斥，避免运行时加载优先级成为隐式行为
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					// eslint-disable-next-line @typescript-eslint/no-explicit-any
-					source: { url: 'http://x', file: '/abs/x.html' } as any,
-					preloadPath: '/abs/preload.js',
-					height: 40,
-				},
-			}),
-		).toThrow(TypeError)
-	})
-
-	it('accepts toolbar.source with `file`', () => {
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { file: '/abs/toolbar.html' },
-					preloadPath: '/abs/preload.js',
-					height: 40,
-				},
-			}),
-		).not.toThrow()
-	})
-
-	it('throws TypeError when toolbar.preloadPath is not a string', () => {
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					// eslint-disable-next-line @typescript-eslint/no-explicit-any
-					preloadPath: 123 as any,
-					height: 40,
-				},
-			}),
-		).toThrow(TypeError)
-	})
-
-	it('throws TypeError when toolbar.preloadPath is an empty string', () => {
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					preloadPath: '',
-					height: 40,
-				},
-			}),
-		).toThrow(TypeError)
-	})
-
-	it('throws TypeError when toolbar.height is zero or negative', () => {
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					preloadPath: '/abs/preload.js',
-					height: 0,
-				},
-			}),
-		).toThrow(TypeError)
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					preloadPath: '/abs/preload.js',
-					height: -5,
-				},
-			}),
-		).toThrow(TypeError)
-	})
-
-	it('throws TypeError when toolbar.height is non-finite (NaN / Infinity)', () => {
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					preloadPath: '/abs/preload.js',
-					height: Number.NaN,
-				},
-			}),
-		).toThrow(TypeError)
-		expect(() =>
-			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					preloadPath: '/abs/preload.js',
-					height: Number.POSITIVE_INFINITY,
-				},
-			}),
-		).toThrow(TypeError)
-	})
-
 	it('does not depend on Electron (pure)', () => {
 		// Importing this test file proves the module graph does not pull
 		// Electron at runtime; calling validateConfig synchronously with a
 		// valid input must not throw a missing-Electron error.
+		const ev = defineEvent<JsonValue>('pure-event')
 		expect(() =>
 			validateConfig({
-				toolbar: {
-					source: { url: 'http://x' },
-					preloadPath: '/abs/preload.js',
-					height: 40,
-				},
+				hostServices: { bar: () => null },
+				events: [ev],
 			}),
 		).not.toThrow()
 	})
@@ -317,8 +173,7 @@ describe('assertEventDeclared', () => {
 		try {
 			assertEventDeclared(set, 'missing-event')
 			throw new Error('assertEventDeclared should have thrown')
-		}
-		catch (err) {
+		} catch (err) {
 			expect(err).toBeInstanceOf(UndeclaredHostEventError)
 			expect((err as UndeclaredHostEventError).eventName).toBe('missing-event')
 		}
@@ -338,15 +193,6 @@ describe('electronDeck(config)', () => {
 		}).rejects.toThrow(TypeError)
 	})
 
-	it('rejects on simulatorApis value not a function', async () => {
-		await expect(async () => {
-			await electronDeck({
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				simulatorApis: { broken: 'oops' as any },
-			})
-		}).rejects.toThrow(TypeError)
-	})
-
 	// ── Phase 2 contract ────────────────────────────────────────────────
 	//
 	// (Phase 1 "valid config rejects with not implemented" expectation was
@@ -360,19 +206,21 @@ describe('electronDeck(config)', () => {
 		await expect(electronDeck({}, options)).resolves.toBeUndefined()
 	})
 
-	it('invokes config.setup(runtime) once', async () => {
-		const setup = vi.fn()
-		await electronDeck({ setup }, makeInjectedOptions())
-		expect(setup).toHaveBeenCalledTimes(1)
+	it('invokes backend.assemble(runtime) once', async () => {
+		const assemble = vi.fn()
+		await electronDeck({ backend: { assemble } }, makeInjectedOptions())
+		expect(assemble).toHaveBeenCalledTimes(1)
 	})
 
-	it('setup throwing causes electronDeck() to reject with the same error', async () => {
+	it('backend.assemble throwing causes electronDeck() to reject with the same error', async () => {
 		const err = new Error('user-setup-boom')
 		await expect(
 			electronDeck(
 				{
-					setup: () => {
-						throw err
+					backend: {
+						assemble: () => {
+							throw err
+						},
 					},
 				},
 				makeInjectedOptions(),
@@ -441,11 +289,21 @@ function createFakeElectron(): MinimalElectron & {
 			this.contentView = { addChildView: () => undefined, removeChildView: () => undefined }
 		}
 
-		getContentBounds(): MinimalRect { return { x: 0, y: 0, width: 1024, height: 768 } }
-		show(): void { /* noop */ }
-		destroy(): void { this.destroyed = true }
-		isDestroyed(): boolean { return this.destroyed }
-		on(): this { return this }
+		getContentBounds(): MinimalRect {
+			return { x: 0, y: 0, width: 1024, height: 768 }
+		}
+		show(): void {
+			/* noop */
+		}
+		destroy(): void {
+			this.destroyed = true
+		}
+		isDestroyed(): boolean {
+			return this.destroyed
+		}
+		on(): this {
+			return this
+		}
 	}
 
 	class FakeWCV implements MinimalWebContentsView {
@@ -455,7 +313,9 @@ function createFakeElectron(): MinimalElectron & {
 			this.webContents = makeWC()
 		}
 
-		setBounds(): void { /* noop */ }
+		setBounds(): void {
+			/* noop */
+		}
 	}
 
 	const electron: MinimalElectron & {
@@ -464,8 +324,12 @@ function createFakeElectron(): MinimalElectron & {
 	} = {
 		BrowserWindow: FakeBW as unknown as MinimalElectron['BrowserWindow'],
 		WebContentsView: FakeWCV as unknown as MinimalElectron['WebContentsView'],
-		get browserWindowCtorCount() { return browserWindowCtorCount },
-		get webContentsViewCtorCount() { return webContentsViewCtorCount },
+		get browserWindowCtorCount() {
+			return browserWindowCtorCount
+		},
+		get webContentsViewCtorCount() {
+			return webContentsViewCtorCount
+		},
 	}
 	return electron
 }
@@ -482,15 +346,18 @@ describe('electronDeck(config, options) — DI', () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app: DeckConfig = {
-			toolbar: {
-				source: { url: 'http://localhost:9999/toolbar.html' },
-				preloadPath: '/abs/preload.js',
-				height: 40,
+			backend: {
+				// A native view built in assemble() exercises the same
+				// BrowserWindow + WebContentsView construction path the removed
+				// config-driven toolbar used to cover.
+				assemble: (runtime) => {
+					runtime.view({ source: { url: 'http://localhost:9999/toolbar.html' } })
+				},
 			},
 		}
 		await expect(electronDeck(app, { electron, ipcMain })).resolves.toBeUndefined()
 		// The fake BrowserWindow ctor must have been called for the main window
-		// (and the toolbar WebContentsView for the toolbar contribution).
+		// (and the WebContentsView for the view created in assemble()).
 		expect(electron.browserWindowCtorCount).toBeGreaterThanOrEqual(1)
 		expect(electron.webContentsViewCtorCount).toBeGreaterThanOrEqual(1)
 		// And ipcMain.handle was called by the wire transport (invoke + probe).
@@ -523,17 +390,27 @@ describe('electronDeck(config, options) — DI', () => {
 		})
 
 		it('rejects on the missing main-process surface when electron resolves to the path stub', async () => {
-			vi.doMock('electron', () => ({ default: '/stub/electron-binary', ipcMain: undefined, BrowserWindow: undefined, WebContentsView: undefined }))
+			vi.doMock('electron', () => ({
+				default: '/stub/electron-binary',
+				ipcMain: undefined,
+				BrowserWindow: undefined,
+				WebContentsView: undefined,
+			}))
 			const deck = await freshElectronDeck()
 			await expect(deck({})).rejects.toThrow(/does not expose the main-process surface/)
 		})
 
 		it('with electron injected but ipcMain missing: still rejects on the missing surface', async () => {
-			vi.doMock('electron', () => ({ default: '/stub/electron-binary', ipcMain: undefined, BrowserWindow: undefined, WebContentsView: undefined }))
+			vi.doMock('electron', () => ({
+				default: '/stub/electron-binary',
+				ipcMain: undefined,
+				BrowserWindow: undefined,
+				WebContentsView: undefined,
+			}))
 			const deck = await freshElectronDeck()
-			await expect(
-				deck({}, { electron: createFakeElectron() }),
-			).rejects.toThrow(/electron|ipcMain/i)
+			await expect(deck({}, { electron: createFakeElectron() })).rejects.toThrow(
+				/electron|ipcMain/i,
+			)
 		})
 	})
 })

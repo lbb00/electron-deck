@@ -11,7 +11,7 @@
  * `import type` / `export type` clauses are exempt — they erase at compile
  * time and never reach the browser bundle (see src/layout/placement-reconcile.ts,
  * which legally `import type`s from `view-anchor`).
- * Pure Node fs, no deps. Mirrors the check-trust-seal.mjs guard pattern.
+ * Pure Node fs, no deps. Mirrors the check-trust-seal.js guard pattern.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'

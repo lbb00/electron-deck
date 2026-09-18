@@ -167,7 +167,7 @@ describe('sanitizeFlexibleWeights — heals non-positive flexible weights', () =
     const nested = split(
       'inner',
       'column',
-      [tabs('g-editor', ['editor']), tabs('g-debug', ['debug'])],
+      [tabs('g-doc', ['doc']), tabs('g-notes', ['notes'])],
       [70, 0],
     )
     const t = tree(

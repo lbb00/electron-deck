@@ -1,6 +1,6 @@
 # ViewHandle 契约
 
-ViewHandle 把四个底层原语（Scope / Layout·Placement / Compositor / ControlBus）装配成「一块 view」的 per-view 编排单元。配套阅读：`architecture.md`（原语与 host-facing API）、`compositor-and-teardown.md`（compositor 与 teardown 契约）、`capability-and-lifecycle.md`（capability 与 lifecycle 契约）。
+ViewHandle 把三个底层原语（Scope / Layout·Placement / Compositor）装配成「一块 view」的 per-view 编排单元；不持有 ControlBus——grant 闸是独立工具，想用它的 host 在自己的 `backend.assemble` 里另行装配。配套阅读：`architecture.md`（原语与 host-facing API）、`compositor-and-teardown.md`（compositor 与 teardown 契约）、`capability-and-lifecycle.md`（capability 与 lifecycle 契约）。
 
 ## ViewHandle 类型与硬边界
 
@@ -58,7 +58,7 @@ handle + 工厂 + `placeIn` 接 Compositor（mount→commit）+ Scope（viewScop
 
 状态机 + migrationLock + `Scope.adopt`：per-view 异步互斥锁（`Map<viewId,Promise>` 链）；状态机 `AT_SRC→DETACHED→AT_DEST|ROLLBACK→AT_SRC|CLOSED` 消费 `CommitError`，回滚动作恒为「src 重挂」（与 dest 失败种类解耦）；`rehome:true` 以 viewScope 当前实际的 lifetime owner 为 donor，调用 `adopt(viewScope, destWindowScope)` 移寿命（默认仅移显示）。每个临界区只持一把 per-view 锁、不取第二把，故无死锁。
 
-**迁的是显示，不是授权。** grant 按 control-wc 的 `senderId` 键（`Grant.senderId`，`src/host/capability.ts:22-34`），存在 capability registry 自己的表里，与 scope 的所有权图无关；`Scope.adopt` 只移 viewScope 的资源所有权，不碰 grant。dest 窗有自己的 control shell、发自己的 grant（popout 建新窗自带 control），所以 `moveTo` 不需要搬 grant，src 窗关闭时 `capability.revokeBySenderId(srcControlWc.id)`（`src/internal/deck-app.ts:622`）撤掉 src 的 grant 是正确且互不影响的。若 `adopt` 失败，`moveTo` 会撤销 dest 挂载并把 native view 恢复到 src；只有 src 恢复也失败时才进入 `CLOSED`。
+**迁的是显示，不是授权。** grant 按 control-wc 的 `senderId` 键（`Grant.senderId`，`src/host/capability.ts:22-34`），存在 capability registry 自己的表里，与 scope 的所有权图无关；`Scope.adopt` 只移 viewScope 的资源所有权，不碰 grant。`electron-deck/host` 的 capability registry 是独立工具，框架本身不再自动接线或在窗口关闭时撤销 grant——需要这层的宿主自己在 `backend.assemble` 里接、自己在 src 窗关闭时调 `capability.revokeBySenderId(srcControlWc.id)`。dest 窗有自己的 control shell、发自己的 grant（popout 建新窗自带 control），所以 `moveTo` 不需要搬 grant。若 `adopt` 失败，`moveTo` 会撤销 dest 挂载并把 native view 恢复到 src；只有 src 恢复也失败时才进入 `CLOSED`。
 
 ### slot-token 握手
 
@@ -74,6 +74,6 @@ handle + 工厂 + `placeIn` 接 Compositor（mount→commit）+ Scope（viewScop
 - `src/types.ts` —— 高层 `DeckViewHandle` 类型（`runtime.view(...)` 返回）。
 - `src/main/compositor.ts` —— `detachAll` + `CommitError`。
 - `src/main/scope.ts` —— viewScope lease、`adopt`、完成栅栏。
-- `view-anchor/src/view-anchor.ts` —— `createPlacementAnchor` 几何源。
-- `src/host/control-bus.ts` + `src/host/capability.ts` —— grant 闸（在 deck-app 实例化并接线）。
+- `view-anchor/src/view-anchor.ts` —— `createViewAnchor` 几何源。
+- `src/host/control-bus.ts` + `src/host/capability.ts` —— grant 闸，`electron-deck/host` 下的独立工具；deck-app 不自动接线，想用它的 host 在自己的 `backend.assemble` 里装配。
 - `src/internal/deck-app.ts` —— runtime 工厂、per-window scope/compositor、wire 分叉、同步撤销。

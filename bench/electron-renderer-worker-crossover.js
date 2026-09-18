@@ -7,7 +7,7 @@
  *
  * Run manually (after `pnpm install`):
  *   DECK_RENDERER_WORKER_OUTPUT=/tmp/renderer-worker.json \
- *     electron bench/electron-renderer-worker-crossover.mjs
+ *     electron bench/electron-renderer-worker-crossover.js
  *
  * The calculation is synthetic. It establishes the serialization/scheduling
  * crossover on this Chromium build; it is not evidence that electron-deck's

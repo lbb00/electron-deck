@@ -1,7 +1,7 @@
 /**
  * Contract tests for `runtime.windows.adopt` with explicit ownership — the
  * deck-app side of adopting an EXTERNALLY-created BrowserWindow into the
- * framework so `runtime.view().placeIn(adoptedWin)` works and trust / grants are
+ * framework so `runtime.view().placeIn(adoptedWin)` works and trust is
  * revoked synchronously (revoke-FIRST) on the window's 'closed'.
  *
  *   - With `ownsWindows:true` the framework builds NO main window and no per-window
@@ -10,7 +10,7 @@
  *     no way to register an externally-created BrowserWindow.
  *   - `runtime.windows.adopt(win, { ownership })` registers an external window's
  *     windowScope + per-window substrate + TRUST lifecycle, so
- *     `runtime.view().placeIn(adoptedWin)` works; trust + slot-tokens + grants are
+ *     `runtime.view().placeIn(adoptedWin)` works; trust + slot-tokens are
  *     revoked SYNCHRONOUSLY and FIRST on the window's 'closed'.
  *   - CRITICAL ordering: revocation MUST run FIRST on 'closed'. The framework
  *     registers its revoke listener via `prependListener` so it runs before any
@@ -158,7 +158,9 @@ function createFakeElectron(
 				removeChildView: vi.fn(),
 			}
 			this.contentView = cv as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
@@ -166,16 +168,18 @@ function createFakeElectron(
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
 			this._lastCloseEvent = null
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				// `on` appends to the BACK of the listener list (EventEmitter order).
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					// `on` appends to the BACK of the listener list (EventEmitter order).
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			// `prependListener` mirrors `on` but unshifts to the FRONT, so
 			// a listener added via prependListener runs BEFORE any earlier `on`
 			// listener for the same event. The framework's adopt revoke listener uses
@@ -265,25 +269,27 @@ function makeOwnsWindowsBackend(): RuntimeBackend {
 // Reach `runtime.windows.adopt` through a loose view so any regression that
 // drops it fails at RUNTIME (`adopt is not a function`) — the runtime failure
 // we want — rather than a compile error that would stop the suite running.
-interface ViewSource { url?: string, file?: string }
+interface ViewSource {
+	url?: string
+	file?: string
+}
 interface HostViewHandle {
-	placeIn(win: unknown, opts: { zone?: number, anchor?: string }): HostViewHandle
+	placeIn(win: unknown, opts: { zone?: number; anchor?: string }): HostViewHandle
 	applyPlacement(p: unknown): HostViewHandle
 	dispose(): Promise<void>
 }
 type Ownership = 'transfer' | 'observe'
-interface AdoptRegistration { dispose(): void | Promise<void> }
+interface AdoptRegistration {
+	dispose(): void | Promise<void>
+}
 interface RuntimeWithAdopt {
-	view(spec: { source: ViewSource, scope?: unknown }): HostViewHandle
+	view(spec: { source: ViewSource; scope?: unknown }): HostViewHandle
 	windows: {
 		create(opts: unknown): unknown
 		adopt(win: unknown, opts?: { ownership?: Ownership }): AdoptRegistration
 		trust(win: unknown): { dispose(): void }
 	}
 	scopes: { create(): { dispose(): Promise<void> } }
-	grants: {
-		issue(controlWc: unknown, opts: { commands: readonly string[] }): { dispose(): void }
-	}
 }
 function withAdopt(runtime: Runtime): RuntimeWithAdopt {
 	return runtime as unknown as RuntimeWithAdopt
@@ -291,7 +297,7 @@ function withAdopt(runtime: Runtime): RuntimeWithAdopt {
 
 // app.__wcRecords() / context._senderPolicy escape hatches for trust assertions.
 interface TrustView {
-	__wcRecords(): Map<MinimalWebContents, { wcScope: unknown, leases: Set<unknown> }>
+	__wcRecords(): Map<MinimalWebContents, { wcScope: unknown; leases: Set<unknown> }>
 }
 function trustOf(app: DeckApp): TrustView {
 	return app as unknown as TrustView
@@ -338,9 +344,7 @@ describe('runtime.windows.adopt — registers a placeable substrate', () => {
 
 		// BEFORE adopt: the external window is not framework-tracked → placeIn rejects.
 		const handle0 = withAdopt(app.runtime).view({ source: { url: 'data:text/html,x' } })
-		expect(() =>
-			handle0.placeIn(extWin as unknown, { zone: 0 }),
-		).toThrow(/not framework-tracked/i)
+		expect(() => handle0.placeIn(extWin as unknown, { zone: 0 })).toThrow(/not framework-tracked/i)
 
 		// Adopt the external window.
 		withAdopt(app.runtime).windows.adopt(extWin as unknown)
@@ -372,14 +376,12 @@ describe('runtime.windows.adopt — admits trust', () => {
 
 		// Trusted after adopt — the wire gate now accepts an invoke from this wc.
 		expect(isTrusted(app, extWcId)).toBe(true)
-		// And a wcRecord exists (trust admitted under a real windowScope), so the
-		// adopted wc can be granted privileged commands (proves a usable wcScope).
-		const rec = trustOf(app).__wcRecords().get(extWin.webContents as unknown as MinimalWebContents)
+		// And a wcRecord exists — trust was admitted under a real windowScope
+		// (proves a usable wcScope, not just a boolean flag flip).
+		const rec = trustOf(app)
+			.__wcRecords()
+			.get(extWin.webContents as unknown as MinimalWebContents)
 		expect(rec).toBeDefined()
-		const grant = withAdopt(app.runtime).grants.issue(extWin.webContents as unknown, {
-			commands: ['layout.resize'],
-		})
-		expect(typeof grant.dispose).toBe('function')
 
 		await app.shutdown()
 	})
@@ -429,8 +431,9 @@ describe('runtime.windows.adopt — closed revokes trust FIRST (prependListener)
 		// slot-grant to the adopted wc.
 		const handle = withAdopt(app.runtime).view({ source: { url: 'data:text/html,x' } })
 		handle.placeIn(extWin as unknown, { zone: 0, anchor: '#a' })
-		const grantCalls = (extWin.webContents.send as ReturnType<typeof vi.fn>).mock.calls
-			.filter(c => c[0] === '__electron-deck:slot-grant')
+		const grantCalls = (extWin.webContents.send as ReturnType<typeof vi.fn>).mock.calls.filter(
+			(c) => c[0] === '__electron-deck:slot-grant',
+		)
 		expect(grantCalls.length).toBe(1)
 
 		// Closing the adopted window revokes its slot-tokens too (window-close hygiene
@@ -514,7 +517,9 @@ describe('runtime.windows.adopt — ownership transfer vs observe', () => {
 		await app.shutdown()
 
 		// transfer → the framework owns the window's lifetime → destroyed at shutdown.
-		expect((extWin.destroy as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(destroyBefore)
+		expect((extWin.destroy as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+			destroyBefore,
+		)
 		// Substrate + trust are gone regardless of ownership.
 		expect(trustOf(app).__wcRecords().has(wcKey)).toBe(false)
 		expect(isTrusted(app, wcId)).toBe(false)

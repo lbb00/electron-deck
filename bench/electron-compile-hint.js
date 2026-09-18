@@ -10,9 +10,9 @@
  * //# allFunctionsCalledOnLoad.  The repository's demo source and bundle are
  * never written.
  *
- * Usage (after pnpm build && node examples/dockable-demo/bundle.mjs):
- *   node bench/electron-compile-hint.mjs
- *   DECK_COMPILE_HINT_OUTPUT=/tmp/compile-hint node bench/electron-compile-hint.mjs
+ * Usage (after pnpm build && node examples/dockable-demo/bundle.js):
+ *   node bench/electron-compile-hint.js
+ *   DECK_COMPILE_HINT_OUTPUT=/tmp/compile-hint node bench/electron-compile-hint.js
  *
  * The first two workers are a recognition gate.  They use V8 function-event
  * logging and require at least one control-only lazy parse among functions in
@@ -104,7 +104,7 @@ function stagedPreload() {
 }
 
 export async function stageBundles(outputRoot) {
-	ensure(existsSync(SOURCE_BUNDLE), `missing production demo bundle: ${SOURCE_BUNDLE}; run node examples/dockable-demo/bundle.mjs first`)
+	ensure(existsSync(SOURCE_BUNDLE), `missing production demo bundle: ${SOURCE_BUNDLE}; run node examples/dockable-demo/bundle.js first`)
 	const original = await readFile(SOURCE_BUNDLE)
 	const body = original.toString('utf8')
 	const stageRoot = join(outputRoot, 'stage')
@@ -165,7 +165,7 @@ export async function runWorker({ outputRoot, staged, variant, cacheMode, phase,
 	const workerLog = join(workerDir, 'electron.log')
 	await mkdir(workerDir, { recursive: true })
 	if (cacheMode === 'cold') await rm(profileDir, { recursive: true, force: true })
-	const args = [join(REPO, 'bench', 'electron-compile-hint.mjs'), `--user-data-dir=${profileDir}`, '--no-first-run']
+	const args = [join(REPO, 'bench', 'electron-compile-hint.js'), `--user-data-dir=${profileDir}`, '--no-first-run']
 	const child = spawnProcess(ELECTRON, args, {
 		cwd: workerDir,
 		env: { ...process.env, DECK_COMPILE_HINT_WORKER: '1', DECK_COMPILE_HINT_VARIANT: variant, DECK_COMPILE_HINT_STAGE_URL: staged.variants[variant].url, DECK_COMPILE_HINT_PRELOAD: join(staged.variants[variant].dir, 'preload.mjs'), DECK_COMPILE_HINT_RESULT: resultPath, DECK_COMPILE_HINT_V8_LOG: join(workerDir, 'v8.log'), DECK_COMPILE_HINT_TIMEOUT_MS: String(envNumber('DECK_COMPILE_HINT_TIMEOUT_MS', DEFAULT_TIMEOUT_MS, { min: 5_000, max: 180_000 })), DECK_COMPILE_HINT_CACHE_MODE: cacheMode, DECK_COMPILE_HINT_PHASE: phase },

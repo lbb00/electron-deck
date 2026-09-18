@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createApplyRecorder, messageFrom, waitForExit } from './electron-main-worker-crossover.utility.mjs'
+import { createApplyRecorder, messageFrom, waitForExit } from './electron-main-worker-crossover.utility.js'
 import { EventEmitter } from 'node:events'
 
 test('utility parent-port message unwraps Electron event.data', () => {

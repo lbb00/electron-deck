@@ -11,7 +11,7 @@ import {
 	recognitionFromEvents,
 	runWorker,
 	stageBundles,
-} from './electron-compile-hint.mjs'
+} from './electron-compile-hint.js'
 
 test('stageBundles sends byte-identical bodies whose only difference is the first line', async () => {
 	const root = await mkdtemp(join(tmpdir(), 'electron-compile-hint-stage-'))

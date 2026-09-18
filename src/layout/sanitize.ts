@@ -2,7 +2,7 @@
  * Self-healing for persisted layout trees — pure TS (no react/electron).
  *
  * A FLEXIBLE child (`constraints[i]` null / no constraints) has no enforced
- * lower weight bound in the serialized tree: `validateTree` only rejects
+ * lower weight bound in the serialized tree: `collectTreeProblems` only rejects
  * NON-FINITE sizes, not non-positive ones. A user who dragged a flexible panel
  * to ~0 width writes a ~0 (or 0, or negative) weight into the tree; on the next
  * restore that panel comes back at 0 width, invisible and effectively stuck.

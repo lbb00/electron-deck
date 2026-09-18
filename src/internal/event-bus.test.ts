@@ -154,4 +154,71 @@ describe('EventBus', () => {
 		bus.publish('A', { start: true })
 		expect(calls).toEqual(['A', 'B'])
 	})
+
+	// Subscriber snapshots are cached across publish() calls and invalidated on
+	// subscribe/dispose — these pin the observable contract that must survive
+	// regardless of that caching.
+	it('a listener that disposes itself during publish is still called this time, not next', () => {
+		const bus = new EventBus()
+		const calls: number[] = []
+		const sub = bus.subscribe('chan', () => {
+			calls.push(1)
+			sub.dispose()
+		})
+		bus.publish('chan', { n: 1 })
+		expect(calls).toHaveLength(1)
+		bus.publish('chan', { n: 2 })
+		expect(calls).toHaveLength(1)
+	})
+
+	it('a listener that subscribes a new listener during publish: new one skips this publish, fires next', () => {
+		const bus = new EventBus()
+		const newListener = vi.fn()
+		bus.subscribe('chan', () => {
+			bus.subscribe('chan', newListener)
+		})
+		bus.publish('chan', { n: 1 })
+		expect(newListener).not.toHaveBeenCalled()
+		bus.publish('chan', { n: 2 })
+		expect(newListener).toHaveBeenCalledTimes(1)
+	})
+
+	it('subscribeAll: a listener that disposes itself during publish is still called this time, not next', () => {
+		const bus = new EventBus()
+		const calls: number[] = []
+		const sub = bus.subscribeAll(() => {
+			calls.push(1)
+			sub.dispose()
+		})
+		bus.publish('chan', { n: 1 })
+		expect(calls).toHaveLength(1)
+		bus.publish('chan', { n: 2 })
+		expect(calls).toHaveLength(1)
+	})
+
+	it('subscribeAll: a listener that subscribes a new all-listener during publish skips this publish, fires next', () => {
+		const bus = new EventBus()
+		const newListener = vi.fn()
+		bus.subscribeAll(() => {
+			bus.subscribeAll(newListener)
+		})
+		bus.publish('chan', { n: 1 })
+		expect(newListener).not.toHaveBeenCalled()
+		bus.publish('chan', { n: 2 })
+		expect(newListener).toHaveBeenCalledTimes(1)
+	})
+
+	it('call-count sequence across subscribe → publish → dispose → publish → subscribe → publish', () => {
+		const bus = new EventBus()
+		const listener = vi.fn()
+		const sub = bus.subscribe('chan', listener)
+		bus.publish('chan', { n: 1 })
+		expect(listener).toHaveBeenCalledTimes(1)
+		sub.dispose()
+		bus.publish('chan', { n: 2 })
+		expect(listener).toHaveBeenCalledTimes(1)
+		bus.subscribe('chan', listener)
+		bus.publish('chan', { n: 3 })
+		expect(listener).toHaveBeenCalledTimes(2)
+	})
 })

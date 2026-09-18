@@ -8,7 +8,7 @@
 // worst case degrades from a stuck view to a one-tick flicker.
 //
 // Domain-neutral: view ids are opaque strings and per-view host specifics ride
-// on the `Extra` type parameter (e.g. a simulator's zoom), so the same core
+// on the `Extra` type parameter (e.g. a preview pane's zoom), so the same core
 // serves any electron-deck host. Side-effect free — it only computes ops; a
 // thin host executor applies them.
 
@@ -21,7 +21,7 @@ export interface DesiredView<Extra = unknown> {
   placement: Placement
   // z-order; larger paints on top.
   layer: number
-  // Host-specific extras carried through to setBounds (e.g. simulator zoom).
+  // Host-specific extras carried through to setBounds (e.g. preview zoom).
   extra?: Extra
 }
 
@@ -86,10 +86,62 @@ function sameBounds(a: Bounds | undefined, b: Bounds | undefined): boolean {
   return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 }
 
+// Structural equality for plain values and common structured-clone built-ins.
+// Key insertion order does not affect plain objects; Map and Set iteration
+// order remains observable. Unknown object types compare unequal.
+function sameJsonValue(
+  a: unknown,
+  b: unknown,
+  seen = new WeakMap<object, object>(),
+): boolean {
+  if (Object.is(a, b)) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false
+  if (a instanceof Date) return b instanceof Date && a.getTime() === b.getTime()
+  if (a instanceof RegExp) return b instanceof RegExp && String(a) === String(b)
+  const aObject = a as object
+  const paired = seen.get(aObject)
+  if (paired !== undefined) return paired === b
+  seen.set(aObject, b)
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) {
+      if (!sameJsonValue(a[i], b[i], seen)) return false
+    }
+    return true
+  }
+  if (Array.isArray(b)) return false
+  if (a instanceof Map || a instanceof Set) {
+    if (!(b instanceof Map || b instanceof Set) || a.constructor !== b.constructor || a.size !== b.size) return false
+    return sameJsonValue([...a.entries()], [...b.entries()], seen)
+  }
+  if (ArrayBuffer.isView(a)) {
+    if (!ArrayBuffer.isView(b)) return false
+    if (a.constructor !== b.constructor || a.byteLength !== b.byteLength) return false
+    const aBytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength)
+    const bBytes = new Uint8Array(b.buffer, b.byteOffset, b.byteLength)
+    for (let i = 0; i < aBytes.length; i++) {
+      if (aBytes[i] !== bBytes[i]) return false
+    }
+    return true
+  }
+  const aPrototype = Object.getPrototypeOf(a)
+  if (aPrototype !== Object.prototype && aPrototype !== null) return false
+  if (aPrototype !== Object.getPrototypeOf(b)) return false
+  const aObj = a as Record<string, unknown>
+  const bObj = b as Record<string, unknown>
+  const aKeys = Object.keys(aObj)
+  const bKeys = Object.keys(bObj)
+  if (aKeys.length !== bKeys.length) return false
+  for (const k of aKeys) {
+    if (!Object.hasOwn(bObj, k) || !sameJsonValue(aObj[k], bObj[k], seen)) return false
+  }
+  return true
+}
+
 function sameExtra<Extra>(a: Extra | undefined, b: Extra | undefined): boolean {
   if (a === b) return true
   if (a === undefined || b === undefined) return false
-  return JSON.stringify(a) === JSON.stringify(b)
+  return sameJsonValue(a, b)
 }
 
 function visibleBounds<Extra>(dv: DesiredView<Extra>): Bounds {

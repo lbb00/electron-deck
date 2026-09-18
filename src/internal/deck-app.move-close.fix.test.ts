@@ -41,7 +41,7 @@
  * deck-app.move.test.ts / start-electron-deck.test.ts.
  */
 import { describe, expect, it, vi } from 'vitest'
-import type { JsonValue, Runtime } from '../types.js'
+import type { JsonValue, Runtime, RuntimeBackend } from '../types.js'
 import type {
 	MinimalApp,
 	MinimalBrowserWindow,
@@ -59,9 +59,9 @@ const SLOT_GRANT_CHANNEL = '__electron-deck:slot-grant'
 
 // ── Minimal fakes (copied from deck-app.move.test.ts) ────────────────────────
 
-type FrameRef = { routingId: number, processId: number } | null
+type FrameRef = { routingId: number; processId: number } | null
 interface FrameEvent {
-	sender: { id: number, mainFrame?: FrameRef }
+	sender: { id: number; mainFrame?: FrameRef }
 	senderFrame?: FrameRef
 }
 type Handler = (event: FrameEvent, ...args: unknown[]) => unknown | Promise<unknown>
@@ -182,22 +182,26 @@ function createFakeElectron(
 					if (i >= 0) children.splice(i, 1)
 				}),
 			}
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
 				this.webContents.destroyed = true
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -284,20 +288,27 @@ function createFakeApp(): FakeApp {
 }
 
 // ── Typed escape hatch for the not-yet-typed `moveTo` shape on the host handle ─
-interface ViewSource { url?: string, file?: string }
+interface ViewSource {
+	url?: string
+	file?: string
+}
 interface HostViewHandle {
-	placeIn(win: unknown, opts: { zone?: number, anchor?: string }): HostViewHandle
-	moveTo(win: unknown, opts: { zone?: number, anchor?: string, rehome?: boolean }): Promise<void>
+	placeIn(win: unknown, opts: { zone?: number; anchor?: string }): HostViewHandle
+	moveTo(win: unknown, opts: { zone?: number; anchor?: string; rehome?: boolean }): Promise<void>
 	dispose(): Promise<void>
 }
 interface RuntimeWithView {
-	view(spec: { source: ViewSource, scope?: unknown }): HostViewHandle
+	view(spec: { source: ViewSource; scope?: unknown }): HostViewHandle
 }
 function withView(runtime: Runtime): RuntimeWithView {
 	return runtime as unknown as RuntimeWithView
 }
 
-interface SlotGrant { viewId: string, slotId: string, slotToken: string }
+interface SlotGrant {
+	viewId: string
+	slotId: string
+	slotToken: string
+}
 
 function lastWcv(electron: FakeElectron): FakeWebContentsView {
 	const wcv = electron.webContentsViews[electron.webContentsViews.length - 1]
@@ -364,14 +375,22 @@ describe('moveTo — rehome after a display-only move (correct adopt donor)', ()
 
 		// 1) DISPLAY-ONLY move to winB (rehome:false). Display moves to winB; the
 		//    view's LIFETIME stays parented under winA's windowScope.
-		await handle.moveTo(winB as unknown as Runtime['mainWindow'], { zone: 0, anchor: '#b', rehome: false })
+		await handle.moveTo(winB as unknown as Runtime['mainWindow'], {
+			zone: 0,
+			anchor: '#b',
+			rehome: false,
+		})
 		expect(winB.contentView.addChildView).toHaveBeenCalledWith(wcv)
 
 		// 2) REHOME move to winC. The fix must re-parent from the viewScope's ACTUAL
 		//    parent (winA), not the current display window (winB). With the bug, the
 		//    adopt donor is winB → "child is not a direct child" → rollback → reject.
 		await expect(
-			handle.moveTo(winC as unknown as Runtime['mainWindow'], { zone: 0, anchor: '#c', rehome: true }),
+			handle.moveTo(winC as unknown as Runtime['mainWindow'], {
+				zone: 0,
+				anchor: '#c',
+				rehome: true,
+			}),
 		).resolves.toBeUndefined()
 
 		// Post-condition: the view actually landed in winC (the move was not rolled
@@ -402,11 +421,15 @@ describe('moveTo — same-window move keeps the substrate registration', () => {
 		// The current bug: registerView(dest=winA) then unregisterView(src=winA) on
 		// the SAME substrate → the registry entry is gone. So a later dispose can no
 		// longer resolve viewId → wcv and silently skips the native detach.
-		const removesBefore = winA.contentView.removeChildView.mock.calls.filter(c => c[0] === wcv).length
+		const removesBefore = winA.contentView.removeChildView.mock.calls.filter(
+			(c) => c[0] === wcv,
+		).length
 		await handle.dispose()
 
 		// The dispose MUST reach the native layer: winA detached the WCV.
-		const removesAfter = winA.contentView.removeChildView.mock.calls.filter(c => c[0] === wcv).length
+		const removesAfter = winA.contentView.removeChildView.mock.calls.filter(
+			(c) => c[0] === wcv,
+		).length
 		expect(removesAfter).toBeGreaterThan(removesBefore)
 		expect(winA.contentView.removeChildView).toHaveBeenCalledWith(wcv)
 
@@ -420,7 +443,7 @@ describe('moveTo — same-window move keeps the substrate registration', () => {
 //     until the first cleanup truly finishes.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('shutdown — concurrent shutdown merges (no truncation of in-flight cleanup)', () => {
-	it('F3) a second shutdown does NOT call app.quit() until the first cleanup\'s slow disposer completes', async () => {
+	it("F3) a second shutdown does NOT call app.quit() until the first cleanup's slow disposer completes", async () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 		try {
 			const app = createFakeApp()
@@ -435,17 +458,20 @@ describe('shutdown — concurrent shutdown merges (no truncation of in-flight cl
 			})
 			let disposerFinished = false
 			const deckApp = new DeckApp(
+				{},
 				{
-					setup: (rt) => {
-						rt.add(async () => {
-							await disposerGate
-							disposerFinished = true
-						})
-						// Trigger the FIRST teardown via cleanupOnError (a late start failure).
-						throw new Error('setup-boom (drives cleanupOnError)')
-					},
+					electron,
+					backend: {
+						assemble: async (rt: Runtime) => {
+							rt.add(async () => {
+								await disposerGate
+								disposerFinished = true
+							})
+							// Trigger the FIRST teardown via cleanupOnError (a late start failure).
+							throw new Error('setup-boom (drives cleanupOnError)')
+						},
+					} as unknown as RuntimeBackend,
 				},
-				{ electron },
 			)
 
 			// start() rejects after kicking off cleanupOnError, which parks on the
@@ -479,8 +505,7 @@ describe('shutdown — concurrent shutdown merges (no truncation of in-flight cl
 			expect(disposerFinished).toBe(true)
 			// The app quit AT MOST once, and only after cleanup completed.
 			expect(app.quit.mock.calls.length).toBeLessThanOrEqual(1)
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 		}
 	})
@@ -526,17 +551,17 @@ describe('moveTo — rollback tolerates a destroyed dest window', () => {
 			// "Object has been destroyed" error is produced/logged during the rollback.
 			// The current code reads `destWin.contentView` BEFORE the isDestroyed guard,
 			// so the getter throws, gets caught, and is logged as a cleanup failure.
-			const loggedDestroyedRead = errorSpy.mock.calls.some(call =>
-				call.some(arg =>
-					(typeof arg === 'string' && /Object has been destroyed/.test(arg))
-					|| (arg instanceof Error && /Object has been destroyed/.test(arg.message)),
+			const loggedDestroyedRead = errorSpy.mock.calls.some((call) =>
+				call.some(
+					(arg) =>
+						(typeof arg === 'string' && /Object has been destroyed/.test(arg)) ||
+						(arg instanceof Error && /Object has been destroyed/.test(arg.message)),
 				),
 			)
 			expect(loggedDestroyedRead).toBe(false)
 
 			await app.shutdown()
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 		}
 	})

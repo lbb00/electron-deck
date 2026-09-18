@@ -39,7 +39,7 @@ import { DockView } from './index.js'
 // ───────────────────────── fixtures ─────────────────────────
 // (mirrors dock-view.test.tsx)
 
-/** root split[row] -> [ tabs g-left(sim) | tabs g-right(editor, debug) ] */
+/** root split[row] -> [ tabs g-left(preview) | tabs g-right(doc, notes) ] */
 function makeTree(): LayoutTree {
 	return {
 		version: 1,
@@ -49,12 +49,12 @@ function makeTree(): LayoutTree {
 			orientation: 'row',
 			sizes: [1, 1],
 			children: [
-				{ kind: 'tabs', id: 'g-left', panels: ['sim'], active: 'sim' },
+				{ kind: 'tabs', id: 'g-left', panels: ['preview'], active: 'preview' },
 				{
 					kind: 'tabs',
 					id: 'g-right',
-					panels: ['editor', 'debug'],
-					active: 'editor',
+					panels: ['doc', 'notes'],
+					active: 'doc',
 				},
 			],
 		},
@@ -71,7 +71,7 @@ function makeNativeTree(): LayoutTree {
 			orientation: 'column',
 			sizes: [1],
 			children: [
-				{ kind: 'tabs', id: 'g', panels: ['nativeCam', 'logs'], active: 'nativeCam' },
+				{ kind: 'tabs', id: 'g', panels: ['nativeCam', 'output'], active: 'nativeCam' },
 			],
 		},
 	}
@@ -81,16 +81,16 @@ function makeNativeTree(): LayoutTree {
 function makeSoloTree(): LayoutTree {
 	return {
 		version: 1,
-		root: { kind: 'tabs', id: 'only', panels: ['sim'], active: 'sim' },
+		root: { kind: 'tabs', id: 'only', panels: ['preview'], active: 'preview' },
 	}
 }
 
 function makeRegistry(): PanelRegistry {
 	const reg = createPanelRegistry()
-	reg.register({ kind: 'dom', id: 'sim', title: 'Simulator' })
-	reg.register({ kind: 'dom', id: 'editor', title: 'Editor' })
-	reg.register({ kind: 'dom', id: 'debug', title: 'Debug' })
-	reg.register({ kind: 'dom', id: 'logs', title: 'Logs' })
+	reg.register({ kind: 'dom', id: 'preview', title: 'Preview' })
+	reg.register({ kind: 'dom', id: 'doc', title: 'Doc' })
+	reg.register({ kind: 'dom', id: 'notes', title: 'Notes' })
+	reg.register({ kind: 'dom', id: 'output', title: 'Output' })
 	reg.register({
 		kind: 'native',
 		id: 'nativeCam',
@@ -100,12 +100,12 @@ function makeRegistry(): PanelRegistry {
 	return reg
 }
 
-function makeRegistryWithLockedDebug(): PanelRegistry {
+function makeRegistryWithLockedNotes(): PanelRegistry {
 	const reg = makeRegistry()
 	reg.register({
 		kind: 'dom',
-		id: 'debug',
-		title: 'Debug',
+		id: 'notes',
+		title: 'Notes',
 		closable: false,
 	})
 	return reg
@@ -145,38 +145,38 @@ describe('<DockView> close affordance — rendering', () => {
 	// panel from the UI at all.
 	it('renders a close affordance with data-deck-tab-close per tab when >1 panel exists', () => {
 		const { container } = renderDock({ model: createLayoutModel(makeTree()), registry: makeRegistry() })
-		const editorClose = container.querySelector('[data-deck-tab-close="editor"]')
-		const debugClose = container.querySelector('[data-deck-tab-close="debug"]')
-		const simClose = container.querySelector('[data-deck-tab-close="sim"]')
-		expect(editorClose).not.toBeNull()
-		expect(debugClose).not.toBeNull()
-		expect(simClose).not.toBeNull()
+		const docClose = container.querySelector('[data-deck-tab-close="doc"]')
+		const notesClose = container.querySelector('[data-deck-tab-close="notes"]')
+		const previewClose = container.querySelector('[data-deck-tab-close="preview"]')
+		expect(docClose).not.toBeNull()
+		expect(notesClose).not.toBeNull()
+		expect(previewClose).not.toBeNull()
 		// It is a `role="button"` affordance — keyboard/AT operable — but NOT a real
 		// <button> element: an interactive <button> may not be a descendant of the
 		// tab <button> (invalid HTML + illegal a11y nesting), so it is a focusable
 		// role-button span instead.
-		expect(editorClose!.getAttribute('role')).toBe('button')
-		expect(editorClose!.tagName).not.toBe('BUTTON')
-		expect(editorClose!.getAttribute('tabindex')).toBe('0')
+		expect(docClose!.getAttribute('role')).toBe('button')
+		expect(docClose!.tagName).not.toBe('BUTTON')
+		expect(docClose!.getAttribute('tabindex')).toBe('0')
 	})
 
 	// BUG: the close button is nested INSIDE the tab so the host can scope it to
 	// the tab; a close button orphaned from its tab would target the wrong panel.
 	it('nests each close button inside its own tab button', () => {
 		const { container } = renderDock({ model: createLayoutModel(makeTree()), registry: makeRegistry() })
-		const editorTab = container.querySelector('[data-deck-tab="editor"]')!
-		expect(editorTab.querySelector('[data-deck-tab-close="editor"]')).not.toBeNull()
+		const docTab = container.querySelector('[data-deck-tab="doc"]')!
+		expect(docTab.querySelector('[data-deck-tab-close="doc"]')).not.toBeNull()
 	})
 
 	it('does not render a close affordance when the descriptor sets closable:false', () => {
 		const { container } = renderDock({
 			model: createLayoutModel(makeTree()),
-			registry: makeRegistryWithLockedDebug(),
+			registry: makeRegistryWithLockedNotes(),
 		})
 
-		expect(container.querySelector('[data-deck-tab="debug"]')).not.toBeNull()
-		expect(container.querySelector('[data-deck-tab-close="debug"]')).toBeNull()
-		expect(container.querySelector('[data-deck-tab-close="editor"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-tab="notes"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-tab-close="notes"]')).toBeNull()
+		expect(container.querySelector('[data-deck-tab-close="doc"]')).not.toBeNull()
 	})
 })
 
@@ -186,9 +186,9 @@ describe('<DockView> close affordance — last-panel boundary', () => {
 	it('does NOT render a close button for the only panel in the whole tree', () => {
 		const { container } = renderDock({ model: createLayoutModel(makeSoloTree()), registry: makeRegistry() })
 		// the tab itself still renders…
-		expect(container.querySelector('[data-deck-tab="sim"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-tab="preview"]')).not.toBeNull()
 		// …but its close affordance is suppressed.
-		expect(container.querySelector('[data-deck-tab-close="sim"]')).toBeNull()
+		expect(container.querySelector('[data-deck-tab-close="preview"]')).toBeNull()
 	})
 
 	// BUG: a too-aggressive last-panel suppression hides close on EVERY panel of
@@ -206,22 +206,22 @@ describe('<DockView> close affordance — interaction', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
 
-		// before: debug is a tab in g-right (inactive, body not rendered).
-		expect(container.querySelector('[data-deck-tab="debug"]')).not.toBeNull()
+		// before: notes is a tab in g-right (inactive, body not rendered).
+		expect(container.querySelector('[data-deck-tab="notes"]')).not.toBeNull()
 
-		const debugClose = container.querySelector('[data-deck-tab-close="debug"]')!
+		const notesClose = container.querySelector('[data-deck-tab-close="notes"]')!
 		act(() => {
-			fireEvent.click(debugClose)
+			fireEvent.click(notesClose)
 		})
 
-		// canonical tree no longer holds debug in g-right.
+		// canonical tree no longer holds notes in g-right.
 		const grp = (model.get().root as any).children.find((c: any) => c.id === 'g-right')
-		expect(grp.panels).toEqual(['editor'])
-		// DOM dropped the debug tab + its close button.
-		expect(container.querySelector('[data-deck-tab="debug"]')).toBeNull()
-		expect(container.querySelector('[data-deck-tab-close="debug"]')).toBeNull()
-		// editor still present and active.
-		expect(container.querySelector('[data-deck-panel-body="editor"]')).not.toBeNull()
+		expect(grp.panels).toEqual(['doc'])
+		// DOM dropped the notes tab + its close button.
+		expect(container.querySelector('[data-deck-tab="notes"]')).toBeNull()
+		expect(container.querySelector('[data-deck-tab-close="notes"]')).toBeNull()
+		// doc still present and active.
+		expect(container.querySelector('[data-deck-panel-body="doc"]')).not.toBeNull()
 	})
 
 	// BUG: the close button's click bubbles to the tab's activate handler, so
@@ -231,20 +231,20 @@ describe('<DockView> close affordance — interaction', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
 
-		// g-right active=editor; debug is inactive.
-		expect((model.get().root as any).children.find((c: any) => c.id === 'g-right').active).toBe('editor')
+		// g-right active=doc; notes is inactive.
+		expect((model.get().root as any).children.find((c: any) => c.id === 'g-right').active).toBe('doc')
 
-		const debugClose = container.querySelector('[data-deck-tab-close="debug"]')!
+		const notesClose = container.querySelector('[data-deck-tab-close="notes"]')!
 		act(() => {
-			fireEvent.click(debugClose)
+			fireEvent.click(notesClose)
 		})
 
-		// debug removed; active stayed editor (close never routed through setActive).
+		// notes removed; active stayed doc (close never routed through setActive).
 		const grp = (model.get().root as any).children.find((c: any) => c.id === 'g-right')
-		expect(grp.panels).toEqual(['editor'])
-		expect(grp.active).toBe('editor')
-		expect(container.querySelector('[data-deck-panel-body="editor"]')).not.toBeNull()
-		expect(container.querySelector('[data-deck-panel-body="debug"]')).toBeNull()
+		expect(grp.panels).toEqual(['doc'])
+		expect(grp.active).toBe('doc')
+		expect(container.querySelector('[data-deck-panel-body="doc"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-panel-body="notes"]')).toBeNull()
 	})
 
 	// BUG: closing the ACTIVE panel leaves the group with no valid active (or
@@ -254,20 +254,20 @@ describe('<DockView> close affordance — interaction', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
 
-		// g-right active=editor; editor body is the one rendered.
-		expect(container.querySelector('[data-deck-panel-body="editor"]')).not.toBeNull()
+		// g-right active=doc; doc body is the one rendered.
+		expect(container.querySelector('[data-deck-panel-body="doc"]')).not.toBeNull()
 
-		const editorClose = container.querySelector('[data-deck-tab-close="editor"]')!
+		const docClose = container.querySelector('[data-deck-tab-close="doc"]')!
 		act(() => {
-			fireEvent.click(editorClose)
+			fireEvent.click(docClose)
 		})
 
 		const grp = (model.get().root as any).children.find((c: any) => c.id === 'g-right')
-		expect(grp.panels).toEqual(['debug'])
-		expect(grp.active).toBe('debug')
+		expect(grp.panels).toEqual(['notes'])
+		expect(grp.active).toBe('notes')
 		// closed panel's body gone, surviving sibling's body present.
-		expect(container.querySelector('[data-deck-panel-body="editor"]')).toBeNull()
-		expect(container.querySelector('[data-deck-panel-body="debug"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-panel-body="doc"]')).toBeNull()
+		expect(container.querySelector('[data-deck-panel-body="notes"]')).not.toBeNull()
 	})
 
 	// BUG: the HTML5 drag source is the draggable ANCESTOR (the tab), so a press
@@ -279,14 +279,14 @@ describe('<DockView> close affordance — interaction', () => {
 		const model = createLayoutModel(makeTree())
 		const { container } = renderDock({ model, registry: makeRegistry() })
 
-		const debugClose = container.querySelector('[data-deck-tab-close="debug"]')! as HTMLElement
-		const debugTab = container.querySelector('[data-deck-tab="debug"]')! as HTMLElement
+		const notesClose = container.querySelector('[data-deck-tab-close="notes"]')! as HTMLElement
+		const notesTab = container.querySelector('[data-deck-tab="notes"]')! as HTMLElement
 
 		// Drag BEGINS on the close span: bubbles to the tab's onDragStart with
 		// e.target === closeSpan. Guard must preventDefault + skip setData.
 		const closeSetData = vi.fn()
 		const closeDt = { setData: closeSetData, effectAllowed: '' }
-		const notPrevented = fireEvent.dragStart(debugClose, { dataTransfer: closeDt })
+		const notPrevented = fireEvent.dragStart(notesClose, { dataTransfer: closeDt })
 
 		// fireEvent returns false when default was prevented → drag aborted.
 		expect(notPrevented).toBe(false)
@@ -297,10 +297,10 @@ describe('<DockView> close affordance — interaction', () => {
 		// drag — proves the guard is scoped to close-origin, not killing all drags.
 		const tabSetData = vi.fn()
 		const tabDt = { setData: tabSetData, effectAllowed: '' }
-		fireEvent.dragStart(debugTab, { dataTransfer: tabDt })
+		fireEvent.dragStart(notesTab, { dataTransfer: tabDt })
 
-		expect(tabSetData).toHaveBeenCalledWith('application/x-deck-panel', 'debug')
-		expect(tabSetData).toHaveBeenCalledWith('text/plain', 'debug')
+		expect(tabSetData).toHaveBeenCalledWith('application/x-deck-panel', 'notes')
+		expect(tabSetData).toHaveBeenCalledWith('text/plain', 'notes')
 	})
 })
 
@@ -313,7 +313,7 @@ describe('<DockView> close affordance — native lifecycle', () => {
 		const model = createLayoutModel(makeNativeTree())
 		const { container } = renderDock({ model, registry: makeRegistry(), bindNativeSlot: bind })
 
-		// nativeCam active -> its slot is bound + present; logs body not yet shown.
+		// nativeCam active -> its slot is bound + present; output body not yet shown.
 		expect(container.querySelector('[data-deck-native-slot="nativeCam"]')).not.toBeNull()
 		bind.mockClear()
 
@@ -327,15 +327,15 @@ describe('<DockView> close affordance — native lifecycle', () => {
 		expect(nullCall).toBeTruthy()
 		// the slot left the DOM.
 		expect(container.querySelector('[data-deck-native-slot="nativeCam"]')).toBeNull()
-		// nativeCam gone from the canonical group; logs is the survivor + active.
+		// nativeCam gone from the canonical group; output is the survivor + active.
 		// makeNativeTree's root is a SINGLE-child split, so removing nativeCam
 		// collapses that split to the bare tabgroup `g` — root may now BE the
 		// tabgroup rather than a split with `.children`. Resolve `g` either way.
 		const root = model.get().root as any
 		const grp = root.id === 'g' ? root : root.children.find((c: any) => c.id === 'g')
-		expect(grp.panels).toEqual(['logs'])
-		expect(grp.active).toBe('logs')
+		expect(grp.panels).toEqual(['output'])
+		expect(grp.active).toBe('output')
 		// the dom sibling's body now renders.
-		expect(container.querySelector('[data-deck-panel-body="logs"]')).not.toBeNull()
+		expect(container.querySelector('[data-deck-panel-body="output"]')).not.toBeNull()
 	})
 })

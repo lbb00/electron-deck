@@ -34,8 +34,8 @@ function makeTree(): LayoutTree {
 			orientation: 'row',
 			sizes: [1, 1],
 			children: [
-				{ kind: 'tabs', id: 'g-left', panels: ['sim'], active: 'sim' },
-				{ kind: 'tabs', id: 'g-right', panels: ['editor', 'debug'], active: 'editor' },
+				{ kind: 'tabs', id: 'g-left', panels: ['preview'], active: 'preview' },
+				{ kind: 'tabs', id: 'g-right', panels: ['doc', 'notes'], active: 'doc' },
 			],
 		},
 	}
@@ -43,9 +43,9 @@ function makeTree(): LayoutTree {
 
 function makeRegistry(): PanelRegistry {
 	const reg = createPanelRegistry()
-	reg.register({ kind: 'dom', id: 'sim', title: 'Simulator' })
-	reg.register({ kind: 'dom', id: 'editor', title: 'Editor' })
-	reg.register({ kind: 'dom', id: 'debug', title: 'Debug' })
+	reg.register({ kind: 'dom', id: 'preview', title: 'Preview' })
+	reg.register({ kind: 'dom', id: 'doc', title: 'Doc' })
+	reg.register({ kind: 'dom', id: 'notes', title: 'Notes' })
 	return reg
 }
 
@@ -112,13 +112,13 @@ describe('<DockView> drag payload validation — non-deck MIME is inert', () => 
 		const before = JSON.stringify(model.get())
 
 		const gLeft = container.querySelector('[data-deck-group="g-left"]') as HTMLElement
-		// text/plain value is exactly 'editor', a registered panel present in the tree.
-		fireEvent.drop(gLeft, { clientX: 0, dataTransfer: foreignPayload(['text/plain'], 'editor') })
+		// text/plain value is exactly 'doc', a registered panel present in the tree.
+		fireEvent.drop(gLeft, { clientX: 0, dataTransfer: foreignPayload(['text/plain'], 'doc') })
 
 		expect(revisions).toBe(0)
 		expect(JSON.stringify(model.get())).toBe(before)
-		// 'editor' never left g-right.
-		expect(groupOf(model.get().root, 'editor').id).toBe('g-right')
+		// 'doc' never left g-right.
+		expect(groupOf(model.get().root, 'doc').id).toBe('g-right')
 	})
 
 	it('a genuine deck drag (custom MIME present) still commits the re-dock', () => {
@@ -129,10 +129,10 @@ describe('<DockView> drag payload validation — non-deck MIME is inert', () => 
 		model.subscribe(() => { revisions += 1 })
 
 		const gRight = container.querySelector('[data-deck-group="g-right"]') as HTMLElement
-		// jsdom geometry is 0×0 => 'center' zone => 'sim' joins g-right.
-		fireEvent.drop(gRight, { clientX: 0, dataTransfer: deckPayload('sim') })
+		// jsdom geometry is 0×0 => 'center' zone => 'preview' joins g-right.
+		fireEvent.drop(gRight, { clientX: 0, dataTransfer: deckPayload('preview') })
 
 		expect(revisions).toBeGreaterThan(0)
-		expect(groupOf(model.get().root, 'sim').id).toBe('g-right')
+		expect(groupOf(model.get().root, 'preview').id).toBe('g-right')
 	})
 })

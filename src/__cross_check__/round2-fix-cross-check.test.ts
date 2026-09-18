@@ -124,11 +124,13 @@ function makeView(): FakeView {
 	}
 }
 
-function makeElectron(opts: {
-	windowFactory?: () => FakeWindow
-	viewFactory?: () => FakeView
-	throwOnWindowCtorAfter?: number
-} = {}): MinimalElectron & {
+function makeElectron(
+	opts: {
+		windowFactory?: () => FakeWindow
+		viewFactory?: () => FakeView
+		throwOnWindowCtorAfter?: number
+	} = {},
+): MinimalElectron & {
 	__windows: FakeWindow[]
 	__views: FakeView[]
 	__windowCtorCalls: number
@@ -139,7 +141,9 @@ function makeElectron(opts: {
 	const e = {
 		__windows: windows,
 		__views: views,
-		get __windowCtorCalls() { return ctorCalls },
+		get __windowCtorCalls() {
+			return ctorCalls
+		},
 		BrowserWindow: function (this: unknown, browserOpts?: MinimalBrowserWindowOptions) {
 			ctorCalls++
 			if (opts.throwOnWindowCtorAfter !== undefined && ctorCalls > opts.throwOnWindowCtorAfter) {
@@ -163,12 +167,17 @@ function makeIpcMain(): MinimalIpcMain & {
 	handle: ReturnType<typeof vi.fn>
 	removeHandler: ReturnType<typeof vi.fn>
 } {
-	const handlers = new Map<string, (event: { sender: { id: number } }, ...args: unknown[]) => unknown>()
+	const handlers = new Map<
+		string,
+		(event: { sender: { id: number } }, ...args: unknown[]) => unknown
+	>()
 	const ipc = {
 		__handlers: handlers,
-		handle: vi.fn((channel: string, h: (event: { sender: { id: number } }, ...args: unknown[]) => unknown) => {
-			handlers.set(channel, h)
-		}),
+		handle: vi.fn(
+			(channel: string, h: (event: { sender: { id: number } }, ...args: unknown[]) => unknown) => {
+				handlers.set(channel, h)
+			},
+		),
 		removeHandler: vi.fn((channel: string) => {
 			handlers.delete(channel)
 		}),
@@ -177,7 +186,7 @@ function makeIpcMain(): MinimalIpcMain & {
 }
 
 function flush(): Promise<void> {
-	return new Promise(r => setTimeout(r, 0))
+	return new Promise((r) => setTimeout(r, 0))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -196,7 +205,12 @@ describe('X1 — electronDeck() entry & DeckOptions injection', () => {
 	// these two tests pin the module to the path-stub shape — same behaviour and
 	// same coverage on every machine.
 	it('rejects with an error mentioning electron when running without injection', async () => {
-		vi.doMock('electron', () => ({ default: '/stub/electron-binary', ipcMain: undefined, BrowserWindow: undefined, WebContentsView: undefined }))
+		vi.doMock('electron', () => ({
+			default: '/stub/electron-binary',
+			ipcMain: undefined,
+			BrowserWindow: undefined,
+			WebContentsView: undefined,
+		}))
 		vi.resetModules()
 		const { electronDeck: deck } = await import('../electron-deck.js')
 		await expect(deck({})).rejects.toThrow(/electron/i)
@@ -205,13 +219,16 @@ describe('X1 — electronDeck() entry & DeckOptions injection', () => {
 	})
 
 	it('rejects when only electron is injected but ipcMain is missing', async () => {
-		vi.doMock('electron', () => ({ default: '/stub/electron-binary', ipcMain: undefined, BrowserWindow: undefined, WebContentsView: undefined }))
+		vi.doMock('electron', () => ({
+			default: '/stub/electron-binary',
+			ipcMain: undefined,
+			BrowserWindow: undefined,
+			WebContentsView: undefined,
+		}))
 		vi.resetModules()
 		const { electronDeck: deck } = await import('../electron-deck.js')
 		const electron = makeElectron()
-		await expect(
-			deck({}, { electron } as DeckOptions),
-		).rejects.toThrow(/electron|ipcMain/i)
+		await expect(deck({}, { electron } as DeckOptions)).rejects.toThrow(/electron|ipcMain/i)
 		vi.doUnmock('electron')
 		vi.resetModules()
 	})
@@ -245,28 +262,6 @@ describe('X2 — mainWindow closed → framework shutdown', () => {
 		expect(app.phase).toBe('quit')
 	})
 
-	it('declared window "closed" does NOT shut the framework down', async () => {
-		const electron = makeElectron()
-		const ipcMain = makeIpcMain()
-		const app = new DeckApp(
-			{
-				windows: {
-					settings: { source: { url: 'http://x/settings' } },
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-		expect(app.phase).toBe('ready')
-
-		// windows[0] is mainWindow; windows[1] is declared 'settings'
-		const declared = electron.__windows[1]!
-		declared.__emit('closed')
-		await flush()
-		await flush()
-		expect(app.phase).toBe('ready')
-	})
-
 	it('runtime.windows.create() child window "closed" does NOT shut the framework down', async () => {
 		const electron = makeElectron()
 		const ipcMain = makeIpcMain()
@@ -279,80 +274,6 @@ describe('X2 — mainWindow closed → framework shutdown', () => {
 		await flush()
 		await flush()
 		expect(app.phase).toBe('ready')
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
-// X3 — R5/C2: loadURL / loadFile rejection emits 'load-failed' FrameworkEvent
-//             and start() still resolves.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X3 — load-failed FrameworkEvent emission', () => {
-	it('emits load-failed { source, error } when toolbar loadURL rejects; start() still resolves', async () => {
-		const failingErr = new Error('net::ERR_FAILED')
-		const failingView = (() => {
-			const v = makeView()
-			v.webContents.loadURL = vi.fn(async () => { throw failingErr }) as never
-			return v
-		})()
-		const electron = makeElectron({ viewFactory: () => failingView })
-		const ipcMain = makeIpcMain()
-
-		const captured: Array<{ source: unknown; error: unknown }> = []
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://toolbar' },
-					preloadPath: '/pre.js',
-					height: 36,
-				},
-				setup: (rt) => {
-					rt.on('load-failed', (p) => {
-						captured.push(p as never)
-					})
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-
-		await expect(app.start()).resolves.toBeUndefined()
-		// Allow load-failed callback (chained off loadURL.catch) to flush.
-		await flush()
-		await flush()
-		expect(captured.length).toBe(1)
-		expect((captured[0]!.source as { url: string }).url).toBe('http://toolbar')
-		expect(captured[0]!.error).toBe(failingErr)
-	})
-
-	it('emits load-failed for loadFile source as well', async () => {
-		const failingErr = new Error('ENOENT')
-		const electron = makeElectron({
-			viewFactory: () => {
-				const v = makeView()
-				v.webContents.loadFile = vi.fn(async () => { throw failingErr }) as never
-				return v
-			},
-		})
-		const ipcMain = makeIpcMain()
-		const captured: Array<{ source: unknown; error: unknown }> = []
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { file: '/abs/missing.html' },
-					preloadPath: '/pre.js',
-					height: 36,
-				},
-				setup: (rt) => {
-					rt.on('load-failed', (p) => captured.push(p as never))
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await expect(app.start()).resolves.toBeUndefined()
-		await flush()
-		await flush()
-		expect(captured.length).toBe(1)
-		expect((captured[0]!.source as { file: string }).file).toBe('/abs/missing.html')
 	})
 })
 
@@ -381,162 +302,6 @@ describe('X4 — shutdown order (window.destroy before ipcMain.removeHandler)', 
 })
 
 // ─────────────────────────────────────────────────────────────────────────
-// X5 — C6: partial-failure cleanup — start() rejects with all windows cleaned.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X5 — partial-failure cleanup on start() error', () => {
-	it('when 2nd BrowserWindow ctor throws, start() rejects and the 1st window is destroyed', async () => {
-		// 1st ctor = mainWindow, 2nd ctor = declared window → make 2nd throw.
-		const electron = makeElectron({ throwOnWindowCtorAfter: 1 })
-		const ipcMain = makeIpcMain()
-		const app = new DeckApp(
-			{
-				windows: {
-					boom: { source: { url: 'http://boom' } },
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await expect(app.start()).rejects.toThrow(/forced BrowserWindow ctor failure/)
-
-		const mainWin = electron.__windows[0]!
-		expect(mainWin.__destroyed).toBe(true)
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
-// X6 — R3: FrameworkEvents 'window-created' replay + 'window-closed' emit.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X6 — window-created / window-closed FrameworkEvents', () => {
-	it('replays baseline window-created (main / toolbar / host) to the first setup-time listener', async () => {
-		const electron = makeElectron()
-		const ipcMain = makeIpcMain()
-		const events: Array<{ role: string }> = []
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://toolbar' },
-					preloadPath: '/pre.js',
-					height: 36,
-				},
-				windows: {
-					settings: { source: { url: 'http://settings' } },
-				},
-				setup: (rt) => {
-					rt.on('window-created', (p) => {
-						events.push({ role: (p as { role: string }).role })
-					})
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-		// Expect at least one 'main' role plus one 'toolbar' plus one for the
-		// declared 'settings' window. Spec says role may be 'main'|'toolbar'|'host'.
-		const roles = events.map(e => e.role)
-		expect(roles).toContain('main')
-		expect(roles).toContain('toolbar')
-		expect(roles).toContain('host')
-	})
-
-	it('emits window-closed when a declared window emits closed', async () => {
-		const electron = makeElectron()
-		const ipcMain = makeIpcMain()
-		const closedSeen: unknown[] = []
-		const app = new DeckApp(
-			{
-				windows: { aux: { source: { url: 'http://aux' } } },
-				setup: (rt) => {
-					rt.on('window-closed', (p) => closedSeen.push(p))
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-		const declared = electron.__windows[1]!
-		declared.__emit('closed')
-		expect(closedSeen.length).toBe(1)
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
-// X7 — C5: trust ref-count — host trust().dispose() does not strip baseline.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X7 — trust ref-count preserves baseline auto-trust', () => {
-	it('runtime.windows.trust(declaredWindow).dispose() leaves the window still trusted', async () => {
-		const electron = makeElectron()
-		const ipcMain = makeIpcMain()
-		const app = new DeckApp(
-			{ windows: { aux: { source: { url: 'http://aux' } } } },
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-		const rt = app.runtime
-		const declared = electron.__windows[1]!
-		// Resolve the invoke handler that ipcMain.handle('__electron-deck:invoke', ...)
-		// was registered with, so we can probe trust through the public surface.
-		const invokeHandler = ipcMain.__handlers.get(DeckChannel.Invoke)!
-		const wcId = (declared.webContents as { id: number }).id
-
-		// baseline: declared window's webContents is trusted → UntrustedSender NOT returned.
-		const beforeResp = await invokeHandler(
-			{ sender: { id: wcId } },
-			{ kind: 'host', name: 'noop', args: [] },
-		) as { ok: boolean; error?: { code?: string } }
-		expect(beforeResp.ok === false && beforeResp.error?.code === 'DECK_UNTRUSTED_SENDER').toBe(false)
-
-		// take an extra trust ref and dispose it; baseline must remain.
-		const extra = rt.windows.trust(declared as unknown as Parameters<typeof rt.windows.trust>[0])
-		extra.dispose()
-
-		const afterResp = await invokeHandler(
-			{ sender: { id: wcId } },
-			{ kind: 'host', name: 'noop', args: [] },
-		) as { ok: boolean; error?: { code?: string } }
-		expect(afterResp.ok === false && afterResp.error?.code === 'DECK_UNTRUSTED_SENDER').toBe(false)
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
-// X8 — R7: toolbar resize follows mainWindow resize.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X8 — toolbar resizes with mainWindow', () => {
-	it('mainWindow resize event causes toolbarView.setBounds to be called with new width', async () => {
-		const initialBounds = { x: 0, y: 0, width: 800, height: 600 }
-		const mainWin = makeWindow(undefined, initialBounds)
-		const electron = makeElectron({
-			windowFactory: () => mainWin,
-		})
-		const ipcMain = makeIpcMain()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://toolbar' },
-					preloadPath: '/pre.js',
-					height: 48,
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-
-		const toolbarView = electron.__views[0]!
-		const callsBefore = toolbarView.__setBoundsMock.mock.calls.length
-		// mutate content bounds → emit resize
-		mainWin.__bounds = { x: 0, y: 0, width: 1280, height: 720 }
-		mainWin.__emit('resize')
-		const callsAfter = toolbarView.__setBoundsMock.mock.calls.length
-		expect(callsAfter).toBeGreaterThan(callsBefore)
-		const last = toolbarView.__setBoundsMock.mock.calls[callsAfter - 1]![0] as MinimalRect
-		expect(last.width).toBe(1280)
-		expect(last.height).toBe(48)
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
 // X9 — R8: empty remoteName from DeckRemoteError preserved (?? not ||).
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -554,14 +319,13 @@ describe('X9 — empty remoteName preserved via ??', () => {
 			invokeHost: async () => {
 				throw new DeckRemoteError('', 'something exploded', 'E_FOO')
 			},
-			invokeSimulator: async () => null as never,
 		})
 		transport.start()
 		const handler = ipcMain.__handlers.get(DeckChannel.Invoke)!
-		const resp = await handler(
+		const resp = (await handler(
 			{ sender: { id: trustedId } },
 			{ kind: 'host', name: 'whatever', args: [] },
-		) as { ok: false; error: { remoteName: string; code?: string; message: string } }
+		)) as { ok: false; error: { remoteName: string; code?: string; message: string } }
 		expect(resp.ok).toBe(false)
 		expect(resp.error.remoteName).toBe('')
 		expect(resp.error.code).toBe('E_FOO')
@@ -586,36 +350,6 @@ describe('X10 — R9 doc-only', () => {
 describe('X11 — R10 doc-only', () => {
 	it('placeholder: no runtime contract', () => {
 		expect(true).toBe(true)
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
-// X12 — C7: half-state guard.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X12 — half-state guard: electron + toolbar/windows without wireTransport', () => {
-	it('rejects with Error mentioning wireTransport.ipcMain when toolbar is present but wireTransport is missing', async () => {
-		const electron = makeElectron()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://toolbar' },
-					preloadPath: '/pre.js',
-					height: 36,
-				},
-			},
-			{ electron },
-		)
-		await expect(app.start()).rejects.toThrow(/wireTransport\.ipcMain is required/)
-	})
-
-	it('rejects similarly when windows is present without wireTransport', async () => {
-		const electron = makeElectron()
-		const app = new DeckApp(
-			{ windows: { aux: { source: { url: 'http://aux' } } } },
-			{ electron },
-		)
-		await expect(app.start()).rejects.toThrow(/wireTransport\.ipcMain is required/)
 	})
 })
 
@@ -650,7 +384,6 @@ describe('X13 — WireTransport.start() rollback', () => {
 			trustedWebContents: () => [],
 			declaredEvents: () => [],
 			invokeHost: async () => null as never,
-			invokeSimulator: async () => null as never,
 		})
 		expect(() => transport.start()).toThrow(/forced 2nd handle failure/)
 
@@ -665,48 +398,8 @@ describe('X13 — WireTransport.start() rollback', () => {
 		// disallow is "already started" wording.
 		try {
 			transport.start()
-		}
-		catch (e) {
+		} catch (e) {
 			expect(String(e)).not.toMatch(/already started/i)
 		}
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────
-// X14 — load-failed declared in FrameworkEvents type (sanity).
-// (Covered functionally by X3; this is a redundant payload-shape probe.)
-// ─────────────────────────────────────────────────────────────────────────
-
-describe('X14 — load-failed payload shape is { source, error }', () => {
-	it('payload object has both source and error properties', async () => {
-		const failingErr = new Error('boom')
-		const electron = makeElectron({
-			viewFactory: () => {
-				const v = makeView()
-				v.webContents.loadURL = vi.fn(async () => { throw failingErr }) as never
-				return v
-			},
-		})
-		const ipcMain = makeIpcMain()
-		let payload: { source?: unknown; error?: unknown } | null = null
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://t' },
-					preloadPath: '/p.js',
-					height: 36,
-				},
-				setup: (rt) => {
-					rt.on('load-failed', (p) => { payload = p as never })
-				},
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-		await flush()
-		await flush()
-		expect(payload).not.toBeNull()
-		expect(payload).toHaveProperty('source')
-		expect(payload).toHaveProperty('error')
 	})
 })

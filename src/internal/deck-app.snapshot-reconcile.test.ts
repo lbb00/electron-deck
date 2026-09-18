@@ -306,7 +306,7 @@ describe('DeckApp snapshot-reconcile — all-invalid snapshot not detached', () 
 		const removesBefore = mainWin.contentView.removeChildView.mock.calls.length
 
 		// Epoch 1: send a snapshot with only UNKNOWN tokens → non-empty but fully
-		// unauthorized → cleanSnapshot returns null → handleSnapshot drops it.
+		// unauthorized → authorizeSnapshot returns null → handleSnapshot drops it.
 		// The reconciler must NOT interpret this as "detach everything".
 		await snapshotHandler(
 			mainFrameEvent(mainWcId),

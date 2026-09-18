@@ -2,7 +2,7 @@
  * Observable layout model — single-writer, synchronous, call-ordered.
  *
  * INV-3: mutations assume an already-validated (acyclic, integrity-checked) tree
- * — callers feeding hand-built trees should parseLayout/validateTree first.
+ * — callers feeding hand-built trees should parseLayout/collectTreeProblems first.
  *
  * Conventions (pinned by model.test.ts):
  *  - revision starts at 0 for the initial tree.

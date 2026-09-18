@@ -21,7 +21,7 @@
 //                          session-lifetime).
 //
 // What it proves:
-//   • A project list → click → panel-like split layout (left #simulator,
+//   • A project list → click → panel-like split layout (left #preview,
 //     right #panel) with a draggable splitter.
 //   • Native color blocks FOLLOW their DOM slots via the real slot-token
 //     mechanism (host issues SlotGrant on `placeIn({anchor})`; renderer's
@@ -29,7 +29,7 @@
 //   • A programmatic splitter drag moves the native blocks — renderer-driven
 //     geometry, ZERO host resize code.
 //
-// Run offscreen:  electron examples/layout-demo/main.mjs
+// Run offscreen:  electron examples/layout-demo/main.js
 // Windows are created hidden + showInactive() at x:-3000 so they paint (native
 // child views composite) WITHOUT ever appearing or stealing focus. Each step
 // writes a composite PNG (host page + native blocks blitted in z-order) to
@@ -39,7 +39,7 @@ import { app, ipcMain } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { writeFile } from 'node:fs/promises'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 
 // The REAL framework entry, imported from the built dist (the example lives
 // inside the package and the package is not symlinked for self-import).
@@ -53,15 +53,20 @@ const BLOCK = pathToFileURL(join(HERE, 'block.html')).href
 const CONTROL = pathToFileURL(join(HERE, 'control.html')).href
 const PRELOAD = join(HERE, 'demo-preload.mjs')
 
-const Z = { SIMULATOR: 0, PANEL: 10 }
+const Z = { PREVIEW: 0, PANEL: 10 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 // Unbuffered trace: Electron's main-process stdout is block-buffered when piped
 // to a file and only flushes on exit; a hung run would show an empty log. Write
-// each line synchronously so the trace survives a hang.
+// each line synchronously so the trace survives a hang. Truncated at the top of
+// each run so trace.log only ever holds THIS run.
 const TRACE = join(HERE, 'shots', 'trace.log')
+mkdirSync(SHOTS, { recursive: true })
+writeFileSync(TRACE, '')
+let failed = false
 const log = (...a) => {
   const line = '[demo] ' + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')
   console.log(line)
+  if (line.includes('❌')) failed = true
   try { appendFileSync(TRACE, line + '\n') } catch {}
 }
 
@@ -113,7 +118,6 @@ async function shot(win, name) {
   log('shot →', name, `(${blocks.length} native blocks:`, blocks.map((b) => `${b.label}@${b.x},${b.width}w`).join(' < ') + ')')
 }
 
-mkdirSync(SHOTS, { recursive: true })
 log('boot: about to call startElectronDeck()')
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,8 +143,8 @@ const { ready } = startElectronDeck(
       // offscreen after load so native child views composite into capturePage.
       window: { width: 900, height: 520, show: false, backgroundColor: '#1e1e2e' },
       // REAL API: declarative main-renderer entry. When the framework owns the
-      // main window it auto-loads this source after build (mirrors the toolbar /
-      // declared-window `source`). No hand-rolled loadURL in assemble() anymore.
+      // main window it auto-loads this source after build. No hand-rolled
+      // loadURL in assemble() anymore.
       source: { url: CONTROL },
     },
     backend: {
@@ -239,35 +243,10 @@ const { ready } = startElectronDeck(
             placedBlocks.push({ handle, label, zone })
             return handle
           }
-          const sim = place('#c0392b', 'SIMULATOR', Z.SIMULATOR, '#simulator')
+          const preview = place('#c0392b', 'PREVIEW', Z.PREVIEW, '#preview')
           const panel = place('#2980b9', 'PANEL', Z.PANEL, '#panel')
-          projectViews = [sim, panel]
+          projectViews = [preview, panel]
           log('placed native views; contentView.children =', String(mainWin.contentView.children.length), '; placedBlocks =', String(placedBlocks.length))
-
-          // ── privileged layout command + grant (now FULLY user-side) ──
-          // A host that wants the renderer to invoke a PRIVILEGED `layout.*` op
-          // registers it via runtime.layout.command(...) and authorizes the
-          // control wc via runtime.grants.issue(...). The grant target is
-          // `main.controlWc` — the Window facade hands the control-layer wc back
-          // directly (it is the same wc as the open-project sender `e.sender`, but
-          // controlWc is the cleaner, facade-native expression). `targetScope` is
-          // the window-rooted DeckSession we just minted — no internal Scope
-          // handle required. The renderer doesn't drive it in the happy path (the
-          // splitter is pure DOM→Place), but it stands up end-to-end with ZERO glue.
-          try {
-            runtime.layout.command('layout.collapse-sim', () => {
-              // host-side collapse: hide the simulator view
-              projectViews[0].applyPlacement({ visible: false })
-              return 'ok'
-            })
-            runtime.grants.issue(main.controlWc, {
-              commands: ['layout.collapse-sim'],
-              targetScope: session,
-            })
-            log('registered layout.collapse-sim + issued grant (target = main.controlWc, scope = window-rooted DeckSession)')
-          } catch (err) {
-            log('layout.command/grant failed:', String(err))
-          }
         })
 
         // ── close → reset demonstration (window-lifetime > session-lifetime) ──
@@ -294,7 +273,8 @@ const { ready } = startElectronDeck(
         // ── verification driver (offscreen) ──
         void runVerification(mainWin).then(resolveDone).catch((err) => {
           console.error('[demo] verification failed:', err)
-          log('verification failed: ' + (err && err.stack ? err.stack : String(err)))
+          failed = true
+          log('❌ verification failed: ' + (err && err.stack ? err.stack : String(err)))
           resolveDone()
         })
       },
@@ -306,8 +286,9 @@ const { ready } = startElectronDeck(
 // still surfaces on `ready`. Observe it so a broken boot quits instead of hanging.
 ready.catch((err) => {
   console.error('[demo] startElectronDeck failed:', err)
-  log('startElectronDeck failed: ' + String(err))
-  app.quit()
+  failed = true
+  log('❌ startElectronDeck failed: ' + String(err))
+  app.exit(1)
 })
 
 function enc(color, label) {
@@ -323,60 +304,60 @@ async function runVerification(mainWin) {
   // (b) open a project → detail layout; both blocks visible, following slots.
   // Click the first project card from the host side via executeJavaScript.
   await mainWin.webContents.executeJavaScript(`document.querySelector('.card').click()`)
-  // Set a deterministic initial split (sim = 360px) so the "before" geometry is
+  // Set a deterministic initial split (preview = 360px) so the "before" geometry is
   // stable, then wait for: openProject ipc → host placeIn → SlotGrant push →
   // renderer anchor measure → Place → host moves WCV.
   await sleep(400)
   await mainWin.webContents.executeJavaScript(`window.__demoSetSplit(360)`)
   await sleep(700)
   await shot(mainWin, '2-detail-following.png')
-  const before = await captureSimBounds()
-  log('STEP2: native sim/panel bounds at split=360 :', JSON.stringify(before))
+  const before = await capturePreviewBounds()
+  log('STEP2: native preview/panel bounds at split=360 :', JSON.stringify(before))
 
   // (c) programmatic splitter drag → DOM split changes → view-anchor
   // re-measures → Place → native blocks MOVE. Prove they followed by commanding
-  // a NARROWER simulator (220px) and checking the native sim shrank toward it
+  // a NARROWER preview (220px) and checking the native preview shrank toward it
   // and the native panel shifted left to fill.
   await mainWin.webContents.executeJavaScript(`window.__demoSetSplit(220)`)
   await sleep(700)
   await shot(mainWin, '3-after-drag.png')
-  const after = await captureSimBounds()
-  log('STEP3: native sim/panel bounds at split=220 :', JSON.stringify(after))
+  const after = await capturePreviewBounds()
+  log('STEP3: native preview/panel bounds at split=220 :', JSON.stringify(after))
 
-  // PROOF: the native simulator block's width must TRACK the commanded split
+  // PROOF: the native preview block's width must TRACK the commanded split
   // (360 → 220, a ~140px shrink, allowing for the slot's 8px CSS margins) and
   // the native panel block's x must move LEFT by a similar amount. Geometry
   // is renderer-driven (the host wrote no bounds): if these hold, slot-token
   // following covers live renderer resize.
-  const simDelta = before.sim && after.sim ? before.sim.width - after.sim.width : 0
-  const panelDelta = before.sim && after.sim ? before.panel.x - after.panel.x : 0
-  const simTracked = simDelta > 100 && simDelta < 180   // ~140 expected
+  const previewDelta = before.preview && after.preview ? before.preview.width - after.preview.width : 0
+  const panelDelta = before.preview && after.preview ? before.panel.x - after.panel.x : 0
+  const previewTracked = previewDelta > 100 && previewDelta < 180   // ~140 expected
   const panelFollowed = panelDelta > 100 && panelDelta < 180  // panel.x shifts left ~140
-  log('PROOF: simWidthΔ =', String(simDelta), '(expect ~140) | devXΔ(left) =', String(panelDelta), '(expect ~140)')
-  if (simTracked && panelFollowed) log('✅ split-drag MOVED the native color blocks (renderer-driven geometry, zero host resize code).')
+  log('PROOF: previewWidthΔ =', String(previewDelta), '(expect ~140) | devXΔ(left) =', String(panelDelta), '(expect ~140)')
+  if (previewTracked && panelFollowed) log('✅ split-drag MOVED the native color blocks (renderer-driven geometry, zero host resize code).')
   else log('❌ native blocks did NOT track the split — slot-token did not cover renderer-driven resize.')
 
-  // (d) renderer-driven HIDE → the reconciler must DETACH the native simulator
+  // (d) renderer-driven HIDE → the reconciler must DETACH the native preview
   // block (bounds() goes null) while panel stays visible. Pure DOM display:none;
   // no host hide code.
-  await mainWin.webContents.executeJavaScript(`window.__demoHideSim()`)
+  await mainWin.webContents.executeJavaScript(`window.__demoHidePreview()`)
   await sleep(500)
-  await shot(mainWin, '4-sim-hidden.png')
-  const hidden = await captureSimBounds()
-  const simDetached = !hidden.sim && !!hidden.panel
+  await shot(mainWin, '4-preview-hidden.png')
+  const hidden = await capturePreviewBounds()
+  const previewDetached = !hidden.preview && !!hidden.panel
   log('STEP4: after hide, native bounds =', JSON.stringify(hidden))
-  if (simDetached) log('✅ renderer-driven hide DETACHED the native simulator (level-triggered visible:false → reconcile detach).')
-  else log('❌ simulator did NOT detach on hide — reconcile detach path broken.')
+  if (previewDetached) log('✅ renderer-driven hide DETACHED the native preview (level-triggered visible:false → reconcile detach).')
+  else log('❌ preview did NOT detach on hide — reconcile detach path broken.')
 
-  // (e) RESTORE → the reconciler must RE-ATTACH the simulator with fresh geometry.
-  await mainWin.webContents.executeJavaScript(`window.__demoShowSim(); window.__demoSetSplit(300)`)
+  // (e) RESTORE → the reconciler must RE-ATTACH the preview with fresh geometry.
+  await mainWin.webContents.executeJavaScript(`window.__demoShowPreview(); window.__demoSetSplit(300)`)
   await sleep(600)
-  await shot(mainWin, '5-sim-restored.png')
-  const restored = await captureSimBounds()
-  const simRestored = !!restored.sim && restored.sim.width > 100
+  await shot(mainWin, '5-preview-restored.png')
+  const restored = await capturePreviewBounds()
+  const previewRestored = !!restored.preview && restored.preview.width > 100
   log('STEP5: after restore, native bounds =', JSON.stringify(restored))
-  if (simRestored) log('✅ renderer-driven restore RE-ATTACHED the native simulator (visible:true → reconcile attach).')
-  else log('❌ simulator did NOT re-attach on restore.')
+  if (previewRestored) log('✅ renderer-driven restore RE-ATTACHED the native preview (visible:true → reconcile attach).')
+  else log('❌ preview did NOT re-attach on restore.')
 
   // (f) STRESS: a burst of rapid re-splits (the white-screen bug's shape). With the
   // level-triggered publisher+reconciler the blocks must SETTLE correctly — no view
@@ -384,8 +365,8 @@ async function runVerification(mainWin) {
   await mainWin.webContents.executeJavaScript(`window.__demoStress(40)`)
   await sleep(800)
   await shot(mainWin, '6-after-stress.png')
-  const settled = await captureSimBounds()
-  const bothLive = !!settled.sim && !!settled.panel && settled.sim.width > 40 && settled.panel.width > 40
+  const settled = await capturePreviewBounds()
+  const bothLive = !!settled.preview && !!settled.panel && settled.preview.width > 40 && settled.panel.width > 40
   log('STEP6: after 40-round stress, native bounds =', JSON.stringify(settled))
   if (bothLive) log('✅ after a 40-round relayout burst BOTH native blocks are correctly placed (level-triggered self-heal — no stuck detached view).')
   else log('❌ a native block was stuck detached after the stress burst — the white-screen failure mode.')
@@ -393,13 +374,13 @@ async function runVerification(mainWin) {
   log('ALL STEPS DONE')
 }
 
-function captureSimBounds() {
+function capturePreviewBounds() {
   const out = {}
   for (const blk of placedBlocks) {
     if (blk.handle.webContents.isDestroyed()) continue
     const b = blk.handle.bounds()
     if (!b) continue
-    out[blk.label === 'SIMULATOR' ? 'sim' : 'panel'] = { x: b.x, width: b.width }
+    out[blk.label === 'PREVIEW' ? 'preview' : 'panel'] = { x: b.x, width: b.width }
   }
   return Promise.resolve(out)
 }
@@ -407,8 +388,18 @@ function captureSimBounds() {
 void allDone.then(async () => {
   await sleep(200)
   quitting = true   // tell onClose to STOP vetoing — we are tearing down for real
-  app.quit()
+  // Electron's app.quit() ignores process.exitCode (verified: a forced ❌ still
+  // exited 0), so a failure forces the exit code via app.exit().
+  if (failed) app.exit(1)
+  else app.quit()
 })
 
-app.on('window-all-closed', () => app.quit())
-process.on('uncaughtException', (e) => { console.error('[demo] UNCAUGHT', e); app.quit() })
+app.on('window-all-closed', () => {
+  if (failed) app.exit(1)
+  else app.quit()
+})
+process.on('uncaughtException', (e) => {
+  failed = true
+  console.error('[demo] UNCAUGHT', e)
+  app.exit(1)
+})

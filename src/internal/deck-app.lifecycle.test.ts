@@ -50,7 +50,8 @@ interface FakeApp extends MinimalApp {
 	setName: ReturnType<typeof vi.fn> & MinimalApp['setName']
 	quit: ReturnType<typeof vi.fn> & MinimalApp['quit']
 	on: ReturnType<typeof vi.fn> & MinimalApp['on']
-	requestSingleInstanceLock: ReturnType<typeof vi.fn> & NonNullable<MinimalApp['requestSingleInstanceLock']>
+	requestSingleInstanceLock: ReturnType<typeof vi.fn> &
+		NonNullable<MinimalApp['requestSingleInstanceLock']>
 	/** Test-only — event → registered listeners. */
 	_listeners: Map<AppEvent, Array<(e?: { preventDefault(): void }) => void>>
 	/** Test-only — invoke all listeners registered for the given event. */
@@ -91,7 +92,7 @@ function createFakeApp(opts: { singleInstanceLock?: boolean } = {}): FakeApp {
 
 /** Did `app.on` get called with the given event name at least once? */
 function onCalledWith(app: FakeApp, event: AppEvent): boolean {
-	return app.on.mock.calls.some(c => c[0] === event)
+	return app.on.mock.calls.some((c) => c[0] === event)
 }
 
 // ── Fake Electron (BrowserWindow ctor tracking + injectable app) ──────────────
@@ -162,22 +163,26 @@ function createFakeElectron(
 				addChildView: vi.fn(),
 				removeChildView: vi.fn(),
 			} as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
 				this.webContents.destroyed = true
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -220,7 +225,9 @@ type BackendExtra = Partial<RuntimeBackend> & {
 	onSecondInstance?: (...args: unknown[]) => void
 }
 
-function makeBackend(extra: BackendExtra = {}): RuntimeBackend & { assemble: ReturnType<typeof vi.fn> } {
+function makeBackend(
+	extra: BackendExtra = {},
+): RuntimeBackend & { assemble: ReturnType<typeof vi.fn> } {
 	const backend = {
 		assemble: vi.fn(async () => undefined),
 		...extra,
@@ -283,14 +290,12 @@ describe('DeckApp — app lifecycle: will-quit → shutdown() (always bound)', (
 		const app = createFakeApp()
 		const electron = createFakeElectron(app)
 		const dispose = vi.fn()
-		const deck = new DeckApp(
-			{
-				setup: (rt) => {
-					rt.add(dispose)
-				},
-			},
-			{ electron },
-		)
+		const backend = makeBackend({
+			assemble: vi.fn(async (rt) => {
+				rt.add(dispose)
+			}) as unknown as RuntimeBackend['assemble'],
+		})
+		const deck = new DeckApp({}, { electron, backend })
 		await deck.start()
 		expect(dispose).not.toHaveBeenCalled()
 
@@ -298,7 +303,7 @@ describe('DeckApp — app lifecycle: will-quit → shutdown() (always bound)', (
 		// so a framework that fails to bind will-quit leaves `dispose` uncalled.
 		app._emit('will-quit')
 		// allow the async shutdown chain to settle
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(dispose).toHaveBeenCalledTimes(1)
 		expect(deck.phase).toBe('quit')
@@ -308,14 +313,12 @@ describe('DeckApp — app lifecycle: will-quit → shutdown() (always bound)', (
 		const app = createFakeApp()
 		const electron = createFakeElectron(app)
 		const dispose = vi.fn()
-		const deck = new DeckApp(
-			{
-				setup: (rt) => {
-					rt.add(dispose)
-				},
-			},
-			{ electron },
-		)
+		const backend = makeBackend({
+			assemble: vi.fn(async (rt) => {
+				rt.add(dispose)
+			}) as unknown as RuntimeBackend['assemble'],
+		})
+		const deck = new DeckApp({}, { electron, backend })
 		await deck.start()
 
 		// The first emit drives teardown; subsequent emits must be no-ops.
@@ -323,7 +326,7 @@ describe('DeckApp — app lifecycle: will-quit → shutdown() (always bound)', (
 		app._emit('will-quit')
 		app._emit('will-quit')
 		app._emit('will-quit')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(dispose).toHaveBeenCalledTimes(1)
 		expect(deck.phase).toBe('quit')
@@ -423,7 +426,10 @@ describe('DeckApp — app lifecycle: bound process-level even under ownsWindows:
 				rt.add(dispose)
 			}) as unknown as RuntimeBackend['assemble'],
 		})
-		const deck = new DeckApp(lifecycleConfig({ quitOnAllWindowsClosed: true }), { electron, backend })
+		const deck = new DeckApp(lifecycleConfig({ quitOnAllWindowsClosed: true }), {
+			electron,
+			backend,
+		})
 		await deck.start()
 
 		// Process-level binding is NOT gated by assembleElectron's ownsWindows
@@ -438,7 +444,7 @@ describe('DeckApp — app lifecycle: bound process-level even under ownsWindows:
 		// will-quit → framework teardown (registry disposable fires) — driven by
 		// the emit alone, no explicit deck.shutdown() to mask a missing binding.
 		app._emit('will-quit')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(dispose).toHaveBeenCalledTimes(1)
 		expect(deck.phase).toBe('quit')
 	})
@@ -451,14 +457,12 @@ describe('DeckApp — app lifecycle: re-entrant quit guard (quitInitiated)', () 
 		const app = createFakeApp()
 		const electron = createFakeElectron(app)
 		const dispose = vi.fn()
-		const deck = new DeckApp(
-			{
-				setup: (rt) => {
-					rt.add(dispose)
-				},
-			},
-			{ electron },
-		)
+		const backend = makeBackend({
+			assemble: vi.fn(async (rt) => {
+				rt.add(dispose)
+			}) as unknown as RuntimeBackend['assemble'],
+		})
+		const deck = new DeckApp({}, { electron, backend })
 		await deck.start()
 
 		// IMPORTANT: we do NOT call app.quit() ourselves to provoke will-quit —
@@ -467,7 +471,7 @@ describe('DeckApp — app lifecycle: re-entrant quit guard (quitInitiated)', () 
 		// the quit sequence. The guard (quitInitiated set in the will-quit handler)
 		// must suppress that re-entrant call.
 		app._emit('will-quit')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// Teardown ran…
 		expect(dispose).toHaveBeenCalledTimes(1)
@@ -489,10 +493,10 @@ describe('DeckApp — app lifecycle: re-entrant quit guard (quitInitiated)', () 
 		// Drive the real close→destroy→closed chain: close decides 'close' →
 		// main.destroy() → we emit 'closed' to mirror Electron firing it.
 		mainWin._emit('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(mainWin.destroy).toHaveBeenCalled()
 		mainWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(deck.phase).toBe('quit')
 		// quitInitiated stayed false (not a will-quit source) → framework owns the

@@ -1,5 +1,5 @@
 /* global clearTimeout, process, setTimeout */
-// Electron utility-process half of electron-main-worker-crossover.mjs.
+// Electron utility-process half of electron-main-worker-crossover.js.
 // It deliberately owns only the pure reconcile state: token authorization and
 // ViewHandle application stay in the Electron main process.
 export function messageFrom(args) {
