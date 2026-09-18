@@ -62,10 +62,72 @@ jobs:
           DECK_E2E_OUTPUT_DIR: ${{ runner.temp }}/dockable-e2e
           DECK_E2E_NO_SANDBOX: '1'
 
+      # The peer range promises the oldest Electron below; run the same e2e on
+      # it so the floor stays true. The version is read from package.json.
+      - name: Check dockable interactions on the oldest supported Electron
+        run: |
+          floor=$(node -p "require('./package.json').peerDependencies.electron.replace(/^>=/, '')")
+          npm install --prefix "$RUNNER_TEMP/electron-floor" --no-save --no-package-lock "electron@$floor"
+          ELECTRON_OVERRIDE_DIST_PATH="$RUNNER_TEMP/electron-floor/node_modules/electron/dist" \
+            xvfb-run --auto-servernum pnpm run check:e2e
+        env:
+          DECK_E2E_OUTPUT_DIR: ${{ runner.temp }}/dockable-e2e-floor
+          DECK_E2E_NO_SANDBOX: '1'
+
       - name: Upload dockable interaction diagnostics
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: dockable-e2e-diagnostics
+          path: |
+            ${{ runner.temp }}/dockable-e2e
+            ${{ runner.temp }}/dockable-e2e-floor
+          if-no-files-found: ignore
+
+  # Native view composition is where the platforms differ: child view stacking,
+  # WebContentsView teardown and window activation all have their own behaviour
+  # per OS. The rest of the gates are platform-independent, so only the
+  # interaction e2e repeats here. Linux is covered by `verify` above, which also
+  # runs it on the oldest supported Electron.
+  e2e-platforms:
+    name: e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # One platform failing should not hide the other platform's result.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # The demo main process imports dist/, so the build has to come first.
+      - name: Build
+        run: pnpm run build
+
+      - name: Check dockable interactions
+        run: pnpm run check:e2e
+        env:
+          DECK_E2E_OUTPUT_DIR: ${{ runner.temp }}/dockable-e2e
+
+      - name: Upload dockable interaction diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dockable-e2e-diagnostics-${{ matrix.os }}
           path: ${{ runner.temp }}/dockable-e2e
           if-no-files-found: ignore
