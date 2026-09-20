@@ -546,42 +546,62 @@ async function driveTabDrag(mainWin, { panelId, targetGroupId, targetPanelId, zo
 			clickCount: type === 'mouseMove' ? 0 : 1,
 			modifiers,
 		})
-	send('mouseDown', points.start.x, points.start.y)
-	await sleep(40)
-	// This real pointer move crosses Chromium's drag threshold, running the tab's
-	// onDragStart handler and proving the source-side browser input path.
-	const dx = Math.sign(points.end.x - points.start.x) || 1
-	send('mouseMove', points.start.x + dx * 16, points.start.y, ['leftbuttondown'])
-	await sleep(100)
-	const sourceEvents = await js('window.__dockE2EDragEvents')
-	if (!sourceEvents.some((event) => event.type === 'dragstart' && event.panelData === panelId)) {
-		return { ...points, events: sourceEvents }
-	}
-
-	// Electron's sendInputEvent starts an HTML5 drag but does not reliably route
-	// subsequent drag-over targets in an automated desktop session. Continue at
-	// Chromium's browser-input layer with the same deck payload and real DOM
-	// geometry. This is deliberately NOT a renderer dispatchEvent or DockView seam.
+	// Once a drag starts, Chromium hands it to the platform's drag loop, which an
+	// unattended session cannot run: the drag dies before any drop target sees it.
+	// Input.setInterceptDrags keeps the drag inside the browser and reports its
+	// payload as Input.dragIntercepted instead. The pointer gesture below stays
+	// real either way — the protocol has no dragstart to dispatch, so this is the
+	// only way to start one without depending on the desktop session.
 	const dbg = mainWin.webContents.debugger
 	let attachedHere = false
+	let intercepted = null
+	const onDragIntercepted = (_event, method, params) => {
+		if (method === 'Input.dragIntercepted') intercepted = params.data
+	}
 	try {
 		if (!dbg.isAttached()) {
 			dbg.attach('1.3')
 			attachedHere = true
 		}
-		const data = {
+		dbg.on('message', onDragIntercepted)
+		await dbg.sendCommand('Input.setInterceptDrags', { enabled: true })
+
+		send('mouseDown', points.start.x, points.start.y)
+		await sleep(40)
+		// This real pointer move crosses Chromium's drag threshold, running the tab's
+		// onDragStart handler and proving the source-side browser input path.
+		const dx = Math.sign(points.end.x - points.start.x) || 1
+		send('mouseMove', points.start.x + dx * 16, points.start.y, ['leftbuttondown'])
+		await sleep(100)
+		const sourceEvents = await js('window.__dockE2EDragEvents')
+		if (!sourceEvents.some((event) => event.type === 'dragstart' && event.panelData === panelId)) {
+			return { ...points, events: sourceEvents }
+		}
+
+		// The intercepted payload is what the page itself put on the DataTransfer,
+		// so carrying it into the drop proves DockView filled the deck payload. The
+		// literal below is only a fallback for a browser that started the drag
+		// without reporting it.
+		const data = intercepted ?? {
 			items: [
 				{ mimeType: 'application/x-deck-panel', data: panelId },
 				{ mimeType: 'text/plain', data: panelId },
 			],
 			dragOperationsMask: 1,
 		}
+		log('[e2e] drag payload', intercepted ? 'intercepted' : 'synthesized', JSON.stringify(data.items))
 		for (const type of ['dragEnter', 'dragOver', 'drop']) {
 			await dbg.sendCommand('Input.dispatchDragEvent', { type, x: points.end.x, y: points.end.y, data })
 			await sleep(40)
 		}
 	} finally {
+		dbg.removeListener('message', onDragIntercepted)
+		// Leaving interception on would break every later real drag in this window.
+		try {
+			await dbg.sendCommand('Input.setInterceptDrags', { enabled: false })
+		} catch {}
 		if (attachedHere) dbg.detach()
+		// Also releases the button when the drag never started and this returned early.
 		send('mouseUp', points.end.x, points.end.y)
 	}
 	await sleep(100)
