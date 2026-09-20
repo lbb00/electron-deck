@@ -114,6 +114,9 @@ ipcMain.on('demo:composite-result', (_e, reqId, dataUrl) => {
 
 const placedBlocks = [] // { handle, label, zone }
 let rejectedOpenProjects = 0
+// firstPlacementPoll (below) runs at module scope, before assemble() has a
+// mainWin to hand it — assemble() fills this in as soon as it has one.
+let mainWinRef = null
 
 // Electron reports ProcessMetric.memory sizes in KiB. Its CPU percentage is an
 // average over the interval since the previous getAppMetrics() call; the first
@@ -176,20 +179,20 @@ async function captureE2EMetrics(mainWin, label) {
 
 // 5ms poll for the native preview view's first non-zero-size bounds — the
 // last of the four [startup] cold-start points (see maybeEmitStartupLine).
+// Reads the ACTUAL attached view via previewBounds(), not the requested
+// placement, so this timestamp means "the view really has pixels" rather
+// than "someone asked for a placement".
 const firstPlacementPoll = setInterval(() => {
 	if (startupTimes.firstPlacement !== null) {
 		clearInterval(firstPlacementPoll)
 		return
 	}
-	for (const blk of placedBlocks) {
-		if (blk.label !== 'PREVIEW' || blk.handle.webContents.isDestroyed()) continue
-		const b = blk.handle.bounds()
-		if (b && b.width > 0 && b.height > 0) {
-			startupTimes.firstPlacement = since()
-			maybeEmitStartupLine()
-			clearInterval(firstPlacementPoll)
-			break
-		}
+	if (!mainWinRef) return
+	const { attached, bounds } = previewBounds(mainWinRef)
+	if (attached && bounds && bounds.width > 0 && bounds.height > 0) {
+		startupTimes.firstPlacement = since()
+		maybeEmitStartupLine()
+		clearInterval(firstPlacementPoll)
 	}
 }, 5)
 
@@ -212,12 +215,18 @@ async function captureRetry(capturer, label, tries = 5) {
 async function shot(win, name) {
 	try {
 		const hostImg = await captureRetry(() => win.webContents.capturePage(), 'host')
+		// Raw, uncomposited proof: exactly what capturePage() sees on the window
+		// itself, with none of the manual compositing math below applied. The
+		// composite image below trusts attachedBounds() to place each block's
+		// screenshot — if that's ever wrong, this raw shot is the only artifact
+		// that would still show it.
+		await writeFile(join(SHOTS, name.replace(/\.png$/, '-raw.png')), hostImg.toPNG())
 		const ordered = [...placedBlocks].sort((a, b) => a.zone - b.zone)
 		const blocks = []
 		for (const blk of ordered) {
 			if (blk.handle.webContents.isDestroyed()) continue
-			const b = blk.handle.bounds()
-			if (!b || b.width === 0 || b.height === 0) continue
+			const { attached, bounds: b } = attachedBounds(win, blk)
+			if (!attached || !b || b.width === 0 || b.height === 0) continue
 			const png = (await captureRetry(() => blk.handle.capturePage(), blk.label)).toDataURL()
 			blocks.push({ png, x: b.x, y: b.y, width: b.width, height: b.height, label: blk.label })
 		}
@@ -295,6 +304,7 @@ const { ready } = startElectronDeck({
 				return
 			}
 			const mainWin = main.window
+			mainWinRef = mainWin
 
 			mainWin.webContents.on('preload-error', (_e, path, err) => {
 				log('[preload-error]', path, String(err))
@@ -427,14 +437,28 @@ function enc(color, label) {
 	return encodeURIComponent(`${color}|${label}`)
 }
 
-function previewBounds() {
-	for (const blk of placedBlocks) {
-		if (blk.label !== 'PREVIEW') continue
-		if (blk.handle.webContents.isDestroyed()) return null
-		const b = blk.handle.bounds()
-		return b ? { x: b.x, width: b.width } : null
-	}
-	return null
+// blk.handle.bounds() only echoes the LAST bounds view-handle.ts was asked to
+// apply (view-handle.ts:401/455-458) — it never reads the native view back, so
+// it proves nothing if setBounds silently failed, the view was never mounted,
+// or DPI/placement math is wrong. This instead asks the window what it
+// actually hosts: walk mainWin.contentView.children (flat — every view this
+// demo places is a direct child, per compositor.ts's addChildView) for the one
+// whose webContents.id matches the handle's, and read ITS getBounds(). A
+// missing child (never attached to this window) is a different failure mode
+// from "attached but the rect is wrong", so both are reported, not collapsed
+// into one null.
+function attachedBounds(mainWin, blk) {
+	if (!blk || blk.handle.webContents.isDestroyed()) return { attached: false, bounds: null }
+	const wantedId = blk.handle.webContents.id
+	const child = mainWin.contentView.children.find((c) => c.webContents?.id === wantedId)
+	if (!child) return { attached: false, bounds: null }
+	const b = child.getBounds()
+	return { attached: true, bounds: { x: b.x, y: b.y, width: b.width, height: b.height } }
+}
+
+function previewBounds(mainWin) {
+	const blk = placedBlocks.find((candidate) => candidate.label === 'PREVIEW')
+	return attachedBounds(mainWin, blk)
 }
 
 // ── shared pointer-drag driver (real sendInputEvent drag on the split resize
@@ -579,17 +603,14 @@ async function driveTabDrag(mainWin, { panelId, targetGroupId, targetPanelId, zo
 		}
 
 		// The intercepted payload is what the page itself put on the DataTransfer,
-		// so carrying it into the drop proves DockView filled the deck payload. The
-		// literal below is only a fallback for a browser that started the drag
-		// without reporting it.
-		const data = intercepted ?? {
-			items: [
-				{ mimeType: 'application/x-deck-panel', data: panelId },
-				{ mimeType: 'text/plain', data: panelId },
-			],
-			dragOperationsMask: 1,
-		}
-		log('[e2e] drag payload', intercepted ? 'intercepted' : 'synthesized', JSON.stringify(data.items))
+		// so carrying it into the drop proves DockView filled the deck payload. A
+		// missing payload means the browser started the drag without reporting it,
+		// which is a real failure of the interception path this drag depends on —
+		// silently handing the test's own guess of the payload to the drop would
+		// prove nothing about DockView, so this aborts instead of synthesizing one.
+		assertE2E(!!intercepted, 'drag payload intercepted', JSON.stringify({ panelId, sourceEvents }))
+		const data = intercepted
+		log('[e2e] drag payload intercepted', JSON.stringify(data.items))
 		for (const type of ['dragEnter', 'dragOver', 'drop']) {
 			await dbg.sendCommand('Input.dispatchDragEvent', { type, x: points.end.x, y: points.end.y, data })
 			await sleep(40)
@@ -643,14 +664,14 @@ async function captureProfiles(mainWin) {
 	await sleep(200)
 
 	// ── scenario B: real pointer drag on a resize handle (driveSplitDrag) ─────
-	const baseline = previewBounds()
+	const baseline = previewBounds(mainWin).bounds
 	log('[profile] scenario B: previewBounds before drag:', JSON.stringify(baseline))
 	let peak = null
 	await dbg.sendCommand('Profiler.start')
 	const dragResult = await driveSplitDrag(mainWin, {
 		rounds: 40,
 		onPeak: () => {
-			peak = previewBounds()
+			peak = previewBounds(mainWin).bounds
 			log('[profile] scenario B: previewBounds at peak displacement (round 0, +20px from start):', JSON.stringify(peak))
 		},
 	})
@@ -660,7 +681,7 @@ async function captureProfiles(mainWin) {
 	} else {
 		log('[profile] scenario B: pointer drag on resize handle at', JSON.stringify(dragResult.handleRect), '— done')
 		await sleep(50)
-		const after = previewBounds()
+		const after = previewBounds(mainWin).bounds
 		log('[profile] scenario B: previewBounds after mouseUp (round-tripped back to start x):', JSON.stringify(after))
 		const moved = !!(baseline && peak && baseline.width !== peak.width)
 		log(
@@ -732,10 +753,10 @@ async function measureDragLag(mainWin) {
 
 	// Main side: poll previewBounds() at 2ms, recording only actual changes.
 	const nativeSamples = []
-	let lastB = previewBounds()
+	let lastB = previewBounds(mainWin).bounds
 	if (lastB) nativeSamples.push({ t: Date.now(), width: lastB.width, x: lastB.x })
 	const pollTimer = setInterval(() => {
-		const b = previewBounds()
+		const b = previewBounds(mainWin).bounds
 		if (!b) return
 		if (!lastB || b.width !== lastB.width || b.x !== lastB.x) {
 			nativeSamples.push({ t: Date.now(), width: b.width, x: b.x })
@@ -836,10 +857,21 @@ async function waitForDeckState(mainWin, label, timeoutMs = 8_000) {
 }
 
 function nativeFollowCheck(mainWin, state, label) {
-	const bounds = previewBounds()
-	const valid = !!bounds && bounds.width > 0 && state.slot.width > 0 && state.slot.height > 0
-	const follows = valid && Math.abs(bounds.width - state.slot.width) <= 8
-	assertE2E(valid, `${label} native preview bounds`, JSON.stringify({ state, bounds }))
+	const { attached, bounds } = previewBounds(mainWin)
+	log(`[e2e] ${label} native bounds: slot=${JSON.stringify(state.slot)} view=${JSON.stringify(bounds)} attached=${attached}`)
+	const valid = attached && !!bounds && bounds.width > 0 && state.slot.width > 0 && state.slot.height > 0
+	// state.slot is document.getBoundingClientRect() (viewport CSS px); bounds is
+	// the native view's mainWin.contentView getBounds() (window contentView px).
+	// Measured identical across every check in this demo (no window-chrome or
+	// DPI offset in this frameless, devicePixelRatio=1 setup — see report), so
+	// all four dimensions compare directly against the slot with the same 8px
+	// tolerance the width-only check used (empirically set — see comment below).
+	const follows = valid
+		&& Math.abs(bounds.x - state.slot.x) <= 8
+		&& Math.abs(bounds.y - state.slot.y) <= 8
+		&& Math.abs(bounds.width - state.slot.width) <= 8
+		&& Math.abs(bounds.height - state.slot.height) <= 8
+	assertE2E(valid, `${label} native preview bounds`, JSON.stringify({ state, bounds, attached }))
 	assertE2E(follows, `${label} native preview follows slot`, JSON.stringify({ slot: state.slot, bounds }))
 }
 
@@ -864,7 +896,7 @@ async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000) {
 	while (Date.now() - started < timeoutMs) {
 		try {
 			const state = await waitForDeckState(mainWin, `${label} slot`, 250)
-			const bounds = previewBounds()
+			const { bounds } = previewBounds(mainWin)
 			samples.push({ at: Date.now() - started, slot: state.slot.width, view: bounds ? bounds.width : null })
 			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8) {
 				log(`[e2e] ${label} native follow settled in ${Date.now() - started}ms`)
@@ -1174,11 +1206,11 @@ async function runVerification(mainWin) {
 	log('── PROOF 2: native slot following (renderer-driven resize) ──')
 	await js(`window.__deck.setHostWidth(880)`)
 	await sleep(700)
-	const before = previewBounds()
+	const before = previewBounds(mainWin).bounds
 	log('PROOF2: native preview bounds @hostWidth=880 :', JSON.stringify(before))
 	await js(`window.__deck.setHostWidth(520)`)
 	await sleep(700)
-	const after = previewBounds()
+	const after = previewBounds(mainWin).bounds
 	log('PROOF2: native preview bounds @hostWidth=520 :', JSON.stringify(after))
 	await shot(mainWin, '3-after-resize.png')
 
