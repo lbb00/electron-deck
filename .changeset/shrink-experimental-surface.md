@@ -15,6 +15,7 @@
 - `DeckConfig.setup` — 下线。
 - `runtime.grants`、`runtime.layout.command`、`Grant.targetScope` — 全部下线。`electron-deck/host` 子路径下 `capability.ts` 的通用能力基础设施本身没动，只是 `deck-app.ts` 不再自带这层便捷包装和特权命令路由。
 - `runtime.windows.get()` — 下线；`runtime.windows.all()` 的返回类型从松散类型收紧为 `DeckWindow[]`。
+- `window-created` 事件的 `role` 从 `'main' | 'toolbar' | 'host'` 收窄为 `'main' | 'host'`（toolbar 子系统下线的连带）。监听里和 `'toolbar'` 比较的分支会报「比较无意义」，穷举 switch 也要去掉那一路。
 
 等价替代：
 

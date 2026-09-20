@@ -273,13 +273,13 @@ rootScope.own(() => appLevelRegistry.disposeAll()) // 最先 own ⇒ 最后跑�
 ```
 
 - `compositor-and-teardown.md` 规定**单窗口内**的序（anchor dispose → detach → wire dispose → win.destroy）由 windowScope 的 own LIFO 编码。本文补的是**跨窗口 + app 级**的序：rootScope 的「children（所有 windowScope）先于 resources（app registry）」复刻「窗口先于 registry」，且每窗内部还有单窗内序。
-- `beforeClose` 必须在**任何**拆除前跑（host 的「我要存盘」钩子），所以它不进 rootScope.own（那是 LIFO 拆除项），而是在 `await rootScope.close()` **之前** await：`doShutdown = await beforeClose(timeout) → await rootScope.close() → app.quit()`。
+- `backend.onShutdown()` 必须在**任何**拆除前跑（host 的「我要存盘」钩子），所以它不进 rootScope.own（那是 LIFO 拆除项），而是在 `await rootScope.close()` **之前** await：`doShutdown = await backend.onShutdown() → await rootScope.close() → app.quit()`。
 
-> **`beforeClose` 的位置细节**：beforeClose 必须在**任何**拆除前跑（它是 host 的
+> **`onShutdown` 的位置细节**：它必须在**任何**拆除前跑（它是 host 的
 > 「我要存盘」钩子）。所以它不进 rootScope.own（那是 LIFO 拆除项），而是
 > `rootScope.close()` 的**调用方**在 `await rootScope.close()` **之前** await 它。
-> 即 `doShutdown = await beforeClose(timeout) → await rootScope.close() → app.quit()`。
-> 这保持 deck-app.ts 的「beforeClose 先于一切」语义。
+> 即 `doShutdown = await backend.onShutdown() → await rootScope.close() → app.quit()`。
+> 框架对这个 await **没有超时**，需要限时的 host 自己在实现里用 `Promise.race`。
 
 ### 6.2 quit 与 will-quit 再入（保留现有防护）
 

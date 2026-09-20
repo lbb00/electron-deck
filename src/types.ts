@@ -515,10 +515,11 @@ export interface RuntimeBackend {
 	onSecondInstance?(): void
 	/**
 	 * Deterministic shutdown hook. AWAITED exactly ONCE during `app.shutdown()`'s
-	 * cleanup, consistently with `config.lifecycle.beforeClose` — so a backend no
-	 * longer hand-rolls `app.once('before-quit', ...)`. Best-effort: a throw/reject
-	 * is logged and does NOT abort the rest of shutdown. Fires regardless of
-	 * `ownsWindows`.
+	 * cleanup, BEFORE any scope teardown — so a backend no longer hand-rolls
+	 * `app.once('before-quit', ...)`. There is NO timeout: shutdown waits as long
+	 * as this takes, so a backend that needs one must impose it itself.
+	 * Best-effort otherwise: a throw/reject is logged and does NOT abort the rest
+	 * of shutdown. Fires regardless of `ownsWindows`.
 	 */
 	onShutdown?(): void | Promise<void>
 }
