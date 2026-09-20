@@ -4,8 +4,8 @@
  * Real Electron-main crossover benchmark for the per-frame layout path.
  *
  * It compares the production `dist/layout/index.js` path in three placements:
- * main (cleanSnapshot -> reconcile -> dispatchOps), node:worker_threads, and
- * Electron utilityProcess. Authorization and dispatchOps' ViewHandle sink are
+ * main (authorizeSnapshot -> reconcile -> applyReconciledPlacements), node:worker_threads, and
+ * Electron utilityProcess. Authorization and applyReconciledPlacements' ViewHandle sink are
  * always executed in main; helpers receive an already-authorized CleanSnapshot
  * and execute only reconcile. No BrowserWindow is created.
  *
@@ -14,7 +14,7 @@
  *   DECK_CROSSOVER_OUTPUT=/tmp/crossover.json electron --js-flags=--expose-gc bench/electron-main-worker-crossover.js
  *
  * This models the real main-thread security/apply boundary but not native
- * WebContentsView work: `dispatchOps` is real production code and its sink is
+ * WebContentsView work: `applyReconciledPlacements` is real production code and its sink is
  * an in-main no-op ViewHandle. Helper loss is also not production-equivalent:
  * its reconcile state would need a replay/recovery protocol before adoption.
  */
@@ -87,7 +87,7 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 		const layoutEntry = process.env.DIST
 			? pathToFileURL(resolve(process.env.DIST, 'index.js')).href
 			: new URL('../dist/layout/index.js', import.meta.url).href
-		const { cleanSnapshot, reconcile, createInitialState, dispatchOps } = await import(layoutEntry)
+		const { authorizeSnapshot, reconcile, createInitialState, applyReconciledPlacements } = await import(layoutEntry)
 		const viewCounts = [8, 64, 256]
 		const scenarios = ['steady', 'moving']
 		const frames = numberEnv('DECK_CROSSOVER_FRAMES', 600, 40, 20000)
@@ -110,7 +110,7 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 		const expectedFor = inputs => {
 			let state = createInitialState()
 			return inputs.map(raw => {
-				const clean = cleanSnapshot(raw, auth)
+				const clean = authorizeSnapshot(raw, auth)
 				const result = reconcile(state, clean)
 				state = result.state
 				const touched = new Set(result.ops.filter(op => op.kind !== 'reorder').map(op => op.viewId))
@@ -163,7 +163,7 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 			return { kind: 'utility_process', pid: child.pid, request, close: async () => { const exited = waitForExit(child, requestTimeoutMs, 'utility_process'); child.kill(); await exited } }
 		}
 		const warm = async (transport, inputs) => {
-			for (let id = 0; id < inputs.length; id++) await transport.request({ type: 'reconcile', id: `warm-${id}`, snapshot: cleanSnapshot(inputs[id], auth) })
+			for (let id = 0; id < inputs.length; id++) await transport.request({ type: 'reconcile', id: `warm-${id}`, snapshot: authorizeSnapshot(inputs[id], auth) })
 			await transport.request({ type: 'reset' })
 		}
 		const verifyOutcomes = (outcomes, expected, label) => {
@@ -178,10 +178,10 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 			const activeStarted = nowNs()
 			for (let id = 0; id < inputs.length; id++) {
 				const started = nowNs()
-				const clean = cleanSnapshot(inputs[id], auth)
+				const clean = authorizeSnapshot(inputs[id], auth)
 				const result = reconcile(state, clean)
 				state = result.state
-				dispatchOps(result.ops, state, applyRecorder.resolveApply)
+				applyReconciledPlacements(result.ops, state, applyRecorder.resolveApply)
 				samples.push(msSince(started))
 				outcomes.push({ id, state, ops: result.ops })
 			}
@@ -200,9 +200,9 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 				let queuePeak = 0
 				for (let id = 0; id < inputs.length; id++) {
 					const started = nowNs()
-					const snapshot = cleanSnapshot(inputs[id], auth)
+					const snapshot = authorizeSnapshot(inputs[id], auth)
 					const pending = transport.request({ type: 'reconcile', id, snapshot }).then(result => {
-						dispatchOps(result.ops, result.state, applyRecorder.resolveApply)
+						applyReconciledPlacements(result.ops, result.state, applyRecorder.resolveApply)
 					return { id, state: result.state, ops: result.ops, elapsedMs: msSince(started) }
 					})
 					queue.push(pending); queuePeak = Math.max(queuePeak, queue.length)
@@ -222,7 +222,7 @@ if (!isMainThread && workerData?.role === 'reconcile-worker') {
 			status: 'running',
 			outputPath,
 			environment: { electron: process.versions.electron, node: process.versions.node, v8: process.versions.v8, platform: process.platform, arch: process.arch },
-			method: { productionLayoutEntry: layoutEntry, frames, warmupFrames, trials, burst, requestTimeoutMs, mainBoundary: 'cleanSnapshot authorization + dispatchOps/ViewHandle sink', helperBoundary: 'reconcile only', helperResult: 'This is the naive cut imposed by the current dispatchOps API: every reply structured-clones the complete ReconcilerState Map plus ops. It is an upper bound for this implementation, not a claim about compact/replay-aware worker designs.', nativeViewBoundary: 'no WebContentsView; production dispatchOps uses a no-op ViewHandle sink', isolation: 'Every worker_threads and utility_process trial starts a fresh helper process/thread. Main is the Electron measurement host; repeat launcher processes for full main-process isolation.', warmup: 'Each off-thread helper runs warmupFrames then resets. Each main/main-aa placement runs the same number of unrecorded frames from an equally empty apply-sink cache.', aaNoise: 'The main placement runs twice per scenario/trial (main-aa and main); their distribution is retained as an A/A noise control. Strategy order rotates by trial.', comparison: 'Only queueLimit=1 cases are strict serial round-trip comparisons. queueLimit=burst cases are separately labelled backlog experiments and must not be compared as latency/throughput alternatives.', memorySampling: 'Helper process.memoryUsage() is requested once after the timed frames, so it is excluded from each round-trip sample.', rss: 'rss is an instantaneous Electron-main-process snapshot before/after each placement, not post-GC retained memory. utility_process reports its own final process.memoryUsage() separately and is already closed before after is sampled; it is not included in main RSS. worker_threads shares main RSS.' },
+			method: { productionLayoutEntry: layoutEntry, frames, warmupFrames, trials, burst, requestTimeoutMs, mainBoundary: 'authorizeSnapshot authorization + applyReconciledPlacements/ViewHandle sink', helperBoundary: 'reconcile only', helperResult: 'This is the naive cut imposed by the current applyReconciledPlacements API: every reply structured-clones the complete ReconcilerState Map plus ops. It is an upper bound for this implementation, not a claim about compact/replay-aware worker designs.', nativeViewBoundary: 'no WebContentsView; production applyReconciledPlacements uses a no-op ViewHandle sink', isolation: 'Every worker_threads and utility_process trial starts a fresh helper process/thread. Main is the Electron measurement host; repeat launcher processes for full main-process isolation.', warmup: 'Each off-thread helper runs warmupFrames then resets. Each main/main-aa placement runs the same number of unrecorded frames from an equally empty apply-sink cache.', aaNoise: 'The main placement runs twice per scenario/trial (main-aa and main); their distribution is retained as an A/A noise control. Strategy order rotates by trial.', comparison: 'Only queueLimit=1 cases are strict serial round-trip comparisons. queueLimit=burst cases are separately labelled backlog experiments and must not be compared as latency/throughput alternatives.', memorySampling: 'Helper process.memoryUsage() is requested once after the timed frames, so it is excluded from each round-trip sample.', rss: 'rss is an instantaneous Electron-main-process snapshot before/after each placement, not post-GC retained memory. utility_process reports its own final process.memoryUsage() separately and is already closed before after is sampled; it is not included in main RSS. worker_threads shares main RSS.' },
 			cases: [],
 			errors: [],
 		}

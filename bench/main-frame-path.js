@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Main-process per-frame path benchmark: cleanSnapshot -> reconcile ->
- * dispatchOps, the loop that runs once per renderer-reported frame while a
+ * Main-process per-frame path benchmark: authorizeSnapshot -> reconcile ->
+ * applyReconciledPlacements, the loop that runs once per renderer-reported frame while a
  * dock layout is live. Two scenarios:
  *   - steady:  bounds unchanged frame-to-frame (the common case — most
  *              frames should produce zero ops).
@@ -30,7 +30,7 @@ const layoutEntry = process.env.DIST
 	? pathToFileURL(join(process.env.DIST, 'index.js')).href
 	: new URL('../dist/layout/index.js', import.meta.url).href
 
-const { cleanSnapshot, reconcile, createInitialState, dispatchOps } = await import(layoutEntry)
+const { authorizeSnapshot, reconcile, createInitialState, applyReconciledPlacements } = await import(layoutEntry)
 
 const N = 8
 const FRAMES = 200000
@@ -50,10 +50,10 @@ const apply = () => () => {}
 
 // warmup + attach
 for (let e = 0; e < 2000; e++) {
-	const c = cleanSnapshot(frame(EP++, 0), auth)
+	const c = authorizeSnapshot(frame(EP++, 0), auth)
 	const r = reconcile(state, c)
 	state = r.state
-	dispatchOps(r.ops, state, apply)
+	applyReconciledPlacements(r.ops, state, apply)
 }
 
 function run(label, jitterFn) {
@@ -62,11 +62,11 @@ function run(label, jitterFn) {
 	const t0 = process.hrtime.bigint()
 	let ops = 0
 	for (let e = 0; e < FRAMES; e++) {
-		const c = cleanSnapshot(frame(EP++, jitterFn(e)), auth)
+		const c = authorizeSnapshot(frame(EP++, jitterFn(e)), auth)
 		const r = reconcile(state, c)
 		state = r.state
 		ops += r.ops.length
-		dispatchOps(r.ops, state, apply)
+		applyReconciledPlacements(r.ops, state, apply)
 	}
 	const ns = Number(process.hrtime.bigint() - t0) / FRAMES
 	const hPreGC = process.memoryUsage().heapUsed

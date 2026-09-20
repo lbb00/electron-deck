@@ -7,7 +7,7 @@ the test suite, or any CI gate. Run by hand when checking whether a change to
 ## What it measures
 
 `main-frame-path.js` drives the loop that runs once per renderer-reported
-frame while a dock layout is live: `cleanSnapshot -> reconcile -> dispatchOps`.
+frame while a dock layout is live: `authorizeSnapshot -> reconcile -> applyReconciledPlacements`.
 Two scenarios:
 
 - **steady** — view bounds unchanged frame-to-frame. The common case; most
