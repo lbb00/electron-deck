@@ -89,6 +89,14 @@ jobs:
   # per OS. The rest of the gates are platform-independent, so only the
   # interaction e2e repeats here. Linux is covered by `verify` above, which also
   # runs it on the oldest supported Electron.
+  #
+  # This runs check:e2e:interactions, not check:e2e: the latter also runs the
+  # wrapper script's own unit tests, which assert POSIX process-group
+  # termination (process.kill on a negative pid, a shell stub holding the group
+  # open) and have no Windows equivalent. Those stay on Linux and macOS in
+  # `verify`. The wrapper's one Windows-specific line — resolving Electron
+  # through require() instead of node_modules/.bin — is exercised here anyway,
+  # because it is the only path that starts Electron on Windows.
   e2e-platforms:
     name: e2e (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -120,7 +128,7 @@ jobs:
         run: pnpm run build
 
       - name: Check dockable interactions
-        run: pnpm run check:e2e
+        run: pnpm run check:e2e:interactions
         env:
           DECK_E2E_OUTPUT_DIR: ${{ runner.temp }}/dockable-e2e
 

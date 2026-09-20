@@ -83,6 +83,7 @@
     "check:bundle-size": "node --test scripts/check-bundle-size.test.js && node scripts/check-bundle-size.js",
     "check:tree-shaking": "node --test scripts/check-tree-shaking.test.js && node scripts/check-tree-shaking.js",
     "check:e2e": "node examples/dockable-demo/bundle.js && node --test scripts/check-dockable-e2e.test.js && node scripts/check-dockable-e2e.js",
+    "check:e2e:interactions": "node examples/dockable-demo/bundle.js && node scripts/check-dockable-e2e.js",
     "test": "node scripts/check-trust-seal.js && node scripts/check-docs-api-sync.js && node scripts/check-browser-purity.js && node scripts/check-file-extensions.js && pnpm run check:banner && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
     "test:dev": "vitest",
     "test:coverage": "vitest run --coverage && vitest run --config vitest.dock-react.config.ts --coverage --coverage.reportsDirectory=./coverage/dock-react",
