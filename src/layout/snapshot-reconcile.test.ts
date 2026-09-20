@@ -202,7 +202,7 @@ describe('applyReconciledPlacements', () => {
     })
 
     const calls: Placement[] = []
-    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: true, bounds: B1 })
@@ -214,7 +214,7 @@ describe('applyReconciledPlacements', () => {
     const { state: s2, ops } = reconcile(s1, { generation: 1, epoch: 1, views: [] })
 
     const calls: Placement[] = []
-    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: false })
@@ -229,7 +229,7 @@ describe('applyReconciledPlacements', () => {
     })
 
     const calls: Placement[] = []
-    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: false })
@@ -252,7 +252,7 @@ describe('applyReconciledPlacements', () => {
     })
 
     const calls: Placement[] = []
-    applyReconciledPlacements(ops, s3, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s3, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: true, bounds: B0 })
@@ -270,7 +270,7 @@ describe('applyReconciledPlacements', () => {
     })
 
     let callCount = 0
-    applyReconciledPlacements(ops, s1, (_id) => (_p: Placement) => { callCount++ })
+    applyReconciledPlacements(ops, s1, (_id) => (_p: Placement) => { callCount++; return true })
 
     // ops: setBounds(v1), attach(v1), setBounds(v2), attach(v2), reorder([v1,v2])
     // touched = {v1, v2}; reorder has no viewId and is skipped → exactly 2 calls.
@@ -295,14 +295,35 @@ describe('applyReconciledPlacements', () => {
     })
 
     const called: string[] = []
-    applyReconciledPlacements(ops, state, (id) => {
-      if (id === 'v1') return (_p: Placement) => { called.push('v1') }
+    const rejected = applyReconciledPlacements(ops, state, (id) => {
+      if (id === 'v1') return (_p: Placement) => { called.push('v1'); return true }
       if (id === 'v2') return (_p: Placement) => { throw new Error('boom') }
-      if (id === 'v3') return (_p: Placement) => { called.push('v3') }
+      if (id === 'v3') return (_p: Placement) => { called.push('v3'); return true }
       return null
     })
 
     expect(called).toContain('v1')
     expect(called).toContain('v3')
+    // A throwing sink counts as rejected, same as an explicit `false` return.
+    expect(rejected).toEqual(new Set(['v2']))
+  })
+
+  it('a sink returning false is reported rejected; one returning true is not', () => {
+    const s0 = createInitialState()
+    const { state, ops } = reconcile(s0, {
+      generation: 1, epoch: 0,
+      views: [
+        mkView('v1', { visible: true, bounds: B0 }),
+        mkView('v2', { visible: true, bounds: B0 }),
+      ],
+    })
+
+    const rejected = applyReconciledPlacements(ops, state, (id) => {
+      if (id === 'v1') return (_p: Placement) => true
+      if (id === 'v2') return (_p: Placement) => false
+      return null
+    })
+
+    expect(rejected).toEqual(new Set(['v2']))
   })
 })

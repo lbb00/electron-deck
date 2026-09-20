@@ -1,5 +1,5 @@
 /**
- * Contract tests pinning two related bugs in the placement-frame path:
+ * Contract tests pinning three related bugs in the placement-frame path:
  *
  *   1. `applyPlacementInternal` (deck-app.ts) called `inner.applyPlacement(p)`
  *      unconditionally and then ALWAYS ran the keepAlive LRU bookkeeping — even
@@ -12,6 +12,13 @@
  *      public `applyPlacement()` on an anchor-placed, already-disposed handle
  *      still hit the anchor-placed guard and threw instead of silently
  *      dropping the frame like every other post-dispose call does.
+ *   3. `handleSnapshot` committed the reconciler's ledger (`reconcileStates.set`)
+ *      BEFORE dispatching to the per-view sink. Since the sink can drop a frame
+ *      (mid-`moveTo`, already-disposed) or throw, and reconcile is
+ *      level-triggered (only re-emits an op when desired/actual diverge), a
+ *      dropped/thrown frame recorded as "applied" is a permanently stuck view:
+ *      no future snapshot ever re-diffs it, because the ledger already believes
+ *      it matches.
  *
  * Fakes are copied (minimal) from deck-app.move.test.ts (moveTo + slot-token
  * plumbing) and deck-app.keepalive.test.ts (the `keepAlive` option).
@@ -589,6 +596,151 @@ describe('DeckViewHandle.dispose — inner teardown throws', () => {
 		)
 		expect(conflictWarned).toBe(false)
 		warnSpy.mockRestore()
+
+		await app.shutdown()
+	})
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (g) A frame the inner sink DROPS mid-`moveTo` must not be recorded as
+// "applied" in the reconciler's ledger — reconcile is level-triggered, so a
+// ledger that believes a dropped frame took effect never re-diffs it and the
+// native view sticks at its pre-drop bounds forever. Same-window move (dest ===
+// src, only re-anchor) keeps both sends on the SAME control wc, so they hit the
+// SAME per-wc reconciler bucket (`reconcileStates` is keyed by `senderId`, the
+// sending window's wc id — see deck-app.ts:1535) — this is the scenario the
+// fix must retry, not a cross-window one where the bucket itself would differ.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('handleSnapshot — a frame the inner sink drops mid-moveTo is not recorded as applied', () => {
+	it('a later identical frame re-emits the dropped placement once the migration settles', async () => {
+		const { app, electron, ipcMain, winA } = await bootTwoWindows()
+
+		const handle = withView(app.runtime).view({ source: { url: 'data:text/html,x' } })
+		const wcv = lastWcv(electron)
+		handle.placeIn(app.runtime.mainWindow, { zone: 0, anchor: '#a' })
+		const grant1 = lastSlotGrant(winA.webContents)
+		expect(grant1).not.toBeNull()
+
+		const snapshot = getSnapshotHandler(ipcMain)
+
+		// Establish a stable VISIBLE actual state — a level-triggered reconciler
+		// has nothing to diff against an empty actual on the very first frame.
+		await sendSnapshot(
+			snapshot,
+			mainFrameEvent(winA.webContents.id),
+			[
+				{
+					slotToken: grant1!.slotToken,
+					generation: grant1!.generation,
+					placement: VISIBLE({ x: 0, y: 0, width: 5, height: 5 }),
+				},
+			],
+			0,
+		)
+		expect(wcv.setBounds).toHaveBeenCalledWith({ x: 0, y: 0, width: 5, height: 5 })
+
+		// Kick off a same-window re-anchor move but DON'T await yet: the next
+		// microtask tick lands inside the "migrating" window (see the comment
+		// above test (a)).
+		const movePromise = handle.moveTo(app.runtime.mainWindow as unknown as Runtime['mainWindow'], {
+			zone: 1,
+			anchor: '#a2',
+		})
+		await Promise.resolve()
+
+		// A frame declaring NEW bounds lands mid-migration on the still-registered
+		// (not-yet-revoked) pre-move token — `inner.applyPlacement` drops it
+		// (`migrating === true`).
+		const droppedBounds = { x: 10, y: 20, width: 30, height: 40 }
+		await sendSnapshot(
+			snapshot,
+			mainFrameEvent(winA.webContents.id),
+			[
+				{
+					slotToken: grant1!.slotToken,
+					generation: grant1!.generation,
+					placement: VISIBLE(droppedBounds),
+				},
+			],
+			1,
+		)
+
+		await movePromise
+		const grant2 = lastSlotGrant(winA.webContents)
+		expect(grant2).not.toBeNull()
+		expect(grant2!.slotToken).not.toBe(grant1!.slotToken)
+
+		;(wcv.setBounds as ReturnType<typeof vi.fn>).mockClear()
+
+		// Resend the SAME placement the dropped frame carried, now that the
+		// migration has settled — via the fresh post-move token, same sender wc
+		// (same reconciler bucket) as the dropped frame.
+		await sendSnapshot(
+			snapshot,
+			mainFrameEvent(winA.webContents.id),
+			[
+				{
+					slotToken: grant2!.slotToken,
+					generation: grant2!.generation,
+					placement: VISIBLE(droppedBounds),
+				},
+			],
+			2,
+		)
+
+		// A dropped frame must not have been recorded as applied: the reconciler
+		// still believes actual === the pre-drop bounds, so the identical resend
+		// diffs as changed and re-dispatches it.
+		expect(wcv.setBounds).toHaveBeenCalledWith(droppedBounds)
+
+		await app.shutdown()
+	})
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (h) A frame the inner sink THROWS on (e.g. a native `setBounds` failure) must
+// likewise not be recorded as applied — same ledger-commit-order bug as (g),
+// just reached via a throwing sink instead of a boolean drop.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('handleSnapshot — a frame the inner sink throws on is not recorded as applied', () => {
+	it('a later identical frame re-dispatches the placement the throwing sink never actually applied', async () => {
+		const { app, electron, ipcMain, winA } = await bootTwoWindows()
+
+		const handle = withView(app.runtime).view({ source: { url: 'data:text/html,x' } })
+		const wcv = lastWcv(electron)
+		handle.placeIn(app.runtime.mainWindow, { zone: 0, anchor: '#a' })
+		const grant = lastSlotGrant(winA.webContents)
+		expect(grant).not.toBeNull()
+
+		const snapshot = getSnapshotHandler(ipcMain)
+		const bounds = { x: 1, y: 2, width: 3, height: 4 }
+
+		// The native sink throws on this exact call — `inner.applyPlacement` calls
+		// `setBounds` before it mounts/records anything, so the frame never
+		// actually took effect.
+		wcv.setBounds = vi.fn(() => {
+			throw new Error('native setBounds boom')
+		}) as unknown as typeof wcv.setBounds
+
+		await sendSnapshot(
+			snapshot,
+			mainFrameEvent(winA.webContents.id),
+			[{ slotToken: grant!.slotToken, generation: grant!.generation, placement: VISIBLE(bounds) }],
+			0,
+		)
+
+		// Sink recovers; resend the SAME placement at a new epoch.
+		wcv.setBounds = vi.fn() as unknown as typeof wcv.setBounds
+		await sendSnapshot(
+			snapshot,
+			mainFrameEvent(winA.webContents.id),
+			[{ slotToken: grant!.slotToken, generation: grant!.generation, placement: VISIBLE(bounds) }],
+			1,
+		)
+
+		// The throw must not have been recorded as applied: the identical resend
+		// still diffs as changed and re-dispatches it.
+		expect(wcv.setBounds).toHaveBeenCalledWith(bounds)
 
 		await app.shutdown()
 	})

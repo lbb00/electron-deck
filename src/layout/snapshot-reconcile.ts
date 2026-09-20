@@ -137,14 +137,19 @@ export function authorizeSnapshot(raw: unknown, authorize: Authorizer): CleanSna
  * `actual` (not the op itself) means a bare restore still carries its bounds.
  *
  * Each apply runs in its own try/catch: one throwing sink (e.g. a destroyed native
- * view) must not abort the rest of the dispatch.
+ * view) must not abort the rest of the dispatch. The sink reports whether the
+ * frame was ACCEPTED (true) — a drop (false) or a throw both count as rejected.
+ * Returns the set of rejected viewIds so the caller can keep its `state.actual`
+ * ledger honest: reconcile is level-triggered, so a rejected frame recorded as
+ * applied would never be re-diffed and the view would stick at its stale state.
  */
 export function applyReconciledPlacements(
   ops: ViewOp[],
   state: ReconcilerState,
-  resolveApply: (viewId: string) => ((p: Placement) => void) | null,
-): void {
-  if (ops.length === 0) return
+  resolveApply: (viewId: string) => ((p: Placement) => boolean) | null,
+): Set<string> {
+  const rejected = new Set<string>()
+  if (ops.length === 0) return rejected
   const touched = new Set<string>()
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i]!
@@ -152,7 +157,7 @@ export function applyReconciledPlacements(
       touched.add(op.viewId)
     }
   }
-  if (touched.size === 0) return
+  if (touched.size === 0) return rejected
   for (const viewId of touched) {
     const apply = resolveApply(viewId)
     if (!apply) continue
@@ -161,10 +166,14 @@ export function applyReconciledPlacements(
       a && a.attached && a.visible && a.bounds
         ? { visible: true, bounds: a.bounds }
         : { visible: false }
+    let accepted: boolean
     try {
-      apply(placement)
+      accepted = apply(placement)
     } catch (err) {
       console.error(`[electron-deck] applyPlacement for view "${viewId}" threw:`, err)
+      accepted = false
     }
+    if (!accepted) rejected.add(viewId)
   }
+  return rejected
 }

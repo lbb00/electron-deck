@@ -275,7 +275,10 @@ export class DeckApp {
 			authorizedWcId: number
 			zone: number
 			resend: () => void
-			apply: (placement: unknown) => void
+			// Returns whether the frame was ACCEPTED (mirrors ViewHandle.applyPlacement)
+			// so handleSnapshot's reconcile ledger never records a dropped/thrown frame
+			// as applied — see applyPlacementCore below.
+			apply: (placement: unknown) => boolean
 		}
 	>()
 	private slotSeq = 0
@@ -1522,7 +1525,19 @@ export class DeckApp {
 	 *      failure is NOT read as "detach everything".
 	 *   2. RECONCILE the cleaned table against this wc's last-applied actual state
 	 *      → an ordered op list (level-triggered; a lost/spurious frame self-heals).
-	 *   3. DISPATCH the ops onto each view's `applyPlacement` sink.
+	 *   3. DISPATCH the ops onto each view's `applyPlacement` sink, then commit the
+	 *      ledger — NOT before dispatch: reconcile is level-triggered (an op is
+	 *      only emitted when desired/actual diverge), so committing `state` first
+	 *      and dispatching second would record a frame the sink DROPPED (mid-move)
+	 *      or THREW on as "applied". No future snapshot would ever re-diff a view
+	 *      stuck in that lie — it stays at its stale bounds/visibility forever. A
+	 *      rejected viewId's `actual` entry is rolled back to `prev.actual` (or
+	 *      deleted, if `prev` never had one) before the commit, so the identical
+	 *      frame re-diffs as changed next time and gets retried. Only `actual`
+	 *      rolls back: `desired`/`generation`/`lastEpoch` reflect the snapshot this
+	 *      wc genuinely sent and must advance regardless of sink outcome (`desired`
+	 *      is rebuilt from scratch every call anyway; rolling back `lastEpoch`
+	 *      would make a legitimate NEWER frame look stale).
 	 */
 	private handleSnapshot(senderId: number, rawSnapshot: unknown): void {
 		const clean = authorizeSnapshot(rawSnapshot, (slotToken) => {
@@ -1534,18 +1549,31 @@ export class DeckApp {
 
 		const prev = this.reconcileStates.get(senderId) ?? createInitialState()
 		const { state, ops } = reconcile(prev, clean)
-		this.reconcileStates.set(senderId, state)
 
-		if (ops.length === 0) return
-
-		// Resolve a viewId back to its apply sink. Built from ALL of this wc's live
-		// tokens (not just the cleaned snapshot) so a detach op for a view the
-		// renderer dropped can still reach its sink.
-		const applyByViewId = new Map<string, (p: unknown) => void>()
-		for (const entry of this.slotTokens.values()) {
-			if (entry.authorizedWcId === senderId) applyByViewId.set(entry.viewId, entry.apply)
+		if (ops.length > 0) {
+			// Resolve a viewId back to its apply sink. Built from ALL of this wc's live
+			// tokens (not just the cleaned snapshot) so a detach op for a view the
+			// renderer dropped can still reach its sink.
+			const applyByViewId = new Map<string, (p: unknown) => boolean>()
+			for (const entry of this.slotTokens.values()) {
+				if (entry.authorizedWcId === senderId) applyByViewId.set(entry.viewId, entry.apply)
+			}
+			const rejected = applyReconciledPlacements(
+				ops,
+				state,
+				(viewId) => applyByViewId.get(viewId) ?? null,
+			)
+			for (const viewId of rejected) {
+				const prevActual = prev.actual.get(viewId)
+				if (prevActual) {
+					state.actual.set(viewId, prevActual)
+				} else {
+					state.actual.delete(viewId)
+				}
+			}
 		}
-		applyReconciledPlacements(ops, state, (viewId) => applyByViewId.get(viewId) ?? null)
+
+		this.reconcileStates.set(senderId, state)
 	}
 
 	/**
@@ -2144,9 +2172,7 @@ export class DeckApp {
 						authorizedWcId,
 						zone,
 						resend,
-						apply: (p) => {
-							applyPlacementInternal(p as ViewPlacement)
-						},
+						apply: (p) => applyPlacementCore(p as ViewPlacement),
 					})
 					resend()
 				}
@@ -2154,21 +2180,25 @@ export class DeckApp {
 				// bookkeeping. Called from BOTH the page-driven slot-token `apply`
 				// callback above (anchor-placed views) and the public
 				// `hostHandle.applyPlacement` below (host-driven views) — the guard
-				// distinguishing the two lives only at the public entry point.
-				const applyPlacementInternal = (p: ViewPlacement): DeckViewHandle => {
+				// distinguishing the two lives only at the public entry point. Returns
+				// whether the frame was ACCEPTED so the slot-token path can feed it back
+				// into handleSnapshot's reconcile ledger (see applyReconciledPlacements) —
+				// `applyPlacementInternal` below wraps this for callers that only need the
+				// chainable host handle back.
+				const applyPlacementCore = (p: ViewPlacement): boolean => {
 					// Disposed: never reaches `inner` (its own guard would also drop it,
 					// but `disposed` is set BEFORE `inner.dispose()` runs — see below —
 					// so this short-circuit closes the window where a concurrent
 					// applyPlacement could otherwise resurrect the view into the LRU
 					// group after `removeFromKeepAliveGroup` already ran).
-					if (disposed) return hostHandle
+					if (disposed) return false
 					const accepted = inner.applyPlacement(p)
 					// A frame `inner` itself dropped (mid-moveTo migration, or
 					// already-disposed) must NOT be treated as applied — it never
 					// touched the visible/hidden state, so the LRU bookkeeping below
 					// would otherwise mark a still-visible (or already-gone) view
 					// evictable off a frame that never took effect.
-					if (!accepted) return hostHandle
+					if (!accepted) return false
 					// keepAlive「opt-in helper：runtime.view({ keepAlive })」: maintain this group's LRU of HIDDEN views.
 					if (groupKey) {
 						const group = keepAliveGroup()
@@ -2206,6 +2236,12 @@ export class DeckApp {
 							}
 						}
 					}
+					return true
+				}
+				// Chainable wrapper for callers (the public `hostHandle.applyPlacement`
+				// below) that don't need the acceptance boolean, only the handle back.
+				const applyPlacementInternal = (p: ViewPlacement): DeckViewHandle => {
+					applyPlacementCore(p)
 					return hostHandle
 				}
 				// Chainable host-API wrapper: placeIn resolves the target window's
