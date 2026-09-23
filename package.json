@@ -1,6 +1,6 @@
 {
   "name": "electron-deck",
-  "version": "0.2.1",
+  "version": "1.0.0-beta.0",
   "description": "Host-shell framework for Electron: multi-window orchestration, native WebContentsViews that follow the DOM, overlays, popouts and cross-process IPC behind one `electronDeck(config)` entry — plus a browser-only dock layout engine.",
   "keywords": [
     "electron",
