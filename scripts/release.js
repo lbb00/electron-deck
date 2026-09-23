@@ -19,11 +19,13 @@
  */
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { publishTagForVersion } from './release-tag.js'
 
 const pkg = JSON.parse(
 	readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 )
 const { name, version } = pkg
+const tag = publishTagForVersion(version)
 
 /** Runs a command with inherited stdio and returns its exit code. */
 function run(cmd, args) {
@@ -49,6 +51,8 @@ else {
 		'--access',
 		'public',
 		'--provenance',
+		'--tag',
+		tag,
 		'--no-git-checks',
 	])
 	if (code !== 0) process.exit(code)
