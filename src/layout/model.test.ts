@@ -192,6 +192,36 @@ describe('createLayoutModel — re-entrancy + isolation + ownership', () => {
 	})
 })
 
+// notify() snapshots the subscriber set into a cache reused across commits
+// (invalidated on subscribe/unsubscribe) — these pin the observable contract
+// that must hold regardless of that caching.
+describe('createLayoutModel — self-unsubscribe / late-subscribe during notification', () => {
+	it('a subscriber that unsubscribes itself during notification is still called this apply, not next', () => {
+		const m = createLayoutModel(initial())
+		const calls: number[] = []
+		const off = m.subscribe(() => {
+			calls.push(1)
+			off()
+		})
+		m.apply(flip)
+		expect(calls).toEqual([1])
+		m.apply(flip)
+		expect(calls).toEqual([1])
+	})
+
+	it('a subscriber that subscribes a new one during notification: the new one skips this apply, fires next', () => {
+		const m = createLayoutModel(initial())
+		const newSub = vi.fn()
+		m.subscribe(() => {
+			m.subscribe(newSub)
+		})
+		m.apply(flip)
+		expect(newSub).not.toHaveBeenCalled()
+		m.apply(flip)
+		expect(newSub).toHaveBeenCalledTimes(1)
+	})
+})
+
 describe('createLayoutModel — multiple subscribers + unsubscribe', () => {
 	it('all subscribers receive the same snapshot and revision', () => {
 		const m = createLayoutModel(initial())

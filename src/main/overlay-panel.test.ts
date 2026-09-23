@@ -260,6 +260,24 @@ describe('createOverlayPanel', () => {
       expect(setDesired).toHaveBeenCalledTimes(1)
       expect(setDesired).toHaveBeenCalledWith({ x: 9, y: 9, width: 9, height: 9 })
     })
+
+    it('is a no-op after prepare() — a warmed-up view was never shown', () => {
+      const { deps, setDesired } = baseDeps()
+      const panel = createOverlayPanel(deps)
+      panel.prepare()
+      panel.reposition({ x: 9, y: 9, width: 9, height: 9 })
+      expect(setDesired).not.toHaveBeenCalled()
+    })
+
+    it('is a no-op after hide() — the native view survives but is not shown', () => {
+      const { deps, setDesired } = baseDeps()
+      const panel = createOverlayPanel(deps)
+      panel.show(undefined, { x: 0, y: 0, width: 1, height: 1 })
+      panel.hide()
+      setDesired.mockClear()
+      panel.reposition({ x: 9, y: 9, width: 9, height: 9 })
+      expect(setDesired).not.toHaveBeenCalled()
+    })
   })
 
   describe('hide()', () => {

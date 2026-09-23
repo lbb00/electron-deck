@@ -1,10 +1,14 @@
 {
   "name": "electron-deck",
   "version": "0.2.1",
-  "description": "Layout-as-data deck framework for Electron: dockable panels whose native WebContentsViews follow the DOM, behind a single `electronDeck(config)` entry.",
+  "description": "Host-shell framework for Electron: multi-window orchestration, native WebContentsViews that follow the DOM, overlays, popouts and cross-process IPC behind one `electronDeck(config)` entry — plus a browser-only dock layout engine.",
   "keywords": [
     "electron",
+    "host-shell",
+    "framework",
     "webcontentsview",
+    "multi-window",
+    "ipc",
     "dock",
     "layout",
     "react"
@@ -68,23 +72,35 @@
   "scripts": {
     "build": "vite build --config vite.config.ts && vite build --config vite.config.preload-cjs.ts && tsc -p tsconfig.build.json",
     "check-types": "tsc --noEmit",
-    "lint": "eslint . --max-warnings 0",
-    "check:trust-seal": "node scripts/check-trust-seal.mjs",
-    "check:docs-api-sync": "node scripts/check-docs-api-sync.mjs",
-    "check:browser-purity": "node scripts/check-browser-purity.mjs",
-    "test": "node scripts/check-trust-seal.mjs && node scripts/check-docs-api-sync.mjs && node scripts/check-browser-purity.mjs && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
+    "lint": "oxlint . --deny-warnings",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "check:trust-seal": "node scripts/check-trust-seal.js",
+    "check:release-tag": "node --test scripts/release-tag.test.js",
+    "check:docs-api-sync": "node scripts/check-docs-api-sync.js",
+    "check:browser-purity": "node scripts/check-browser-purity.js",
+    "check:file-extensions": "node scripts/check-file-extensions.js",
+    "check:banner": "node --test scripts/check-banner-animation.test.js",
+    "check:bundle-size": "node --test scripts/check-bundle-size.test.js && node scripts/check-bundle-size.js",
+    "check:tree-shaking": "node --test scripts/check-tree-shaking.test.js && node scripts/check-tree-shaking.js",
+    "check:e2e": "node examples/dockable-demo/bundle.js && node --test scripts/check-dockable-e2e.test.js && node scripts/check-dockable-e2e.js",
+    "check:e2e:interactions": "node examples/dockable-demo/bundle.js && node scripts/check-dockable-e2e.js",
+    "test": "node scripts/check-trust-seal.js && node scripts/check-docs-api-sync.js && node scripts/check-browser-purity.js && node scripts/check-file-extensions.js && pnpm run check:release-tag && pnpm run check:banner && vitest run --reporter=default --reporter=json --outputFile.json=test-report.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage && vitest run --config vitest.dock-react.config.ts --reporter=default --reporter=json --outputFile.json=test-report.dock-react.json --coverage.enabled --coverage.reporter=json-summary --coverage.reportsDirectory=coverage/dock-react",
     "test:dev": "vitest",
     "test:coverage": "vitest run --coverage && vitest run --config vitest.dock-react.config.ts --coverage --coverage.reportsDirectory=./coverage/dock-react",
     "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
-    "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.mjs && electron examples/dockable-demo/main.mjs",
-    "prepack": "pnpm run build"
+    "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.js && electron examples/dockable-demo/main.js",
+    "bench": "node --expose-gc bench/main-frame-path.js",
+    "prepack": "pnpm run build && pnpm run check:bundle-size && pnpm run check:tree-shaking",
+    "changeset": "changeset",
+    "release": "pnpm run build && pnpm test && node scripts/release.js"
   },
   "dependencies": {
     "react-resizable-panels": "^4.10.0",
-    "view-anchor": "^0.1.2"
+    "view-anchor": "1.0.0-beta.2"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
+    "@changesets/cli": "^3.0.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^22.15.3",
@@ -94,19 +110,17 @@
     "@vitest/coverage-v8": "^4.1.4",
     "electron": "^43.2.0",
     "esbuild": "^0.28.2",
-    "eslint": "^10.2.1",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-only-warn": "^1.2.1",
     "jsdom": "^29.0.2",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "5.9.2",
-    "typescript-eslint": "^8.58.2",
     "vite": "^8.0.16",
     "vitest": "^4.1.4"
   },
   "peerDependencies": {
-    "electron": "^43.2.0",
+    "electron": ">=30.5.1",
     "react": ">=18"
   },
   "peerDependenciesMeta": {

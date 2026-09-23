@@ -111,22 +111,26 @@ function createFakeElectron(
 				addChildView: vi.fn(),
 				removeChildView: vi.fn(),
 			} as MinimalBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
 				this.webContents.destroyed = true
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -203,7 +207,7 @@ describe('window-seam — backend.mainWindowWebPreferences() (framework-owned wi
 		const OrigBW = electron.BrowserWindow
 		Object.defineProperty(electron, 'BrowserWindow', {
 			value: class extends (OrigBW as unknown as {
-				new(opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+				new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
 			}) {
 				constructor(opts?: MinimalBrowserWindowOptions) {
 					super(opts)
@@ -319,7 +323,7 @@ describe('window-seam — backend.onMainWindowCreated(win, electron)', () => {
 		const OrigBW = electron.BrowserWindow
 		Object.defineProperty(electron, 'BrowserWindow', {
 			value: class extends (OrigBW as unknown as {
-				new(opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+				new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
 			}) {
 				constructor(opts?: MinimalBrowserWindowOptions) {
 					super(opts)
@@ -419,7 +423,7 @@ describe('window-seam — backend.onWindowTrusted(wc) for framework auto-trust',
 		// no framework webview content (no toolbar/windows), so the main
 		// window is the only framework-built+trusted wc: exactly one call.
 		expect(onWindowTrusted).toHaveBeenCalledTimes(1)
-		expect(trusted.some(wc => wc.id === mainWc.id)).toBe(true)
+		expect(trusted.some((wc) => wc.id === mainWc.id)).toBe(true)
 		// The returned Disposable must be wired into the framework registry, so it
 		// actually fires on shutdown rather than leaking the domain trust mirror.
 		expect(dispose).not.toHaveBeenCalled()
@@ -427,26 +431,24 @@ describe('window-seam — backend.onWindowTrusted(wc) for framework auto-trust',
 		expect(dispose).toHaveBeenCalledTimes(1)
 	})
 
-	it('is called for a framework-built declared window webContents too', async () => {
+	it('is called for a framework-built runtime.windows.create() window webContents too', async () => {
 		const electron = createFakeElectron()
 		const seenIds: number[] = []
 		const onWindowTrusted = vi.fn((wc: MinimalWebContents) => {
 			seenIds.push(wc.id)
 			return { dispose: () => {} }
 		})
-		const backend = makeBackend({ onWindowTrusted })
-		const app = new DeckApp(
-			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
-			},
-			{ electron, backend, wireTransport: { ipcMain: makeIpcMain() } },
-		)
+		const backend = makeBackend({
+			onWindowTrusted,
+			assemble: vi.fn(async (runtime: import('../types.js').Runtime) => {
+				runtime.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+			}),
+		})
+		const app = new DeckApp({}, { electron, backend, wireTransport: { ipcMain: makeIpcMain() } })
 		await app.start()
 
-		const declaredWc = (electron.browserWindows[1] as unknown as FakeBrowserWindow).webContents
-		expect(seenIds).toContain(declaredWc.id)
+		const createdWc = (electron.browserWindows[1] as unknown as FakeBrowserWindow).webContents
+		expect(seenIds).toContain(createdWc.id)
 
 		await app.shutdown()
 	})
@@ -521,10 +523,7 @@ describe('window-seam — ownsWindows:true skips framework window build + all se
 				runtime.windows.create({ source: { url: 'http://localhost:5173/extra.html' } })
 			}),
 		})
-		const app = new DeckApp(
-			{},
-			{ electron, backend, wireTransport: { ipcMain: makeIpcMain() } },
-		)
+		const app = new DeckApp({}, { electron, backend, wireTransport: { ipcMain: makeIpcMain() } })
 		await app.start()
 
 		// Exactly one framework-built window (the create() call); no main window.
@@ -549,7 +548,7 @@ describe('window-seam — ownsWindows:true skips framework window build + all se
 // ── A1a — onWindowTrusted Disposable disposed on the window's close ──────────
 
 describe('window-seam — onWindowTrusted Disposable is disposed when THAT window closes', () => {
-	it('a framework-built declared window: its trust Disposable is NOT disposed while alive, then disposed exactly once on close', async () => {
+	it('a framework-built runtime.windows.create() window: its trust Disposable is NOT disposed while alive, then disposed exactly once on close', async () => {
 		const electron = createFakeElectron()
 		// Map each trusted wc.id to its own spy Disposable so we can prove the
 		// framework disposes the right one when a specific window closes.
@@ -559,18 +558,16 @@ describe('window-seam — onWindowTrusted Disposable is disposed when THAT windo
 			disposeByWcId.set(wc.id, dispose)
 			return { dispose }
 		})
-		const backend = makeBackend({ onWindowTrusted })
-		const app = new DeckApp(
-			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
-			},
-			{ electron, backend, wireTransport: { ipcMain: makeIpcMain() } },
-		)
+		const backend = makeBackend({
+			onWindowTrusted,
+			assemble: vi.fn(async (runtime: import('../types.js').Runtime) => {
+				runtime.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+			}),
+		})
+		const app = new DeckApp({}, { electron, backend, wireTransport: { ipcMain: makeIpcMain() } })
 		await app.start()
 
-		// browserWindows[0] = framework main window, [1] = declared sub-window.
+		// browserWindows[0] = framework main window, [1] = runtime.windows.create() sub-window.
 		const subWin = electron.browserWindows[1] as unknown as FakeBrowserWindow
 		const subDispose = disposeByWcId.get(subWin.webContents.id)
 		expect(subDispose).toBeDefined()
@@ -586,7 +583,7 @@ describe('window-seam — onWindowTrusted Disposable is disposed when THAT windo
 		expect(subDispose!).toHaveBeenCalledTimes(1)
 	})
 
-	it('closing a sub-window disposes ONLY that window\'s trust mirror; the main window\'s survives until teardown (per-window, not one-shot-all)', async () => {
+	it("closing a sub-window disposes ONLY that window's trust mirror; the main window's survives until teardown (per-window, not one-shot-all)", async () => {
 		const electron = createFakeElectron()
 		const disposeByWcId = new Map<number, ReturnType<typeof vi.fn>>()
 		const onWindowTrusted = vi.fn((wc: MinimalWebContents) => {
@@ -594,15 +591,13 @@ describe('window-seam — onWindowTrusted Disposable is disposed when THAT windo
 			disposeByWcId.set(wc.id, dispose)
 			return { dispose }
 		})
-		const backend = makeBackend({ onWindowTrusted })
-		const app = new DeckApp(
-			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
-			},
-			{ electron, backend, wireTransport: { ipcMain: makeIpcMain() } },
-		)
+		const backend = makeBackend({
+			onWindowTrusted,
+			assemble: vi.fn(async (runtime: import('../types.js').Runtime) => {
+				runtime.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+			}),
+		})
+		const app = new DeckApp({}, { electron, backend, wireTransport: { ipcMain: makeIpcMain() } })
 		await app.start()
 
 		const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
@@ -626,7 +621,7 @@ describe('window-seam — onWindowTrusted Disposable is disposed when THAT windo
 		expect(subDispose!).toHaveBeenCalledTimes(1)
 	})
 
-	it('a window created via runtime.windows.create(): its trust Disposable is disposed on that window\'s close', async () => {
+	it("a window created via runtime.windows.create(): its trust Disposable is disposed on that window's close", async () => {
 		const electron = createFakeElectron()
 		const disposeByWcId = new Map<number, ReturnType<typeof vi.fn>>()
 		const onWindowTrusted = vi.fn((wc: MinimalWebContents) => {
@@ -640,10 +635,7 @@ describe('window-seam — onWindowTrusted Disposable is disposed when THAT windo
 				runtime.windows.create({ source: { url: 'http://localhost:5173/extra.html' } })
 			}),
 		})
-		const app = new DeckApp(
-			{},
-			{ electron, backend, wireTransport: { ipcMain: makeIpcMain() } },
-		)
+		const app = new DeckApp({}, { electron, backend, wireTransport: { ipcMain: makeIpcMain() } })
 		await app.start()
 
 		// [0] = framework main window, [1] = runtime.windows.create() window.

@@ -1,12 +1,12 @@
 /**
  * Contract tests for the sealed DeckSession + runtime.scopes.create.
  *
- * THE PROBLEM: `runtime.view({scope})` and `runtime.grants.issue({targetScope})`
- * both demand a `Scope`, but `Runtime` exposes NO scope factory — a host has
- * nowhere to legitimately GET one. The only public scope source is the exported
- * `createScope()`, which mints a ROOTLESS scope (not a child of the app root), and
- * `Scope.adopt()` can re-parent across roots. Letting `runtime.view` accept a raw
- * `Scope` therefore lets a host smuggle in a rootless / adopted scope and break
+ * THE PROBLEM: `runtime.view({scope})` demands a `Scope`, but `Runtime`
+ * exposes NO scope factory — a host has nowhere to legitimately GET one. The
+ * only public scope source is the exported `createScope()`, which mints a
+ * ROOTLESS scope (not a child of the app root), and `Scope.adopt()` can
+ * re-parent across roots. Letting `runtime.view` accept a raw `Scope`
+ * therefore lets a host smuggle in a rootless / adopted scope and break
  * the unified-lifetime invariants (app shutdown would not cascade into it).
  *
  * THE FIX (pinned here):
@@ -22,20 +22,17 @@
  *     — a host can't pass a scope the framework didn't mint. [SECURITY PIN]
  *   - `runtime.view({source})` with NO scope still works (bound to the app root,
  *     disposed at shutdown) — unchanged default.
- *   - `runtime.grants.issue(controlWc, { commands })` no longer REQUIRES
- *     `targetScope` (it's optional / reserved-not-consulted).
  *
  * The session surface is reached through a single typed escape hatch so the
  * file compiles against the runtime types.
  *
- * Fakes mirror deck-app.host-view.test.ts / deck-app.grants-fork.test.ts. The
+ * Fakes mirror deck-app.host-view.test.ts. The
  * FakeWebContentsView gains a `close` spy + `destroyed` flag so the native-WC
  * teardown (view's wc.close()) is observable.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { DeckChannel } from '../shared/protocol.js'
 import { createScope } from '../main/scope.js'
-import type { JsonValue, Runtime } from '../types.js'
+import type { Runtime } from '../types.js'
 import type {
 	MinimalBrowserWindow,
 	MinimalBrowserWindowOptions,
@@ -157,22 +154,26 @@ function createFakeElectron(
 				removeChildView: vi.fn(),
 			}
 			this.contentView = cv as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
 				this.webContents.destroyed = true
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -219,12 +220,11 @@ function createFakeElectron(
 // ── Typed escape hatch for the sealed-session surface ───────────────────────
 //
 // `runtime.scopes`, the `DeckSession` type, and the DeckSession-accepting
-// `view({scope})` / targetScope-optional `grants.issue` are reached through a
-// loose view so the suite runs regardless of whether the public `Runtime` type
-// declares them.
+// `view({scope})` are reached through a loose view so the suite runs
+// regardless of whether the public `Runtime` type declares them.
 
-type Bounds = { x: number, y: number, width: number, height: number }
-type Placement = { visible: true, bounds: Bounds } | { visible: false }
+type Bounds = { x: number; y: number; width: number; height: number }
+type Placement = { visible: true; bounds: Bounds } | { visible: false }
 interface ViewSource {
 	url?: string
 	file?: string
@@ -240,10 +240,7 @@ interface DeckSession {
 }
 interface SealedRuntime {
 	scopes: { create(): DeckSession }
-	view(spec: { source: ViewSource, scope?: unknown }): HostViewHandle
-	grants: {
-		issue(controlWc: unknown, opts: { commands: readonly string[], targetScope?: unknown }): { dispose(): void }
-	}
+	view(spec: { source: ViewSource; scope?: unknown }): HostViewHandle
 }
 function sealed(runtime: Runtime): SealedRuntime {
 	return runtime as unknown as SealedRuntime
@@ -255,28 +252,6 @@ function lastWcv(electron: FakeElectron): FakeWebContentsView {
 	const wcv = electron.webContentsViews[electron.webContentsViews.length - 1]
 	if (!wcv) throw new Error('no WebContentsView was constructed')
 	return wcv
-}
-
-/** The auto-trusted main window's webContents — the trusted control wc. */
-function mainWc(electron: FakeElectron): FakeWebContentsLike {
-	return (electron.browserWindows[0] as unknown as FakeBrowserWindow).webContents
-}
-
-type InvokeOk = { ok: true, result: JsonValue }
-type InvokeFail = { ok: false, error: { code?: string, message?: string } }
-
-async function invokeHost(
-	ipcMain: FakeIpcMain,
-	senderId: number,
-	name: string,
-	args: JsonValue[] = [],
-): Promise<InvokeOk | InvokeFail> {
-	const invoke = ipcMain.handlers.get(DeckChannel.Invoke)
-	if (!invoke) throw new Error('invoke handler missing')
-	return (await invoke(
-		{ sender: { id: senderId } },
-		{ kind: 'host', name, args },
-	)) as InvokeOk | InvokeFail
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -331,7 +306,7 @@ describe('DeckApp — view({scope: session}) is bound to the session lifetime', 
 		// Disposing the SESSION must tear the view down with no explicit handle
 		// dispose: detach (removeChildView) + destroy the native WebContents.
 		await session.dispose()
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(mainWin.contentView.removeChildView.mock.calls.length).toBeGreaterThan(removesBefore)
 		expect(mainWin.contentView.removeChildView).toHaveBeenCalledWith(wcv)
@@ -357,7 +332,7 @@ describe('DeckApp — view({scope: session}) is bound to the session lifetime', 
 		// Never dispose the session explicitly — app shutdown must cascade through
 		// rootScope → the session child → the view, closing its native WebContents.
 		await app.shutdown()
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(wcv.webContents.close).toHaveBeenCalled()
 	})
@@ -407,52 +382,6 @@ describe('DeckApp — view with NO scope still binds to the app root', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. grants.issue no longer REQUIRES targetScope: issue(controlWc, { commands })
-//    works WITHOUT a targetScope, returns a Disposable, and the grant gates the
-//    command (granted sender passes, ungranted → FORBIDDEN). targetScope, if
-//    accepted at all, is optional (omitting it does NOT throw).
-// ─────────────────────────────────────────────────────────────────────────────
-describe('DeckApp — grants.issue drops the mandatory targetScope', () => {
-	it('issue(controlWc, { commands }) WITHOUT targetScope succeeds and gates the command', async () => {
-		const electron = createFakeElectron()
-		const ipcMain = createFakeIpcMain()
-		const app = new DeckApp(
-			{ hostServices: { ping: () => 'pong' as JsonValue } },
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-
-		const handler = vi.fn((arg: JsonValue) => ({ ok: true, echo: arg }) as JsonValue)
-		// runtime.layout.command exists today; register a privileged command to gate.
-		;(app.runtime as unknown as {
-			layout: { command(name: string, h: (...a: JsonValue[]) => JsonValue): { dispose(): void } }
-		}).layout.command('layout.resize', handler)
-
-		const wc = mainWc(electron)
-
-		// Ungranted → FORBIDDEN (gate default-denies).
-		const denied = await invokeHost(ipcMain, wc.id, 'layout.resize', [{ w: 1 }])
-		expect(denied.ok).toBe(false)
-		expect((denied as InvokeFail).error.code).toBe('DECK_FORBIDDEN')
-
-		// Issue WITHOUT a targetScope — must not throw, must return a Disposable.
-		const grant = sealed(app.runtime).grants.issue(
-			wc as unknown as Parameters<Runtime['grants']['issue']>[0],
-			{ commands: ['layout.resize'] },
-		)
-		expect(typeof grant.dispose).toBe('function')
-
-		// Granted → the command passes (gate now authorizes this sender/command).
-		const granted = await invokeHost(ipcMain, wc.id, 'layout.resize', [{ w: 320 }])
-		expect(granted.ok).toBe(true)
-		expect((granted as InvokeOk).result).toEqual({ ok: true, echo: { w: 320 } })
-		expect(handler).toHaveBeenCalledWith({ w: 320 })
-
-		await app.shutdown()
-	})
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
 // 6. session.dispose is idempotent + closing the session disposes ALL views
 //    created in it (create 2 views in a session → session.dispose closes both).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,11 +393,17 @@ describe('DeckApp — session.dispose is idempotent + disposes all its views', (
 
 		const session = sealed(app.runtime).scopes.create()
 
-		const handleA = sealed(app.runtime).view({ source: { url: 'data:text/html,a' }, scope: session })
+		const handleA = sealed(app.runtime).view({
+			source: { url: 'data:text/html,a' },
+			scope: session,
+		})
 		const wcvA = lastWcv(electron)
 		handleA.placeIn(app.runtime.mainWindow, { zone: 0 })
 
-		const handleB = sealed(app.runtime).view({ source: { url: 'data:text/html,b' }, scope: session })
+		const handleB = sealed(app.runtime).view({
+			source: { url: 'data:text/html,b' },
+			scope: session,
+		})
 		const wcvB = lastWcv(electron)
 		handleB.placeIn(app.runtime.mainWindow, { zone: 1 })
 
@@ -476,7 +411,7 @@ describe('DeckApp — session.dispose is idempotent + disposes all its views', (
 
 		// One session.dispose tears down BOTH views' native WebContents.
 		await session.dispose()
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(wcvA.webContents.close).toHaveBeenCalled()
 		expect(wcvB.webContents.close).toHaveBeenCalled()
 

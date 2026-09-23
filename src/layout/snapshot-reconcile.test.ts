@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { reconcile, createInitialState } from './placement-reconcile.js'
 import type { Placement } from './placement-reconcile.js'
-import { cleanSnapshot, dispatchOps } from './snapshot-reconcile.js'
+import { authorizeSnapshot, applyReconciledPlacements } from './snapshot-reconcile.js'
 import type { Authorizer } from './snapshot-reconcile.js'
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
@@ -19,42 +19,42 @@ function rawSnap(overrides: Record<string, unknown> = {}): unknown {
   return { generation: 1, epoch: 0, views: [], ...overrides }
 }
 
-// ── cleanSnapshot ─────────────────────────────────────────────────────────────
+// ── authorizeSnapshot ─────────────────────────────────────────────────────────────
 
-describe('cleanSnapshot', () => {
+describe('authorizeSnapshot', () => {
   describe('rejects invalid raw shapes', () => {
     const passAll: Authorizer = () => ({ viewId: 'v', layer: 0 })
 
     it('returns null for null', () => {
-      expect(cleanSnapshot(null, passAll)).toBeNull()
+      expect(authorizeSnapshot(null, passAll)).toBeNull()
     })
 
     it('returns null for an array', () => {
-      expect(cleanSnapshot([1, 2, 3], passAll)).toBeNull()
+      expect(authorizeSnapshot([1, 2, 3], passAll)).toBeNull()
     })
 
     it('returns null when generation is absent', () => {
-      expect(cleanSnapshot({ epoch: 0, views: [] }, passAll)).toBeNull()
+      expect(authorizeSnapshot({ epoch: 0, views: [] }, passAll)).toBeNull()
     })
 
     it('returns null when generation is negative', () => {
-      expect(cleanSnapshot({ generation: -1, epoch: 0, views: [] }, passAll)).toBeNull()
+      expect(authorizeSnapshot({ generation: -1, epoch: 0, views: [] }, passAll)).toBeNull()
     })
 
     it('returns null when generation is a non-integer', () => {
-      expect(cleanSnapshot({ generation: 1.5, epoch: 0, views: [] }, passAll)).toBeNull()
+      expect(authorizeSnapshot({ generation: 1.5, epoch: 0, views: [] }, passAll)).toBeNull()
     })
 
     it('returns null when epoch is absent', () => {
-      expect(cleanSnapshot({ generation: 0, views: [] }, passAll)).toBeNull()
+      expect(authorizeSnapshot({ generation: 0, views: [] }, passAll)).toBeNull()
     })
 
     it('returns null when epoch is negative', () => {
-      expect(cleanSnapshot({ generation: 0, epoch: -1, views: [] }, passAll)).toBeNull()
+      expect(authorizeSnapshot({ generation: 0, epoch: -1, views: [] }, passAll)).toBeNull()
     })
 
     it('returns null when views is not an array', () => {
-      expect(cleanSnapshot({ generation: 0, epoch: 0, views: 'oops' }, passAll)).toBeNull()
+      expect(authorizeSnapshot({ generation: 0, epoch: 0, views: 'oops' }, passAll)).toBeNull()
     })
   })
 
@@ -63,13 +63,13 @@ describe('cleanSnapshot', () => {
       const rejectAll: Authorizer = () => null
       const raw = rawSnap({ views: [rawView('unknown-tok')] })
       // All views discarded from a non-empty list → whole snapshot rejected.
-      expect(cleanSnapshot(raw, rejectAll)).toBeNull()
+      expect(authorizeSnapshot(raw, rejectAll)).toBeNull()
     })
 
     it('discards views with visible:true but missing bounds', () => {
       const auth: Authorizer = (tok) => (tok === 'k' ? { viewId: 'v', layer: 0 } : null)
       const raw = rawSnap({ views: [rawView('k', { visible: true /* no bounds */ })] })
-      expect(cleanSnapshot(raw, auth)).toBeNull()
+      expect(authorizeSnapshot(raw, auth)).toBeNull()
     })
 
     it('discards views with a non-finite bound coordinate', () => {
@@ -77,7 +77,7 @@ describe('cleanSnapshot', () => {
       const raw = rawSnap({
         views: [rawView('k', { visible: true, bounds: { x: Infinity, y: 0, width: 100, height: 100 } })],
       })
-      expect(cleanSnapshot(raw, auth)).toBeNull()
+      expect(authorizeSnapshot(raw, auth)).toBeNull()
     })
 
     it('viewId in the result comes from the authorizer, never from the raw view field', () => {
@@ -87,7 +87,7 @@ describe('cleanSnapshot', () => {
       const raw = rawSnap({
         views: [{ viewId: 'attacker', placement: { visible: false }, extra: { slotToken: 'real-tok' } }],
       })
-      const result = cleanSnapshot(raw, auth)
+      const result = authorizeSnapshot(raw, auth)
       expect(result).not.toBeNull()
       expect(result!.views[0]!.viewId).toBe('real')
       expect(result!.views[0]!.layer).toBe(3)
@@ -99,7 +99,7 @@ describe('cleanSnapshot', () => {
       const raw = rawSnap({
         views: [rawView('bad'), rawView('good', { visible: false })],
       })
-      const result = cleanSnapshot(raw, auth)
+      const result = authorizeSnapshot(raw, auth)
       expect(result).not.toBeNull()
       expect(result!.views).toHaveLength(1)
       expect(result!.views[0]!.viewId).toBe('v-good')
@@ -109,7 +109,7 @@ describe('cleanSnapshot', () => {
   describe('empty views array vs all-discarded', () => {
     it('returns a CleanSnapshot (not null) when views is an empty array', () => {
       const raw = rawSnap({ views: [] })
-      const result = cleanSnapshot(raw, () => null)
+      const result = authorizeSnapshot(raw, () => null)
       expect(result).not.toBeNull()
       expect(result!.views).toHaveLength(0)
     })
@@ -117,7 +117,7 @@ describe('cleanSnapshot', () => {
     it('returns null when views is non-empty but every view is discarded', () => {
       const rejectAll: Authorizer = () => null
       const raw = rawSnap({ views: [rawView('tok-a'), rawView('tok-b')] })
-      expect(cleanSnapshot(raw, rejectAll)).toBeNull()
+      expect(authorizeSnapshot(raw, rejectAll)).toBeNull()
     })
 
     it('deduplicates views mapping to the same viewId, keeping the first', () => {
@@ -130,7 +130,7 @@ describe('cleanSnapshot', () => {
           rawView('tok-2', { visible: false }),
         ],
       })
-      const result = cleanSnapshot(raw, auth)
+      const result = authorizeSnapshot(raw, auth)
       expect(result).not.toBeNull()
       expect(result!.views).toHaveLength(1)
       // First view wins (layer === 0, not 1).
@@ -159,7 +159,7 @@ describe('cleanSnapshot', () => {
         if (token === 'tok-a2') return { viewId: 'shared-a', layer: 1 }
         return { viewId: token, layer: 0 }
       }
-      const result = cleanSnapshot(raw, auth)
+      const result = authorizeSnapshot(raw, auth)
       expect(result).not.toBeNull()
       // 11 raw views: 1 unauthorized dropped, tok-a2's duplicate viewId collapsed onto tok-a → 9.
       expect(result!.views).toHaveLength(9)
@@ -175,7 +175,7 @@ describe('cleanSnapshot', () => {
     it('copies generation and epoch from the raw snapshot verbatim', () => {
       const auth: Authorizer = () => ({ viewId: 'v', layer: 0 })
       const raw = { generation: 99, epoch: 42, views: [rawView('tok', { visible: false })] }
-      const result = cleanSnapshot(raw as unknown, auth)
+      const result = authorizeSnapshot(raw as unknown, auth)
       expect(result).not.toBeNull()
       expect(result!.generation).toBe(99)
       expect(result!.epoch).toBe(42)
@@ -183,9 +183,9 @@ describe('cleanSnapshot', () => {
   })
 })
 
-// ── dispatchOps ───────────────────────────────────────────────────────────────
+// ── applyReconciledPlacements ───────────────────────────────────────────────────────────────
 
-describe('dispatchOps', () => {
+describe('applyReconciledPlacements', () => {
   function mkView(id: string, p: Placement = { visible: true, bounds: B0 }) {
     return { viewId: id, placement: p, layer: 0 }
   }
@@ -202,7 +202,7 @@ describe('dispatchOps', () => {
     })
 
     const calls: Placement[] = []
-    dispatchOps(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: true, bounds: B1 })
@@ -214,7 +214,7 @@ describe('dispatchOps', () => {
     const { state: s2, ops } = reconcile(s1, { generation: 1, epoch: 1, views: [] })
 
     const calls: Placement[] = []
-    dispatchOps(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: false })
@@ -229,7 +229,7 @@ describe('dispatchOps', () => {
     })
 
     const calls: Placement[] = []
-    dispatchOps(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s2, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: false })
@@ -252,7 +252,7 @@ describe('dispatchOps', () => {
     })
 
     const calls: Placement[] = []
-    dispatchOps(ops, s3, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p) } : null))
+    applyReconciledPlacements(ops, s3, (id) => (id === 'v1' ? (p: Placement) => { calls.push(p); return true } : null))
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ visible: true, bounds: B0 })
@@ -270,7 +270,7 @@ describe('dispatchOps', () => {
     })
 
     let callCount = 0
-    dispatchOps(ops, s1, (_id) => (_p: Placement) => { callCount++ })
+    applyReconciledPlacements(ops, s1, (_id) => (_p: Placement) => { callCount++; return true })
 
     // ops: setBounds(v1), attach(v1), setBounds(v2), attach(v2), reorder([v1,v2])
     // touched = {v1, v2}; reorder has no viewId and is skipped → exactly 2 calls.
@@ -280,7 +280,7 @@ describe('dispatchOps', () => {
   it('skips without throwing when resolveApply returns null', () => {
     const s0 = createInitialState()
     const { state, ops } = reconcile(s0, { generation: 1, epoch: 0, views: [mkView('v1')] })
-    expect(() => dispatchOps(ops, state, () => null)).not.toThrow()
+    expect(() => applyReconciledPlacements(ops, state, () => null)).not.toThrow()
   })
 
   it('per-view apply errors are isolated — other views still receive apply', () => {
@@ -295,14 +295,35 @@ describe('dispatchOps', () => {
     })
 
     const called: string[] = []
-    dispatchOps(ops, state, (id) => {
-      if (id === 'v1') return (_p: Placement) => { called.push('v1') }
+    const rejected = applyReconciledPlacements(ops, state, (id) => {
+      if (id === 'v1') return (_p: Placement) => { called.push('v1'); return true }
       if (id === 'v2') return (_p: Placement) => { throw new Error('boom') }
-      if (id === 'v3') return (_p: Placement) => { called.push('v3') }
+      if (id === 'v3') return (_p: Placement) => { called.push('v3'); return true }
       return null
     })
 
     expect(called).toContain('v1')
     expect(called).toContain('v3')
+    // A throwing sink counts as rejected, same as an explicit `false` return.
+    expect(rejected).toEqual(new Set(['v2']))
+  })
+
+  it('a sink returning false is reported rejected; one returning true is not', () => {
+    const s0 = createInitialState()
+    const { state, ops } = reconcile(s0, {
+      generation: 1, epoch: 0,
+      views: [
+        mkView('v1', { visible: true, bounds: B0 }),
+        mkView('v2', { visible: true, bounds: B0 }),
+      ],
+    })
+
+    const rejected = applyReconciledPlacements(ops, state, (id) => {
+      if (id === 'v1') return (_p: Placement) => true
+      if (id === 'v2') return (_p: Placement) => false
+      return null
+    })
+
+    expect(rejected).toEqual(new Set(['v2']))
   })
 })

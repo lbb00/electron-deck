@@ -1,7 +1,7 @@
 /**
  * Serialize / parse / validate — structural integrity + acyclicity. Pure TS.
  *
- * Default-DENY: parseLayout throws on any tree validateTree would flag.
+ * Default-DENY: parseLayout throws on any tree collectTreeProblems would flag.
  */
 import type { LayoutNode, LayoutTree } from './types.js'
 
@@ -242,7 +242,7 @@ function visitSplit(
 	path.delete(obj)
 }
 
-export function validateTree(t: LayoutTree, knownPanelIds: ReadonlySet<string>): string[] {
+export function collectTreeProblems(t: LayoutTree, knownPanelIds: ReadonlySet<string>): string[] {
 	if (t === null || typeof t !== 'object') return ['tree is not an object']
 	if ((t as { version?: unknown }).version !== 1) {
 		return [`unsupported version: ${String((t as { version?: unknown }).version)}`]

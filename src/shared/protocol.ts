@@ -2,8 +2,8 @@
  * Deck framework wire protocol —— main ↔ webview 之间的 channel 名 + 帧
  * 形态。SoT 在此，preload / client / main runtime 都从这里 import。
  *
- * 设计：把 declared `hostServices` / `simulatorApis` / `events` 三类全部走
- * **两个** 统一 channel，避免 channel name 爆炸 / 难以加 senderPolicy 白名单。
+ * 设计：把 declared `hostServices` / `events` 两类全部走 **两个** 统一
+ * channel，避免 channel name 爆炸 / 难以加 senderPolicy 白名单。
  * - `__electron-deck:invoke`  — webview → main RPC (ipcRenderer.invoke)
  * - `__electron-deck:event`   — main → webview event push (webContents.send)
  * - `__electron-deck:probe`   — webview → main 探活，bridge ready 检查
@@ -37,7 +37,7 @@ export const DeckChannel = {
 	LayoutSubscribe: '__electron-deck:layout-subscribe',
 } as const
 
-export type InvokeKind = 'host' | 'simulator'
+export type InvokeKind = 'host'
 
 export interface InvokeRequest {
 	readonly kind: InvokeKind

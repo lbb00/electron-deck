@@ -42,7 +42,7 @@ export interface CreateDeckClientOptions {
 // param type — `never` always is, `unknown` is not (it would reject every
 // narrower host handler, defeating point (2) above).
 /** @experimental No production consumer yet — pairs with `DeckConfig.hostServices`
- *  / `events`, which only `examples/` / `spike/` set; our `backend` assembly
+ *  / `events`, which only `examples/` sets; the `backend` integration path
  *  never touches this client. `createDeckLayoutClient` and
  *  `createPlacementPublisher` (re-exported above) are unaffected — they have
  *  real consumers. */

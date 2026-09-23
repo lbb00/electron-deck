@@ -4,7 +4,7 @@
 // React `<DockView>` dock-shell adapter (src/dock-react). DockView renders a
 // layout-as-data tree (createLayoutModel) as react-resizable-panels groups +
 // DOM tab strips, and for native panels renders an empty
-// `<div data-deck-native-slot="simulator">`. The host (main.mjs) places a
+// `<div data-deck-native-slot="preview">`. The host (main.js) places a
 // native WebContentsView anchored to that exact selector via
 // `runtime.view().placeIn(win, { anchor })`; the real createDeckLayoutClient
 // measures the slot and the native view FOLLOWS it — zero host resize code.
@@ -27,15 +27,15 @@ import {
 	movePanel,
 	serializeLayout,
 	parseLayout,
-	validateTree,
+	collectTreeProblems,
 } from '../../dist/layout/index.js'
 import { DockView } from '../../dist/dock-react/index.js'
 import { createDeckLayoutClient } from '../../dist/client/index.js'
 
 // ── the layout-as-data tree under test ───────────────────────────────────────
 // root split[row] of:
-//   tabs g-left  (['simulator'], native active)
-//   tabs g-right (['editor','logs'], dom, editor active)
+//   tabs g-left  (['preview'], native active)
+//   tabs g-right (['doc','output'], dom, doc active)
 function makeTree() {
 	return {
 		version: 1,
@@ -45,8 +45,8 @@ function makeTree() {
 			orientation: 'row',
 			sizes: [1, 1],
 			children: [
-				{ kind: 'tabs', id: 'g-left', panels: ['simulator'], active: 'simulator' },
-				{ kind: 'tabs', id: 'g-right', panels: ['editor', 'logs'], active: 'editor' },
+				{ kind: 'tabs', id: 'g-left', panels: ['preview'], active: 'preview' },
+				{ kind: 'tabs', id: 'g-right', panels: ['doc', 'output'], active: 'doc' },
 			],
 		},
 	}
@@ -54,21 +54,21 @@ function makeTree() {
 
 function makeRegistry() {
 	const reg = createPanelRegistry()
-	// native simulator — nativeRef.id = 'sim' (host maps this to a real WCV).
-	reg.register({ kind: 'native', id: 'simulator', title: 'Simulator', nativeRef: { id: 'sim' } })
-	reg.register({ kind: 'dom', id: 'editor', title: 'Editor' })
-	reg.register({ kind: 'dom', id: 'logs', title: 'Logs' })
+	// native preview — nativeRef.id = 'preview' (host maps this to a real WCV).
+	reg.register({ kind: 'native', id: 'preview', title: 'Preview', nativeRef: { id: 'preview' } })
+	reg.register({ kind: 'dom', id: 'doc', title: 'Doc' })
+	reg.register({ kind: 'dom', id: 'output', title: 'Output' })
 	return reg
 }
 
-// DOM body content for the dom panels (editor / logs). A stable marker per
+// DOM body content for the dom panels (doc / output). A stable marker per
 // panel so the host can assert which body is mounted via data-test-dom-content.
 function renderDomPanel(panelId) {
 	const text =
-		panelId === 'editor'
-			? '// editor panel — dom body'
-			: panelId === 'logs'
-				? '> logs panel — dom body'
+		panelId === 'doc'
+			? '// doc panel — dom body'
+			: panelId === 'output'
+				? '> output panel — dom body'
 				: panelId
 	return React.createElement(
 		'div',
@@ -87,7 +87,7 @@ function renderDomPanel(panelId) {
 let opened = false
 function makeBindNativeSlot(bridge, demo) {
 	return (panelId, el) => {
-		if (panelId !== 'simulator') return
+		if (panelId !== 'preview') return
 		if (el) {
 			if (!opened) {
 				opened = true
@@ -136,7 +136,7 @@ function boot() {
 		model: () => model,
 		registry,
 		serializeLayout,
-		// Resize the dock host so rrp re-distributes the left (simulator) panel.
+		// Resize the dock host so rrp re-distributes the left (preview) panel.
 		// The native slot's rect changes → view-anchor re-publishes → native WCV
 		// follows. This is renderer-driven geometry: the host writes NO bounds.
 		setHostWidth: (px) => {
@@ -163,7 +163,7 @@ function boot() {
 			// parse + validate against the registry's known panel ids
 			const knownIds = new Set(registry.list().map((p) => p.id))
 			const tree = parseLayout(json)
-			const problems = validateTree(tree, knownIds)
+			const problems = collectTreeProblems(tree, knownIds)
 			if (problems.length) {
 				return { ok: false, problems, json }
 			}
@@ -173,11 +173,11 @@ function boot() {
 			root = mountDock(dockHost, model, registry, bindNativeSlot)
 			return { ok: true, json }
 		},
-		// Programmatic move: relocate 'logs' to the LEFT group (cross-group move)
+		// Programmatic move: relocate 'output' to the LEFT group (cross-group move)
 		// purely through the model mutation API. DockView re-renders from the
 		// model subscription.
-		moveLogsLeft: () => {
-			model.apply((t) => movePanel(t, 'logs', { groupId: 'g-left' }))
+		moveOutputLeft: () => {
+			model.apply((t) => movePanel(t, 'output', { groupId: 'g-left' }))
 		},
 		setActive: (groupId, panelId) => {
 			model.apply((t) => setActive(t, groupId, panelId))

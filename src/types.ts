@@ -1,14 +1,11 @@
-import type { BrowserWindow, NativeImage, WebContents, WebContentsView, ipcMain } from 'electron'
+import type { BrowserWindow, NativeImage, WebContents, ipcMain } from 'electron'
 import type { MinimalApp, MinimalElectron } from './internal/electron-types.js'
 import type { MinimalIpcMain, MinimalWebContents } from './internal/wire-transport.js'
 
 export type MaybePromise<T> = T | Promise<T>
 
 export type JsonPrimitive = string | number | boolean | null
-export type JsonValue =
-	| JsonPrimitive
-	| { readonly [k: string]: JsonValue }
-	| readonly JsonValue[]
+export type JsonValue = JsonPrimitive | { readonly [k: string]: JsonValue } | readonly JsonValue[]
 
 export interface Disposable {
 	dispose(): void | Promise<void>
@@ -18,11 +15,11 @@ export interface Disposable {
  * `@experimental` convention (used throughout this file)
  * --------------------------------------------------------
  * The high-level host-shell surface — `runtime.windows.*` (Window facade),
- * `runtime.view` / `DeckViewHandle`, `runtime.scopes` / `DeckSession`,
- * `runtime.grants`, `runtime.layout` — is fully built and wired, but has NO
- * production consumer yet: the only callers are `examples/layout-demo` and
- * `spike/popout`. Downstream host integrations use the `RuntimeBackend`
- * lifecycle path with `ownsWindows:true` and never touch this surface.
+ * `runtime.view` / `DeckViewHandle`, `runtime.scopes` / `DeckSession` — is
+ * fully built and wired, but has NO production consumer yet: the only caller
+ * is `examples/layout-demo`.
+ * Downstream host integrations use the `RuntimeBackend` lifecycle path with
+ * `ownsWindows:true` and never touch this surface.
  *
  * Until a SECOND, real consumer adopts it, these signatures are NOT API-stable —
  * treat them as `@experimental`. Do not assume any of it is validated against a
@@ -81,8 +78,8 @@ export interface DeckWindow {
  * `defineEvent(name)` 创建的 HostEvent。pure factory，无 side effect —— 必须在
  * `DeckConfig.events` 中显式列出 framework 才会绑 transport。
  *
- * `@experimental` No production consumer yet — only `examples/` / `spike/` use
- * `defineEvent` / `DeckConfig.events`; our `backend` assembly never
+ * `@experimental` No production consumer yet — only `examples/` uses
+ * `defineEvent` / `DeckConfig.events`; the `backend` integration path never
  * touches either. Contract may change until a second real consumer adopts it.
  */
 export interface HostEvent<P extends JsonValue> {
@@ -102,12 +99,10 @@ export interface HostEvent<P extends JsonValue> {
  * 返回值 framework 不约束 TS 类型，但 runtime 强制要求 JSON-safe（非 JSON 值
  * 反序列化时报错）。
  *
- * `@experimental` No production consumer yet: only `examples/` / `spike/` set
- * `DeckConfig.simulatorApis` / `hostServices`; our `backend` assembly
- * never touches either field. Contract may change until a second real consumer
- * adopts it.
+ * `@experimental` No production consumer yet: only `examples/` sets
+ * `DeckConfig.hostServices`; the `backend` integration path never touches it.
+ * Contract may change until a second real consumer adopts it.
  */
-export type SimulatorApiHandler = (...args: never[]) => unknown
 export type HostServiceHandler = (...args: never[]) => unknown
 
 export interface AppConfig {
@@ -116,8 +111,8 @@ export interface AppConfig {
 	/**
 	 * Optional content source for the framework-built main window. When set AND
 	 * the framework owns the main window (NOT an `ownsWindows:true` backend), the
-	 * framework auto-loads it after the window is built, via the same safeLoad path
-	 * the toolbar / declared windows use. Omitted → the host owns the load. Ignored
+	 * framework auto-loads it after the window is built. Omitted → the host owns
+	 * the load. Ignored
 	 * under an `ownsWindows:true` backend (the backend builds + loads its own window).
 	 */
 	readonly source?: WebviewSource
@@ -146,47 +141,6 @@ export interface AppConfig {
 }
 
 export type WebviewSource = { readonly url: string } | { readonly file: string }
-
-/** @experimental No production consumer yet — only `examples/` / `spike/` set
- *  `DeckConfig.toolbar`; our `backend` assembly never touches it.
- *  Contract may change until a second real consumer adopts it. */
-export interface ToolbarContribution {
-	readonly source: WebviewSource
-	/** 必填：host 完全控制 preload */
-	readonly preloadPath: string
-	/** 必填：固定高度（px）；宽度自动跟随主窗口 */
-	readonly height: number
-}
-
-export interface WindowContribution {
-	readonly title?: string
-	readonly source: WebviewSource
-	readonly preloadPath?: string
-	readonly width?: number
-	readonly height?: number
-	readonly modal?: boolean
-}
-
-export interface MenuContribution {
-	build(ctx: MenuBuildContext): void
-}
-
-export interface MenuBuildContext {
-	readonly mainWindow: BrowserWindow
-	readonly appName: string
-	readonly theme: 'light' | 'dark'
-}
-
-export interface LifecycleContribution {
-	/**
-	 * 在主窗口关闭 / app 退出之前调用，await 完成；超时则 log error 后继续 shutdown 流程（不阻止关闭）。
-	 * host 如需更细粒度（区分 close 与 quit），用 `setup(runtime)` 内
-	 * `runtime.electron.app.on('before-quit', ...)` escape。
-	 */
-	readonly beforeClose?: () => MaybePromise<void>
-	/** beforeClose 超时（ms），默认 10_000 */
-	readonly timeoutMs?: number
-}
 
 /**
  * 顶层 `electronDeck(config, options?)` 的第二参数。
@@ -226,26 +180,14 @@ export interface DeckConfig {
 	 * backend host 的主入口字段：`electronDeck({ backend })`——无需空 `{}` + options。
 	 */
 	readonly backend?: RuntimeBackend
-	/** 暴露给小程序，自动投影为 `wx.<name>`
-	 *  @experimental No production consumer yet — only `examples/` / `spike/`
-	 *  set this; our `backend` assembly never touches it. */
-	readonly simulatorApis?: Record<string, SimulatorApiHandler>
-	/** 暴露给 trusted webview（toolbar 等）的 RPC
-	 *  @experimental No production consumer yet — only `examples/` / `spike/`
-	 *  set this; our `backend` assembly never touches it. */
+	/** 暴露给 trusted webview 的 RPC
+	 *  @experimental No production consumer yet — only `examples/` sets this;
+	 *  the `backend` integration path never touches it. */
 	readonly hostServices?: Record<string, HostServiceHandler>
 	/** main → webview 推送；必须显式列出，避免 module load order 隐式注册
-	 *  @experimental No production consumer yet — only `examples/` / `spike/`
-	 *  set this; our `backend` assembly never touches it. */
+	 *  @experimental No production consumer yet — only `examples/` sets this;
+	 *  the `backend` integration path never touches it. */
 	readonly events?: readonly HostEvent<JsonValue>[]
-	/** @experimental No production consumer yet — only `examples/` / `spike/`
-	 *  set this; our `backend` assembly never touches it. */
-	readonly toolbar?: ToolbarContribution
-	readonly windows?: Record<string, WindowContribution>
-	readonly menu?: MenuContribution
-	readonly lifecycle?: LifecycleContribution
-	/** Imperative escape：声明表达不了的运行时操作 */
-	readonly setup?: (runtime: Runtime) => MaybePromise<void>
 }
 
 // ── Runtime ──────────────────────────────────────────────────────────────
@@ -288,7 +230,7 @@ export interface DeckContext {
 }
 
 export interface FrameworkEvents {
-	'window-created': { window: BrowserWindow; role: 'main' | 'toolbar' | 'host' }
+	'window-created': { window: BrowserWindow; role: 'main' | 'host' }
 	'window-closed': { window: BrowserWindow }
 	/** webContents.loadURL/loadFile 失败时 emit。framework 不 reject start()，host 可订阅做兜底/重试 */
 	'load-failed': { source: WebviewSource; error: unknown }
@@ -325,7 +267,9 @@ export interface ViewBounds {
  * @experimental Part of the host-view surface — no production consumer yet (see
  * the convention note above).
  */
-export type ViewPlacement = { readonly visible: true; readonly bounds: ViewBounds } | { readonly visible: false }
+export type ViewPlacement =
+	| { readonly visible: true; readonly bounds: ViewBounds }
+	| { readonly visible: false }
 
 /** Options for {@link Runtime.view}.
  *  @experimental No production consumer yet — see the convention note above. */
@@ -342,13 +286,16 @@ export interface ViewCreateOptions {
 	readonly scope?: DeckSession
 	/**
 	 * Opt-in keep-alive eviction policy (opt-in LRU helper). When set, the framework disposes
-	 * the least-recently-VISIBLE HIDDEN view in this view's group once the group's
-	 * HIDDEN count exceeds `max` — destroying that view's native WebContents.
-	 * Currently-visible views are NEVER evicted. Views sharing the same `max` form
-	 * one group. Omitting `keepAlive` → the framework evicts nothing (pure host
-	 * management; the host decides what to keep).
+	 * the least-recently-VISIBLE HIDDEN view in `group` once the group's HIDDEN
+	 * count exceeds `max` — destroying that view's native WebContents.
+	 * Currently-visible views are NEVER evicted. Views sharing the same `group`
+	 * form one LRU set (explicit — no longer inferred from `max`); the group's
+	 * `max` is fixed by whichever view joins it first, so a later view declaring a
+	 * different `max` for the same `group` is a config conflict (warned, the
+	 * group's established `max` wins). Omitting `keepAlive` → the framework
+	 * evicts nothing (pure host management; the host decides what to keep).
 	 */
-	readonly keepAlive?: { readonly policy: 'lru', readonly max: number }
+	readonly keepAlive?: { readonly policy: 'lru'; readonly max: number; readonly group: string }
 }
 
 /**
@@ -364,16 +311,28 @@ export interface DeckViewHandle {
 	 *  slot-token for it and pushes a slot-grant so the renderer can drive
 	 *  `place` on this view. Omitting it mounts without a renderer credential.
 	 *  Chainable. */
-	placeIn(window: BrowserWindow, opts: { zone?: number; anchor?: string }): DeckViewHandle
+	placeIn(
+		window: BrowserWindow | DeckWindow,
+		opts: { zone?: number; anchor?: string },
+	): DeckViewHandle
 	/** Drive the native view's visibility + bounds. `visible:true` (re)mounts and
 	 *  sets bounds directly; `visible:false` detaches but keeps the view alive.
-	 *  A frame after `dispose` is dropped. Chainable. */
+	 *  A frame after `dispose` is dropped. Chainable.
+	 *
+	 *  A view currently placed with a non-empty `anchor` (either `placeIn` or
+	 *  `moveTo`) is PAGE-DRIVEN — the renderer owns its position via the
+	 *  slot-token protocol. Calling this for such a view THROWS: position is
+	 *  either host-driven (no anchor, host calls `applyPlacement`) or
+	 *  page-driven (anchor, page drives placement) — never both. */
 	applyPlacement(placement: ViewPlacement): DeckViewHandle
 	/** Migrate the placed view to another window (the ONLY re-placement path —
 	 *  placeIn twice throws). Moves the per-window substrate registration + re-issues
 	 *  the slot-token anchor for the dest; atomic (rolls back to the source on dest
 	 *  failure). `rehome:true` re-parents the view's lifetime to the dest window. */
-	moveTo(win: BrowserWindow, opts: { zone?: number; anchor?: string; rehome?: boolean }): Promise<void>
+	moveTo(
+		win: BrowserWindow | DeckWindow,
+		opts: { zone?: number; anchor?: string; rehome?: boolean },
+	): Promise<void>
 	/** Tear down this placement (detach the native view, disable the sink). */
 	dispose(): Promise<void>
 	/** The native view's `WebContents`. Available immediately — the handle owns
@@ -392,13 +351,11 @@ export interface DeckViewHandle {
 export interface Runtime {
 	readonly electron: typeof import('electron')
 	readonly mainWindow: BrowserWindow
-	readonly toolbarView: WebContentsView | null
 
 	readonly ipc: TypedIpcRegistry
 	readonly rawIpcMain: typeof ipcMain
 
 	readonly call: {
-		simulator(name: string, ...args: JsonValue[]): Promise<JsonValue>
 		host(name: string, ...args: JsonValue[]): Promise<JsonValue>
 	}
 
@@ -406,8 +363,10 @@ export interface Runtime {
 	 *  convention note near the top of this file). */
 	readonly windows: {
 		create(opts: WindowCreateOptions): DeckWindow
-		get(id: string): BrowserWindow | undefined
-		all(): BrowserWindow[]
+		/** Every live framework-tracked {@link DeckWindow} (the framework-built main
+		 *  window plus any `runtime.windows.create()`-spawned window); a destroyed
+		 *  window drops out. Get at a bare `BrowserWindow` via `.window`. */
+		all(): DeckWindow[]
 		/** The framework-built main window's {@link DeckWindow}, or `null` when the
 		 *  framework does not own a main window (e.g. an `ownsWindows:true` backend). */
 		readonly main: DeckWindow | null
@@ -416,7 +375,7 @@ export interface Runtime {
 		 * Register an EXTERNALLY-created window (one the host built itself, e.g.
 		 * under a `ownsWindows:true` backend) into the framework: its windowScope,
 		 * per-window native-view substrate, and TRUST lifecycle — so
-		 * `runtime.view().placeIn(win)` works for it. Trust + slot-tokens + grants
+		 * `runtime.view().placeIn(win)` works for it. Trust + slot-tokens
 		 * for the window's webContents are revoked SYNCHRONOUSLY and FIRST on the
 		 * window's `'closed'` (the framework arms its revoke via `prependListener`,
 		 * so it runs before any external `'closed'` listener the host registered
@@ -456,32 +415,6 @@ export interface Runtime {
 		create(): DeckSession
 	}
 
-	/** @experimental Capability/grant surface — no production consumer yet (see
-	 *  the convention note near the top of this file). */
-	readonly grants: {
-		/** Authorize `controlWc` to invoke the given privileged commands. The grant
-		 *  is revoked automatically when the control wc's lifetime Scope resets
-		 *  (navigation) or closes (destroy) — wc.id-reuse safe. Throws if `controlWc`
-		 *  is not trusted.
-		 *
-		 *  `@experimental` `targetScope` is OPTIONAL and currently INERT: when supplied
-		 *  it is stored as the authorization boundary for FUTURE per-target view-command
-		 *  checks, but the current grant gate authorizes by (senderId, command-name)
-		 *  only — no command resolves a target view yet, so targetScope is NOT consulted
-		 *  at dispatch. Passing it today has no effect; do not rely on it for isolation. */
-		issue(controlWc: WebContents, opts: { commands: readonly string[]; targetScope?: DeckSession }): Disposable
-	}
-
-	/** @experimental Privileged-command surface — no production consumer yet (see
-	 *  the convention note near the top of this file). */
-	readonly layout: {
-		/** Register a PRIVILEGED command (must be a `layout.*` name) handled through
-		 *  the capability-gated ControlBus. A caller can only invoke it if a live
-		 *  grant covers (senderId, name); otherwise DECK_FORBIDDEN. Ordinary domain
-		 *  APIs go in `hostServices` (un-gated) — never register privileged names there. */
-		command(name: string, handler: (...args: JsonValue[]) => JsonValue | Promise<JsonValue>): Disposable
-	}
-
 	readonly context: DeckContext
 
 	on<E extends keyof FrameworkEvents>(
@@ -512,8 +445,8 @@ export interface TrustedSenderRef {
 /**
  * Domain backend injected into the framework. The framework owns process
  * lifecycle / windows / wire / trust primitives; the backend supplies the
- * domain assembly (real context, mainWindow content, projects/simulator/views,
- * IPC modules) the framework is deliberately ignorant of. All hooks except
+ * domain assembly (real context, mainWindow content, native views, IPC
+ * modules) the framework is deliberately ignorant of. All hooks except
  * `assemble` are optional; absent hooks fall back to framework defaults.
  *
  * @internal exported via `/host` for backend implementers.
@@ -521,7 +454,7 @@ export interface TrustedSenderRef {
 export interface RuntimeBackend {
 	/**
 	 * When true, the backend builds the main window itself (in `assemble`) and
-	 * the framework skips its own window/toolbar/declared-window assembly — used
+	 * the framework skips its own window assembly — used
 	 * by hosts whose window needs construction-time options the generic factory
 	 * can't express (e.g. a per-session preload partition). Default false: the
 	 * framework owns the window and the backend only reacts (onMainWindowClose).
@@ -537,7 +470,7 @@ export interface RuntimeBackend {
 	/**
 	 * Domain assembly. Runs in setup phase, after the runtime skeleton is built
 	 * and the wire transport is live. Loads the main renderer, registers domain
-	 * IPC modules, stands up simulator/CDP/views, etc.
+	 * IPC modules, stands up its own native views, etc.
 	 */
 	assemble(runtime: Runtime): MaybePromise<void>
 	/**
@@ -582,10 +515,11 @@ export interface RuntimeBackend {
 	onSecondInstance?(): void
 	/**
 	 * Deterministic shutdown hook. AWAITED exactly ONCE during `app.shutdown()`'s
-	 * cleanup, consistently with `config.lifecycle.beforeClose` — so a backend no
-	 * longer hand-rolls `app.once('before-quit', ...)`. Best-effort: a throw/reject
-	 * is logged and does NOT abort the rest of shutdown. Fires regardless of
-	 * `ownsWindows`.
+	 * cleanup, BEFORE any scope teardown — so a backend no longer hand-rolls
+	 * `app.once('before-quit', ...)`. There is NO timeout: shutdown waits as long
+	 * as this takes, so a backend that needs one must impose it itself.
+	 * Best-effort otherwise: a throw/reject is logged and does NOT abort the rest
+	 * of shutdown. Fires regardless of `ownsWindows`.
 	 */
 	onShutdown?(): void | Promise<void>
 }

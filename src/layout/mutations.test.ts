@@ -37,7 +37,7 @@ import {
 	setSizes,
 	splitGroup,
 	splitPanel,
-	validateTree,
+	collectTreeProblems,
 	wrapRoot,
 } from './index.js'
 import {
@@ -567,7 +567,7 @@ describe('splitPanel', () => {
 		const ids = allNodes(result).map(n => n.id)
 		expect(new Set(ids).size).toBe(ids.length) // all distinct
 		expect(structuralProblems(result)).toEqual([])
-		expect(validateTree(result, new Set(allPanels(result)))).toEqual([])
+		expect(collectTreeProblems(result, new Set(allPanels(result)))).toEqual([])
 	})
 
 	it('is pure', () => {
@@ -613,12 +613,12 @@ describe('splitGroup', () => {
 		// This is the property that distinguishes splitGroup from splitPanel: the
 		// group is resolved by id, not through one of its panels, so every panel it
 		// held stays together in the SAME group after the split.
-		const t = tree(tabs('g-debug', ['wxml', 'appdata', 'storage', 'console', 'compile'], 'wxml'))
-		const out = splitGroup(t, 'g-debug', 'column', 'editor', 'before')
-		const debugGroup = findGroup(out, 'g-debug')!
-		expect(debugGroup.panels).toEqual(['wxml', 'appdata', 'storage', 'console', 'compile'])
-		expect(debugGroup.active).toBe('wxml')
-		expect(groupOf(out, 'editor')!.panels).toEqual(['editor'])
+		const t = tree(tabs('g-multi', ['p1', 'p2', 'p3', 'p4', 'p5'], 'p1'))
+		const out = splitGroup(t, 'g-multi', 'column', 'q', 'before')
+		const multiGroup = findGroup(out, 'g-multi')!
+		expect(multiGroup.panels).toEqual(['p1', 'p2', 'p3', 'p4', 'p5'])
+		expect(multiGroup.active).toBe('p1')
+		expect(groupOf(out, 'q')!.panels).toEqual(['q'])
 		expectStructurallySound(out)
 	})
 
@@ -655,7 +655,7 @@ describe('splitGroup', () => {
 		const ids = allNodes(out).map(n => n.id)
 		expect(new Set(ids).size).toBe(ids.length) // all distinct
 		expect(structuralProblems(out)).toEqual([])
-		expect(validateTree(out, new Set(allPanels(out)))).toEqual([])
+		expect(collectTreeProblems(out, new Set(allPanels(out)))).toEqual([])
 	})
 
 	it('is pure', () => {
@@ -740,7 +740,7 @@ describe('wrapRoot', () => {
 		const ids = allNodes(out).map((n) => n.id)
 		expect(new Set(ids).size).toBe(ids.length) // all distinct
 		expect(structuralProblems(out)).toEqual([])
-		expect(validateTree(out, new Set(allPanels(out)))).toEqual([])
+		expect(collectTreeProblems(out, new Set(allPanels(out)))).toEqual([])
 	})
 
 	it('is pure', () => {
@@ -795,7 +795,7 @@ describe('operations compose without corrupting the tree (order sensitivity)', (
 
 // ───────────────────── CONSTRAINT INVARIANT under mutation (M3) ─────────────────────
 //
-// THE BUG (M3): `validateTree` (serialize.ts) requires every split to keep >= 1
+// THE BUG (M3): `collectTreeProblems` (serialize.ts) requires every split to keep >= 1
 // FLEXIBLE (non-fixed) child — an all-fixed split has no weight-sized child to
 // absorb leftover space (rrp v4.10), so `serializeLayout` writes a tree that
 // `parseLayout` REJECTS on next launch → the persisted layout is silently lost.
@@ -808,14 +808,14 @@ describe('operations compose without corrupting the tree (order sensitivity)', (
 //       of a split with fixed siblings leaves a multi-child split where EVERY
 //       remaining child is fixed.
 //
-// CONTRACT: NO built-in mutation may return a tree that `validateTree` rejects.
+// CONTRACT: NO built-in mutation may return a tree that `collectTreeProblems` rejects.
 //
 // All cases below assert that the mutation layer preserves >= 1 flexible child
-// (so validateTree never reports the all-fixed problem).
+// (so collectTreeProblems never reports the all-fixed problem).
 
 const knownOf = (t: LayoutTree): ReadonlySet<string> => new Set(allPanels(t))
 
-describe('M3 — no mutation may produce an all-fixed split that validateTree rejects', () => {
+describe('M3 — no mutation may produce an all-fixed split that collectTreeProblems rejects', () => {
 	// A 3-child row split: children 0 & 1 fixed, child 2 (g3/p3) the SOLE flexible.
 	function twoFixedOneFlexible(): LayoutTree {
 		return tree({
@@ -833,32 +833,32 @@ describe('M3 — no mutation may produce an all-fixed split that validateTree re
 	}
 
 	// (a) setConstraint fixing the LAST flexible child must NOT yield an all-fixed
-	// split. On HEAD it writes `[{100},{200},{300}]` → validateTree rejects.
+	// split. On HEAD it writes `[{100},{200},{300}]` → collectTreeProblems rejects.
 	it('setConstraint on the sole flexible child does not create an all-fixed split', () => {
 		const t = twoFixedOneFlexible()
 		const out = setConstraint(t, 's0', 2, { fixedPx: 300 })
-		expect(validateTree(out, knownOf(out)), validateTree(out, knownOf(out)).join('\n')).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out)), collectTreeProblems(out, knownOf(out)).join('\n')).toEqual([])
 	})
 
 	// (b1) closePanel'ing the sole flexible child leaves [g1(fixed), g2(fixed)] —
 	// an all-fixed 2-child split on HEAD (normalize keeps both constraints).
-	it('closePanel of the sole flexible child yields a validateTree-clean tree', () => {
+	it('closePanel of the sole flexible child yields a collectTreeProblems-clean tree', () => {
 		const t = twoFixedOneFlexible()
 		const out = closePanel(t, 'p3')
-		expect(validateTree(out, knownOf(out)), validateTree(out, knownOf(out)).join('\n')).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out)), collectTreeProblems(out, knownOf(out)).join('\n')).toEqual([])
 	})
 
 	// (b2) extractPanel of the sole flexible child — same all-fixed survivor.
-	it('extractPanel of the sole flexible child yields a validateTree-clean tree', () => {
+	it('extractPanel of the sole flexible child yields a collectTreeProblems-clean tree', () => {
 		const t = twoFixedOneFlexible()
 		const { tree: out } = extractPanel(t, 'p3')
-		expect(validateTree(out, knownOf(out)), validateTree(out, knownOf(out)).join('\n')).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out)), collectTreeProblems(out, knownOf(out)).join('\n')).toEqual([])
 	})
 
 	// (b3) movePanel of the sole flexible child OUT to another group leaves the
 	// remaining split all-fixed. Move p3 into a separate flexible sibling group so
 	// the source split collapses to [g1(fixed), g2(fixed)].
-	it('movePanel of the sole flexible child away yields a validateTree-clean tree', () => {
+	it('movePanel of the sole flexible child away yields a collectTreeProblems-clean tree', () => {
 		// Outer row split: [ inner(two-fixed-one-flex) | g-sink ]. Moving p3 into
 		// g-sink empties g3 → inner split collapses to the two fixed children.
 		const t = tree({
@@ -883,6 +883,6 @@ describe('M3 — no mutation may produce an all-fixed split that validateTree re
 			sizes: [1, 1],
 		})
 		const out = movePanel(t, 'p3', { groupId: 'g-sink' })
-		expect(validateTree(out, knownOf(out)), validateTree(out, knownOf(out)).join('\n')).toEqual([])
+		expect(collectTreeProblems(out, knownOf(out)), collectTreeProblems(out, knownOf(out)).join('\n')).toEqual([])
 	})
 })

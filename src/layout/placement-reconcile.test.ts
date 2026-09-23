@@ -13,7 +13,7 @@ import {
 
 // The reconciler is domain-neutral: view ids are opaque strings and per-view
 // host specifics ride on the Extra type parameter. These tests pin an example
-// Extra (a simulator-style zoom) to exercise passthrough.
+// Extra (a zoom value) to exercise passthrough.
 type Zoom = { zoom?: number }
 
 const B = (x: number, y: number, width: number, height: number): Bounds => ({
@@ -273,6 +273,154 @@ describe('reconcile — extra passthrough (host specifics ride through)', () => 
     )
     const sb = ops.find((o) => o.kind === 'setBounds' && o.viewId === 'A')
     expect(sb && sb.kind === 'setBounds' && sb.extra).toEqual({ zoom: 3 })
+  })
+})
+
+describe('reconcile — extra structural equality (order-independent, not JSON.stringify)', () => {
+  // Extra shapes here vary across tests (key-reordered object, nested object,
+  // a bare number), so these use a locally-typed Extra rather than the
+  // file-wide Zoom fixture.
+  type AnyExtra = unknown
+  const dvAny = (
+    viewId: string,
+    placement: Placement,
+    layer: number,
+    extra?: AnyExtra,
+  ): DesiredView<AnyExtra> => ({ viewId, placement, layer, ...(extra !== undefined ? { extra } : {}) })
+  const snapAny = (
+    generation: number,
+    epoch: number,
+    views: DesiredView<AnyExtra>[],
+  ): PlacementSnapshot<AnyExtra> => ({ generation, epoch, views })
+  const afterInitialAny = (views: DesiredView<AnyExtra>[]): ReconcilerState<AnyExtra> =>
+    reconcile(createInitialState<AnyExtra>(), snapAny(0, 0, views)).state
+
+  it('produces no ops when only extra key order differs (same bounds)', () => {
+    const prev = afterInitialAny([dvAny('A', visible(B(0, 0, 100, 100)), 0, { a: 1, b: 2 })])
+    const { ops } = reconcile(
+      prev,
+      snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, { b: 2, a: 1 })]),
+    )
+    expect(ops).toEqual([])
+  })
+
+  it('produces no ops when a Map extra has the same entries', () => {
+    const prev = afterInitialAny([
+      dvAny('A', visible(B(0, 0, 100, 100)), 0, new Map([['zoom', 2]])),
+    ])
+    const { ops } = reconcile(
+      prev,
+      snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, new Map([['zoom', 2]]))]),
+    )
+    expect(ops).toEqual([])
+  })
+
+  it('produces no ops when a RegExp extra has the same source and flags', () => {
+    const prev = afterInitialAny([dvAny('A', visible(B(0, 0, 100, 100)), 0, /deck/gi)])
+    const { ops } = reconcile(prev, snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, /deck/gi)]))
+    expect(ops).toEqual([])
+  })
+
+  it('emits setBounds when a Map extra entry changes', () => {
+    const prev = afterInitialAny([
+      dvAny('A', visible(B(0, 0, 100, 100)), 0, new Map([['zoom', 2]])),
+    ])
+    const next = new Map([['zoom', 3]])
+    const { ops } = reconcile(
+      prev,
+      snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, next)]),
+    )
+    expect(ops).toHaveLength(1)
+    expect(ops[0]).toMatchObject({ kind: 'setBounds', viewId: 'A', extra: next })
+  })
+
+  it('produces no ops for equivalent Set and typed-array extras', () => {
+    const setPrev = afterInitialAny([
+      dvAny('A', visible(B(0, 0, 100, 100)), 0, new Set(['x', 'y'])),
+    ])
+    expect(
+      reconcile(
+        setPrev,
+        snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, new Set(['x', 'y']))]),
+      ).ops,
+    ).toEqual([])
+
+    const bytesPrev = afterInitialAny([
+      dvAny('A', visible(B(0, 0, 100, 100)), 0, new Uint8Array([1, 2, 3])),
+    ])
+    expect(
+      reconcile(
+        bytesPrev,
+        snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, new Uint8Array([1, 2, 3]))]),
+      ).ops,
+    ).toEqual([])
+  })
+
+  it('compares circular extras without redundant updates or missed changes', () => {
+    const previous: { value: number; self?: unknown } = { value: 1 }
+    previous.self = previous
+    const next: { value: number; self?: unknown } = { value: 1 }
+    next.self = next
+    const prev = afterInitialAny([dvAny('A', visible(B(0, 0, 100, 100)), 0, previous)])
+    const unchanged = reconcile(prev, snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, next)]))
+    expect(unchanged.ops).toEqual([])
+    next.value = 2
+    expect(
+      reconcile(unchanged.state, snapAny(0, 2, [dvAny('A', visible(B(0, 0, 100, 100)), 0, next)])).ops,
+    ).toMatchObject([{ kind: 'setBounds', viewId: 'A' }])
+  })
+
+  it('does not update when two fields share the same unchanged extra object', () => {
+    const priorShared = { zoom: 2 }
+    const nextShared = { zoom: 2 }
+    const prev = afterInitialAny([
+      dvAny('A', visible(B(0, 0, 100, 100)), 0, { left: priorShared, right: priorShared }),
+    ])
+    const { ops } = reconcile(
+      prev,
+      snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, { left: nextShared, right: nextShared })]),
+    )
+    expect(ops).toEqual([])
+  })
+
+  it('emits exactly one setBounds carrying the new extra when a nested value changes', () => {
+    const prev = afterInitialAny([dvAny('A', visible(B(0, 0, 100, 100)), 0, { zoom: { x: 1 } })])
+    const { ops } = reconcile(
+      prev,
+      snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, { zoom: { x: 2 } })]),
+    )
+    expect(ops).toHaveLength(1)
+    const sb = ops.find((o) => o.kind === 'setBounds' && o.viewId === 'A')
+    expect(sb && sb.kind === 'setBounds' && sb.extra).toEqual({ zoom: { x: 2 } })
+  })
+
+  it('emits setBounds when a Date extra changes time with identical bounds', () => {
+    const prev = afterInitialAny([
+      dvAny('A', visible(B(0, 0, 100, 100)), 0, new Date('2026-01-01T00:00:00.000Z')),
+    ])
+    const next = new Date('2026-01-02T00:00:00.000Z')
+    const { ops } = reconcile(
+      prev,
+      snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, next)]),
+    )
+    expect(ops).toHaveLength(1)
+    expect(ops[0]).toMatchObject({ kind: 'setBounds', viewId: 'A', extra: next })
+  })
+
+  it('emits setBounds when an array hole becomes a value', () => {
+    const previous = new Array<number>(1)
+    const prev = afterInitialAny([dvAny('A', visible(B(0, 0, 100, 100)), 0, previous)])
+    const { ops } = reconcile(prev, snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, [7])]))
+    expect(ops).toHaveLength(1)
+    expect(ops[0]).toMatchObject({ kind: 'setBounds', viewId: 'A', extra: [7] })
+  })
+
+  it('emits one setBounds when extra changes type (object → number)', () => {
+    const prev = afterInitialAny([dvAny('A', visible(B(0, 0, 100, 100)), 0, { a: 1 })])
+    const { ops } = reconcile(prev, snapAny(0, 1, [dvAny('A', visible(B(0, 0, 100, 100)), 0, 5)]))
+    expect(ops).toHaveLength(1)
+    const sb = ops.find((o) => o.kind === 'setBounds' && o.viewId === 'A')
+    expect(sb && sb.kind === 'setBounds' && sb.extra).toBe(5)
   })
 })
 

@@ -1,13 +1,13 @@
 // Main-side glue between an untrusted renderer snapshot and the level-triggered
 // reconcile core. Two pure steps, each independently testable:
 //
-//   1. cleanSnapshot(raw, authorize) — validate + AUTHORIZE a raw wire payload
+//   1. authorizeSnapshot(raw, authorize) — validate + AUTHORIZE a raw wire payload
 //      into a trusted CleanSnapshot (or reject it whole). The renderer publishes
 //      a window-level table keyed by opaque slot tokens; this derives each view's
 //      real identity from the token registry (never trusting the renderer-reported
 //      viewId) and drops anything it can't authorize.
 //
-//   2. dispatchOps(ops, state, resolveApply) — collapse the reconciler's rich op
+//   2. applyReconciledPlacements(ops, state, resolveApply) — collapse the reconciler's rich op
 //      stream onto a host whose per-view sink is the two-state
 //      `applyPlacement({visible:true,bounds} | {visible:false})` (an electron-deck
 //      ViewHandle). z-order is compositor zone-fixed here, so reorder ops are
@@ -96,7 +96,7 @@ function readSlotToken(rawView: Record<string, unknown>): string | null {
  */
 // Authorize + validate ONE raw view into a CleanView, or null to drop it (not an
 // object, no/unknown/unauthorized token, malformed placement, or a duplicate
-// viewId already seen). Kept separate so cleanSnapshot stays a simple collect loop.
+// viewId already seen). Kept separate so authorizeSnapshot stays a simple collect loop.
 function cleanOneView(rawView: unknown, authorize: Authorizer, seen: Set<string>): CleanView | null {
   if (rawView === null || typeof rawView !== 'object' || Array.isArray(rawView)) return null
   const rv = rawView as Record<string, unknown>
@@ -110,7 +110,7 @@ function cleanOneView(rawView: unknown, authorize: Authorizer, seen: Set<string>
   return { viewId: grant.viewId, placement: rv.placement, layer: grant.layer }
 }
 
-export function cleanSnapshot(raw: unknown, authorize: Authorizer): CleanSnapshot | null {
+export function authorizeSnapshot(raw: unknown, authorize: Authorizer): CleanSnapshot | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
   const snap = raw as Record<string, unknown>
   if (!isNonNegInt(snap.generation) || !isNonNegInt(snap.epoch)) return null
@@ -137,14 +137,19 @@ export function cleanSnapshot(raw: unknown, authorize: Authorizer): CleanSnapsho
  * `actual` (not the op itself) means a bare restore still carries its bounds.
  *
  * Each apply runs in its own try/catch: one throwing sink (e.g. a destroyed native
- * view) must not abort the rest of the dispatch.
+ * view) must not abort the rest of the dispatch. The sink reports whether the
+ * frame was ACCEPTED (true) — a drop (false) or a throw both count as rejected.
+ * Returns the set of rejected viewIds so the caller can keep its `state.actual`
+ * ledger honest: reconcile is level-triggered, so a rejected frame recorded as
+ * applied would never be re-diffed and the view would stick at its stale state.
  */
-export function dispatchOps(
+export function applyReconciledPlacements(
   ops: ViewOp[],
   state: ReconcilerState,
-  resolveApply: (viewId: string) => ((p: Placement) => void) | null,
-): void {
-  if (ops.length === 0) return
+  resolveApply: (viewId: string) => ((p: Placement) => boolean) | null,
+): Set<string> {
+  const rejected = new Set<string>()
+  if (ops.length === 0) return rejected
   const touched = new Set<string>()
   for (let i = 0; i < ops.length; i++) {
     const op = ops[i]!
@@ -152,7 +157,7 @@ export function dispatchOps(
       touched.add(op.viewId)
     }
   }
-  if (touched.size === 0) return
+  if (touched.size === 0) return rejected
   for (const viewId of touched) {
     const apply = resolveApply(viewId)
     if (!apply) continue
@@ -161,10 +166,14 @@ export function dispatchOps(
       a && a.attached && a.visible && a.bounds
         ? { visible: true, bounds: a.bounds }
         : { visible: false }
+    let accepted: boolean
     try {
-      apply(placement)
+      accepted = apply(placement)
     } catch (err) {
       console.error(`[electron-deck] applyPlacement for view "${viewId}" threw:`, err)
+      accepted = false
     }
+    if (!accepted) rejected.add(viewId)
   }
+  return rejected
 }

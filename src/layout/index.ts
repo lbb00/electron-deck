@@ -25,7 +25,7 @@ export type {
 } from './types.js'
 
 export { createPanelRegistry } from './registry.js'
-export { serializeLayout, parseLayout, validateTree } from './serialize.js'
+export { serializeLayout, parseLayout, collectTreeProblems } from './serialize.js'
 export { sanitizeFlexibleWeights } from './sanitize.js'
 export {
 	setSizes,
@@ -55,4 +55,4 @@ export type {
 export { createInitialState, reconcile } from './placement-reconcile.js'
 
 export type { CleanView, CleanSnapshot, Authorizer } from './snapshot-reconcile.js'
-export { cleanSnapshot, dispatchOps } from './snapshot-reconcile.js'
+export { authorizeSnapshot, applyReconciledPlacements } from './snapshot-reconcile.js'

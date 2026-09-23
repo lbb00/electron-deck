@@ -92,7 +92,7 @@
         min-width: 40px;
         overflow: hidden;
       }
-      #simulator { flex: 0 0 auto; }   /* width driven by JS (splitter) */
+      #preview { flex: 0 0 auto; }   /* width driven by JS (splitter) */
       #panel  { flex: 1 1 auto; }   /* takes the rest */
       .splitter {
         flex: 0 0 6px;
@@ -116,7 +116,7 @@
     <!-- Screen 2 -->
     <div id="detail">
       <div class="split">
-        <div class="slot" id="simulator"><span class="label">#simulator slot</span></div>
+        <div class="slot" id="preview"><span class="label">#preview slot</span></div>
         <div class="splitter" id="splitter"></div>
         <div class="slot" id="panel"><span class="label">#panel slot</span></div>
       </div>
@@ -178,45 +178,45 @@
       // ── REAL slot-token client: bridge is REQUIRED, no default form ────────
       // This is the actual user-side API under review. The renderer owns ZERO
       // geometry/IPC logic beyond handing the client a bridge + a DOM with the
-      // #simulator / #panel slots. The client measures each granted slot and
+      // #preview / #panel slots. The client measures each granted slot and
       // threads placements back; the host moves the native blocks.
       layoutClient = createDeckLayoutClient({ bridge })
 
       // ── Draggable vertical splitter (pure DOM/CSS/JS) ─────────────────────
-      // Dragging resizes #simulator (#panel = flex:1 fills the rest). The
+      // Dragging resizes #preview (#panel = flex:1 fills the rest). The
       // view-anchor inside createDeckLayoutClient re-measures via ResizeObserver
       // and republishes — so the NATIVE blocks follow with ZERO host resize code.
       const splitter = document.getElementById('splitter')
-      const simEl = document.getElementById('simulator')
-      const splitContainer = simEl.parentElement
+      const previewEl = document.getElementById('preview')
+      const splitContainer = previewEl.parentElement
       let dragging = false
-      function setSimWidth(px) {
+      function setPreviewWidth(px) {
         const min = 80
         const max = splitContainer.clientWidth - 80
-        simEl.style.flexBasis = Math.max(min, Math.min(max, px)) + 'px'
+        previewEl.style.flexBasis = Math.max(min, Math.min(max, px)) + 'px'
       }
       // initial: half the container
-      requestAnimationFrame(() => setSimWidth(splitContainer.clientWidth / 2))
+      requestAnimationFrame(() => setPreviewWidth(splitContainer.clientWidth / 2))
       splitter.addEventListener('mousedown', () => { dragging = true })
       window.addEventListener('mouseup', () => { dragging = false })
       window.addEventListener('mousemove', (e) => {
         if (!dragging) return
         const left = splitContainer.getBoundingClientRect().left
-        setSimWidth(e.clientX - left)
+        setPreviewWidth(e.clientX - left)
       })
       // Programmatic hook for the offscreen verification (executeJavaScript):
-      // moves the splitter to an absolute simulator width so the test can prove
+      // moves the splitter to an absolute preview width so the test can prove
       // the native blocks FOLLOWED the DOM split.
-      window.__demoSetSplit = (simPx) => setSimWidth(simPx)
+      window.__demoSetSplit = (previewPx) => setPreviewWidth(previewPx)
 
       // ── Renderer-driven hide / restore (proves the reconcile detach path) ──
-      // display:none trips view-anchor's guardDisplayNone → the anchor publishes
+      // display:none trips view-anchor's treatZeroAreaAsHidden → the anchor publishes
       // a { visible:false } placement → the central publisher's next snapshot omits
-      // the sim's geometry → main's reconciler emits a detach. Restoring display
+      // the preview's geometry → main's reconciler emits a detach. Restoring display
       // re-measures → a { visible:true } placement → the reconciler re-attaches.
       // No host-side hide code: visibility is 100% renderer-declared, level-driven.
-      window.__demoHideSim = () => { simEl.style.display = 'none' }
-      window.__demoShowSim = () => { simEl.style.display = '' }
+      window.__demoHidePreview = () => { previewEl.style.display = 'none' }
+      window.__demoShowPreview = () => { previewEl.style.display = '' }
 
       // ── Stress: rapidly re-split many times in quick succession ────────────
       // This reproduces the shape of the white-screen bug (a burst of relayouts,
@@ -229,12 +229,12 @@
         for (let i = 0; i < rounds; i++) {
           // Deterministic-but-varying widths (no Math.random — reproducible runs).
           const w = 80 + ((i * 53) % Math.max(120, wide - 160))
-          setSimWidth(w)
+          setPreviewWidth(w)
           // Yield a frame so the anchor's ResizeObserver/RAF actually measures each.
           await new Promise((r) => requestAnimationFrame(r))
         }
         // Settle on a known-good split so the post-stress assertion is stable.
-        setSimWidth(360)
+        setPreviewWidth(360)
         await new Promise((r) => requestAnimationFrame(r))
       }
 

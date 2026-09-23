@@ -74,7 +74,7 @@ export interface DockViewProps {
 	suppressReorderOnlyDropIndicator?: boolean
 	/**
 	 * Fires when the user clicks a tab that is ALREADY active. The host can use
-	 * this to toggle the panel's visibility (e.g. collapse the debug group).
+	 * this to toggle the panel's visibility (e.g. collapse the notes group).
 	 * When absent, clicking an active tab is a no-op (the existing behaviour).
 	 */
 	onActiveTabClick?: (panelId: string) => void
@@ -89,7 +89,7 @@ export interface DockViewProps {
  * (a `WebContentsView` tracking its slot's geometry) re-publishes its bounds
  * only on GEOMETRY events (ResizeObserver / window-resize / splitter-drag). A
  * layout mutation that REORDERS a slot without resizing it — flipping a
- * fixed-width simulator column left↔right, moving a region — produces NO such
+ * fixed-width preview column left↔right, moving a region — produces NO such
  * event (a same-size flex reorder fires nothing), so the overlay would freeze
  * at its old position. The epoch is the layout layer's explicit "something
  * moved" signal: a panel hosting a native overlay re-measures (e.g. pulses its
@@ -252,11 +252,14 @@ export function DockView(props: DockViewProps): ReactNode {
 			// depth) — its position in the tree is fixed. ──
 			if (registry.get(draggedPanelId)?.draggable === false) return
 
-			// ── PanelCapabilities gate (GOAL A target): a group whose ACTIVE panel is
-			// `draggable:false` is a locked drop ANCHOR — nothing may join or split
+			// ── PanelCapabilities gate (GOAL A target): a group whose ACTIVE panel has
+			// `acceptsDrops:false` is a locked drop ANCHOR — nothing may join or split
 			// against it, in any zone. Checked before the no-op/reorder logic so a
-			// locked simulator/editor can never absorb another panel. ──
-			if (registry.get(activePanelId)?.draggable === false) return
+			// locked fixed-size pane can never absorb another panel. `acceptsDrops`
+			// falls back to `draggable` (then `true`) when omitted — see
+			// PanelCapabilities in types.ts. ──
+			const targetDescriptor = registry.get(activePanelId)
+			if ((targetDescriptor?.acceptsDrops ?? targetDescriptor?.draggable ?? true) === false) return
 
 			// ── PanelCapabilities gate (GOAL B): a `reorder-only` dragged panel is
 			// routed to its dedicated handler BEFORE the no-op gate — its one legal

@@ -7,8 +7,8 @@
  *
  *  - `command(name, handler)` : webview → main RPC. The facade owns the single
  *    command table and exposes {@link ControlBus.dispatch}; the wire's
- *    `invokeHost` (and `invokeSimulator`) seam calls `dispatch(name, args)` so a
- *    real webview→main invoke (after the wire's sender + main-frame gate) lands on
+ *    `invokeHost` seam calls `dispatch(name, args)` so a real webview→main
+ *    invoke (after the wire's sender + main-frame gate) lands on
  *    the registered handler. Callers never see the wire `kind`. Trust + main-frame
  *    gating are entirely the wire's (`handleInvoke`): a trusted main-frame sender
  *    reaches the handler, an untrusted sender → `DECK_UNTRUSTED_SENDER`, a
@@ -20,15 +20,15 @@
  *  - `trust(wc, owner)` : delegates to `trustSet.admit` (refcount membership owned
  *    by `owner` Scope, so the lease is released when the owner tears down).
  *
- * Real wiring (Bug C): the command table is the SOLE command authority. The
- * production caller builds the {@link WireTransport} with
- * `invokeHost = (name, args) => controlBus.dispatch(name, args)` (and the same
- * for `invokeSimulator`, since the facade hides the kind), and `declaredEvents`
+ * Real wiring: the command table is the SOLE command authority for a host
+ * that opts in. A host builds its OWN {@link WireTransport} with
+ * `invokeHost = (name, args) => controlBus.dispatch(name, args)` (the facade
+ * hides the wire `kind`), and `declaredEvents`
  * reading {@link ControlBus.declaredEvents}. So a real IPC invoke reaches the
- * command handler through the wire — not a private test-only seam. Any
- * config-declared host services register into this SAME table via `command()`,
- * so there is one namespace (the host keeps names unique), never two registries
- * that can collide.
+ * command handler through the wire — not a private test-only seam. `electron-deck/host`
+ * ships this + `capability.ts` as standalone utilities; the framework (`deck-app.ts`)
+ * does not build a `ControlBus` or wire it in on its own — a host that wants this
+ * layer assembles it itself (typically in `backend.assemble`).
  *
  * @internal exported via `/host`.
  */
@@ -61,8 +61,8 @@ export interface ControlBus {
 	 *  (the lease is released when `owner` resets/closes). */
 	trust(wc: MinimalWebContents, owner: Scope): Disposable
 	/**
-	 * Real wire entry point — the {@link WireTransport}'s `invokeHost` /
-	 * `invokeSimulator` seam calls this with a domain-neutral `name` AFTER its
+	 * Real wire entry point — the {@link WireTransport}'s `invokeHost` seam
+	 * calls this with a domain-neutral `name` AFTER its
 	 * trust + main-frame gate. Resolves the command table; throws if `name` is
 	 * unregistered (the wire serialises that into an `InvokeFailure`). `ctx`
 	 * carries the gated senderId (the grant gate reads it when a policy is
@@ -81,7 +81,7 @@ export interface CreateControlBusDeps {
 	/**
 	 * Vestigial — the facade never calls into the wire from inside `dispatch` /
 	 * `command` / `event` / `trust` (the wire is the one that calls `dispatch`,
-	 * not the reverse). Made OPTIONAL so deck-app can construct the ControlBus
+	 * not the reverse). Made OPTIONAL so a host can construct the ControlBus
 	 * BEFORE the WireTransport (which references the ControlBus from its
 	 * `invokeHost` seam) — no circular dependency at construction time.
 	 */

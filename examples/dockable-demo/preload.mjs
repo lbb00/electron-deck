@@ -11,7 +11,7 @@ import { exposeDeckLayoutBridge } from '../../dist/preload/index.js'
 exposeDeckLayoutBridge()
 
 const demoControl = {
-	// renderer → host: open the project (host places the native simulator block).
+	// renderer → host: open the project (host places the native preview block).
 	openProject(id) {
 		ipcRenderer.send('demo:open-project', id)
 	},

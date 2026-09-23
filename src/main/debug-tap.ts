@@ -2,11 +2,11 @@
  * debugTap (foundation.md §7) — a flag-gated ring buffer for observing an
  * IPC / cross-wc bridge message stream.
  *
- * Hung on a dispatch chokepoint (e.g. bridge-router's SERVICE_INVOKE /
- * RENDER_INVOKE / PUBLISH / API_RESPONSE handlers), it records per-message
- * metadata — connection id / channel / direction / appSession / duration /
- * error — into a bounded ring so a hidden panel (or a test) can inspect the
- * last N messages when debugging the cross-wc state machine.
+ * Hung on a dispatch chokepoint (wherever a host funnels its bridge frames
+ * through a single handler), it records per-message metadata — connection id /
+ * channel / direction / session / duration / error — into a bounded ring so a
+ * hidden panel (or a test) can inspect the last N messages when debugging the
+ * cross-wc state machine.
  *
  * Design constraints:
  *  - Default OFF: `record()` is a near-free no-op when disabled, so the hot
@@ -21,14 +21,19 @@
 export interface DebugTapEntry {
   /** Caller-stamped timestamp (ms). The primitive never reads the clock. */
   ts: number
-  /** The channel / message kind (e.g. 'SERVICE_INVOKE', 'API_RESPONSE'). */
+  /** The channel / message kind (e.g. 'invoke', 'response'). */
   channel: string
   /** Ingress (main received) vs egress (main sent). */
   direction: 'in' | 'out'
   /** webContents.id of the connection this message is attributed to. */
   connectionId?: number
-  /** bridge-router app session this message routes within, if known. */
-  appSessionId?: string
+  /**
+   * Caller-defined session this message belongs to, if known. One webContents
+   * can be reused across sessions (same `wc.id`, different occupant), so this
+   * is what separates one session's traffic from the next — `connectionId`
+   * alone cannot.
+   */
+  sessionId?: string
   /** For request/response pairs: how long the handler took (ms). */
   durationMs?: number
   /** Error message if the message produced a failure. */

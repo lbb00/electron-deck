@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { defineEvent } from '../events.js'
-import {
-	BRIDGE_PROTOCOL_VERSION,
-	DeckChannel,
-} from '../shared/protocol.js'
+import { BRIDGE_PROTOCOL_VERSION, DeckChannel } from '../shared/protocol.js'
 import type { JsonValue, Runtime, RuntimeBackend, WebviewSource, DeckConfig } from '../types.js'
 import type {
 	MinimalBrowserWindow,
@@ -19,9 +16,7 @@ import type { MinimalIpcMain, MinimalWebContents } from './wire-transport.js'
 /**
  * Phase 2 contract tests for DeckApp lifecycle driver.
  *
- * Source of truth: JSDoc on DeckApp. Phase 2 in-memory only —
- * Electron-specific runtime fields (electron / mainWindow / toolbarView)
- * are not exercised here.
+ * Source of truth: JSDoc on DeckApp.
  */
 describe('DeckApp — construction', () => {
 	it('constructs with an empty config without throwing', () => {
@@ -40,14 +35,13 @@ describe('DeckApp — construction', () => {
 	// the same pattern, and ctor-throwing makes it hard to wire test fixtures.
 	it('invalid config rejects on start(), not at construction time (CONTRACT-AMBIGUOUS)', async () => {
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const bad: any = { simulatorApis: { broken: 'oops' } }
+		const bad: any = { hostServices: { broken: 'oops' } }
 		// Either ctor throws OR start() rejects — both honour validate-on-call.
 		let ctorThrew = false
 		let app: DeckApp | null = null
 		try {
 			app = new DeckApp(bad)
-		}
-		catch {
+		} catch {
 			ctorThrew = true
 		}
 		if (!ctorThrew && app) {
@@ -63,26 +57,31 @@ describe('DeckApp — start() phase progression', () => {
 		expect(app.phase).toBe('ready')
 	})
 
-	it('start() invokes config.setup(runtime) before reaching ready', async () => {
-		const setup = vi.fn()
-		const app = new DeckApp({ setup })
+	it('start() invokes backend.assemble(runtime) before reaching ready', async () => {
+		const assemble = vi.fn()
+		const app = new DeckApp({}, { backend: { assemble } })
 		await app.start()
-		expect(setup).toHaveBeenCalledTimes(1)
-		const arg = setup.mock.calls[0]?.[0] as Runtime | undefined
+		expect(assemble).toHaveBeenCalledTimes(1)
+		const arg = assemble.mock.calls[0]?.[0] as Runtime | undefined
 		expect(arg).toBeDefined()
 		expect(typeof arg?.add).toBe('function')
 	})
 
-	it('start() awaits an async setup before resolving', async () => {
-		let setupFinished = false
-		const app = new DeckApp({
-			setup: async () => {
-				await new Promise(r => setTimeout(r, 20))
-				setupFinished = true
+	it('start() awaits an async backend.assemble before resolving', async () => {
+		let assembleFinished = false
+		const app = new DeckApp(
+			{},
+			{
+				backend: {
+					assemble: async () => {
+						await new Promise((r) => setTimeout(r, 20))
+						assembleFinished = true
+					},
+				},
 			},
-		})
+		)
 		await app.start()
-		expect(setupFinished).toBe(true)
+		expect(assembleFinished).toBe(true)
 		expect(app.phase).toBe('ready')
 	})
 
@@ -98,13 +97,18 @@ describe('DeckApp — start() phase progression', () => {
 		expect(app.runtime).toBeDefined()
 	})
 
-	it('setup throwing → start() rejects with the same error and app proceeds through cleanup → destroy', async () => {
-		const err = new Error('setup-boom')
-		const app = new DeckApp({
-			setup: () => {
-				throw err
+	it('backend.assemble throwing → start() rejects with the same error and app proceeds through cleanup → destroy', async () => {
+		const err = new Error('assemble-boom')
+		const app = new DeckApp(
+			{},
+			{
+				backend: {
+					assemble: () => {
+						throw err
+					},
+				},
 			},
-		})
+		)
 		await expect(app.start()).rejects.toBe(err)
 		// dispose must have run; phase should NOT be 'ready'
 		expect(app.phase).not.toBe('ready')
@@ -113,35 +117,45 @@ describe('DeckApp — start() phase progression', () => {
 		expect(['cleanup', 'destroy', 'quit']).toContain(app.phase)
 	})
 
-	it('setup throwing causes registered disposables to run', async () => {
+	it('backend.assemble throwing causes registered disposables to run', async () => {
 		const dispose = vi.fn()
-		const err = new Error('setup-boom')
-		const app = new DeckApp({
-			setup: (rt) => {
-				rt.add(dispose)
-				throw err
+		const err = new Error('assemble-boom')
+		const app = new DeckApp(
+			{},
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.add(dispose)
+						throw err
+					},
+				},
 			},
-		})
+		)
 		await expect(app.start()).rejects.toBe(err)
 		expect(dispose).toHaveBeenCalledTimes(1)
 	})
 })
 
-describe('DeckApp — declared events during setup', () => {
-	it('a declared HostEvent.publish() is bound before setup runs (does not throw)', async () => {
+describe('DeckApp — declared events during backend.assemble', () => {
+	it('a declared HostEvent.publish() is bound before backend.assemble runs (does not throw)', async () => {
 		const ev = defineEvent<JsonValue>('declared-evt')
 		let threw = false
-		const app = new DeckApp({
-			events: [ev],
-			setup: () => {
-				try {
-					ev.publish({ ok: true })
-				}
-				catch {
-					threw = true
-				}
+		const app = new DeckApp(
+			{
+				events: [ev],
 			},
-		})
+			{
+				backend: {
+					assemble: () => {
+						try {
+							ev.publish({ ok: true })
+						} catch {
+							threw = true
+						}
+					},
+				},
+			},
+		)
 		await app.start()
 		expect(threw).toBe(false)
 	})
@@ -163,78 +177,67 @@ describe('DeckApp — shutdown()', () => {
 		expect(app.phase).toBe('quit')
 	})
 
-	it('shutdown() awaits lifecycle.beforeClose', async () => {
-		let beforeFinished = false
-		const app = new DeckApp({
-			lifecycle: {
-				beforeClose: async () => {
-					await new Promise(r => setTimeout(r, 20))
-					beforeFinished = true
+	it('shutdown() awaits backend.onShutdown', async () => {
+		let onShutdownFinished = false
+		const app = new DeckApp(
+			{},
+			{
+				backend: {
+					assemble: () => {},
+					onShutdown: async () => {
+						await new Promise((r) => setTimeout(r, 20))
+						onShutdownFinished = true
+					},
 				},
 			},
-		})
+		)
 		await app.start()
 		await app.shutdown()
-		expect(beforeFinished).toBe(true)
+		expect(onShutdownFinished).toBe(true)
 	})
 
 	it('shutdown() invokes runtime.add() disposables in LIFO order', async () => {
 		const calls: string[] = []
-		const app = new DeckApp({
-			setup: (rt) => {
-				rt.add(() => {
-					calls.push('a')
-				})
-				rt.add(() => {
-					calls.push('b')
-				})
-				rt.add(() => {
-					calls.push('c')
-				})
+		const app = new DeckApp(
+			{},
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.add(() => {
+							calls.push('a')
+						})
+						rt.add(() => {
+							calls.push('b')
+						})
+						rt.add(() => {
+							calls.push('c')
+						})
+					},
+				},
 			},
-		})
+		)
 		await app.start()
 		await app.shutdown()
 		expect(calls).toEqual(['c', 'b', 'a'])
 	})
 
-	it('shutdown() disposes a Disposable added during setup', async () => {
+	it('shutdown() disposes a Disposable added during backend.assemble', async () => {
 		const dispose = vi.fn()
-		const app = new DeckApp({
-			setup: (rt) => {
-				rt.add({ dispose })
+		const app = new DeckApp(
+			{},
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.add({ dispose })
+					},
+				},
 			},
-		})
+		)
 		await app.start()
 		expect(dispose).not.toHaveBeenCalled()
 		await app.shutdown()
 		expect(dispose).toHaveBeenCalledTimes(1)
 	})
-
-	// CONTRACT-AMBIGUOUS: JSDoc says "timeout → log error" but does not say
-	// whether shutdown rejects or continues. We assert "log error then
-	// continue into cleanup", which avoids leaving the host in a stuck
-	// half-shut state — the safer choice for a framework boundary.
-	it('beforeClose timing out logs an error but shutdown() still resolves to quit (CONTRACT-AMBIGUOUS)', async () => {
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-		try {
-			const app = new DeckApp({
-				lifecycle: {
-					timeoutMs: 30,
-					beforeClose: () => new Promise(() => {
-						// never resolves
-					}),
-				},
-			})
-			await app.start()
-			await expect(app.shutdown()).resolves.toBeUndefined()
-			expect(app.phase).toBe('quit')
-			expect(errorSpy).toHaveBeenCalled()
-		}
-		finally {
-			errorSpy.mockRestore()
-		}
-	}, 5000)
 })
 
 // ── WireTransport integration via DeckAppOptions.wireTransport ──
@@ -287,9 +290,14 @@ describe('DeckApp — wireTransport integration', () => {
 		// handlers are registered eagerly (not lazily on the first anchored
 		// placeIn), so a slot-less app also registers all 4.
 		expect(ipcMain.handle).toHaveBeenCalledTimes(4)
-		const channels = ipcMain.handle.mock.calls.map(c => c[0] as string).sort()
+		const channels = ipcMain.handle.mock.calls.map((c) => c[0] as string).sort()
 		expect(channels).toEqual(
-			[DeckChannel.Invoke, DeckChannel.Probe, DeckChannel.Snapshot, DeckChannel.LayoutSubscribe].sort(),
+			[
+				DeckChannel.Invoke,
+				DeckChannel.Probe,
+				DeckChannel.Snapshot,
+				DeckChannel.LayoutSubscribe,
+			].sort(),
 		)
 	})
 
@@ -311,34 +319,9 @@ describe('DeckApp — wireTransport integration', () => {
 		const res = (await invoke(
 			{ sender: { id: 11 } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(res.ok).toBe(true)
 		expect(res.result).toBe('pong')
-
-		await app.shutdown()
-	})
-
-	it('declared simulatorApis are reachable through the ipcMain invoke handler (trusted sender)', async () => {
-		const ipcMain = createFakeIpcMain()
-		const wc = createFakeWebContents(12)
-		const app = new DeckApp(
-			{
-				simulatorApis: {
-					echo: (msg: string) => msg,
-				},
-			},
-			{ wireTransport: { ipcMain, trustedWebContents: () => [wc] } },
-		)
-		await app.start()
-
-		const invoke = ipcMain.handlers.get(DeckChannel.Invoke)
-		if (!invoke) throw new Error('invoke handler missing')
-		const res = (await invoke(
-			{ sender: { id: 12 } },
-			{ kind: 'simulator', name: 'echo', args: ['hello'] },
-		)) as { ok: true, result: JsonValue }
-		expect(res.ok).toBe(true)
-		expect(res.result).toBe('hello')
 
 		await app.shutdown()
 	})
@@ -358,7 +341,7 @@ describe('DeckApp — wireTransport integration', () => {
 		const res = (await invoke(
 			{ sender: { id: 99 } },
 			{ kind: 'host', name: 'secret', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(res.ok).toBe(false)
 		expect(res.error.code).toBe('DECK_UNTRUSTED_SENDER')
 		expect(hostServices.secret).not.toHaveBeenCalled()
@@ -404,9 +387,14 @@ describe('DeckApp — wireTransport integration', () => {
 		// Channels are armed at start, so shutdown removes all 4
 		// (the eagerly-registered Snapshot / LayoutSubscribe handlers too).
 		expect(ipcMain.removeHandler).toHaveBeenCalledTimes(4)
-		const removed = ipcMain.removeHandler.mock.calls.map(c => c[0] as string).sort()
+		const removed = ipcMain.removeHandler.mock.calls.map((c) => c[0] as string).sort()
 		expect(removed).toEqual(
-			[DeckChannel.Invoke, DeckChannel.Probe, DeckChannel.Snapshot, DeckChannel.LayoutSubscribe].sort(),
+			[
+				DeckChannel.Invoke,
+				DeckChannel.Probe,
+				DeckChannel.Snapshot,
+				DeckChannel.LayoutSubscribe,
+			].sort(),
 		)
 	})
 
@@ -443,7 +431,7 @@ describe('DeckApp — wireTransport integration', () => {
 		const untrustedRes = (await invoke(
 			{ sender: { id: 50 } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(untrustedRes.ok).toBe(false)
 		expect(untrustedRes.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
@@ -453,7 +441,7 @@ describe('DeckApp — wireTransport integration', () => {
 		const trustedRes = (await invoke(
 			{ sender: { id: 50 } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(trustedRes.ok).toBe(true)
 		expect(trustedRes.result).toBe('pong')
 
@@ -462,7 +450,7 @@ describe('DeckApp — wireTransport integration', () => {
 		const afterRes = (await invoke(
 			{ sender: { id: 50 } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(afterRes.ok).toBe(false)
 		expect(afterRes.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
@@ -510,7 +498,9 @@ interface FakeElectron extends MinimalElectron {
 	webContentsViewCtorCalls: Array<{ webPreferences?: { preload?: string } } | undefined>
 }
 
-function createFakeElectron(initialContentBounds: MinimalRect = { x: 0, y: 0, width: 1024, height: 768 }): FakeElectron {
+function createFakeElectron(
+	initialContentBounds: MinimalRect = { x: 0, y: 0, width: 1024, height: 768 },
+): FakeElectron {
 	let wcIdCounter = 100
 	let winIdCounter = 1
 	const browserWindows: FakeBrowserWindow[] = []
@@ -553,7 +543,9 @@ function createFakeElectron(initialContentBounds: MinimalRect = { x: 0, y: 0, wi
 				removeChildView: vi.fn(),
 			}
 			this.contentView = cv as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
@@ -561,15 +553,17 @@ function createFakeElectron(initialContentBounds: MinimalRect = { x: 0, y: 0, wi
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
 			this._lastCloseEvent = null
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -668,7 +662,9 @@ describe('DeckApp — electron assembly', () => {
 		const app = new DeckApp({}, { electron })
 		await app.start()
 		expect(() => app.runtime.mainWindow).not.toThrow()
-		expect(app.runtime.mainWindow).toBe(electron.browserWindows[0] as unknown as Runtime['mainWindow'])
+		expect(app.runtime.mainWindow).toBe(
+			electron.browserWindows[0] as unknown as Runtime['mainWindow'],
+		)
 	})
 
 	it('runtime.rawIpcMain returns the wired ipcMain (no longer throws) when wireTransport is provided', async () => {
@@ -695,187 +691,40 @@ describe('DeckApp — electron assembly', () => {
 		const res = (await invoke(
 			{ sender: { id: mainWcId } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(res.ok).toBe(true)
 		expect(res.result).toBe('pong')
 
 		await app.shutdown()
 	})
 
-	// MUST 4a: toolbar WebContentsView ctor with preloadPath
-	it('config.toolbar present → WebContentsView is constructed with webPreferences.preload === toolbar.preloadPath', async () => {
+	// MUST 6: runtime.windows.create() in backend.assemble → BrowserWindow ctor + load*
+	it('runtime.windows.create() in backend.assemble constructs a BrowserWindow with width/height/modal/preload from opts', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 60,
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-
-		expect(electron.webContentsViewCtorCalls).toHaveLength(1)
-		const opts = electron.webContentsViewCtorCalls[0]
-		expect(opts).toBeDefined()
-		expect(opts?.webPreferences?.preload).toBe('/abs/preload/toolbar.cjs')
-	})
-
-	// MUST 4b: toolbar view attached to mainWindow.contentView
-	it('toolbar view is added to mainWindow.contentView via addChildView', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 60,
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-
-		const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
-		const view = electron.webContentsViews[0]
-		expect(mainWin.contentView.addChildView).toHaveBeenCalledTimes(1)
-		expect(mainWin.contentView.addChildView).toHaveBeenCalledWith(view)
-	})
-
-	// MUST 4c: toolbar source.url → view.webContents.loadURL
-	it('toolbar source.url → view.webContents.loadURL is called with that url', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 60,
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-
-		const view = electron.webContentsViews[0] as FakeWebContentsView
-		expect(view.webContents.loadURL).toHaveBeenCalledTimes(1)
-		expect(view.webContents.loadURL).toHaveBeenCalledWith('http://localhost:5173/toolbar.html')
-		expect(view.webContents.loadFile).not.toHaveBeenCalled()
-	})
-
-	// MUST 4c (file branch)
-	it('toolbar source.file → view.webContents.loadFile is called with that path', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { file: '/abs/dist/toolbar/index.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 60,
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-
-		const view = electron.webContentsViews[0] as FakeWebContentsView
-		expect(view.webContents.loadFile).toHaveBeenCalledTimes(1)
-		expect(view.webContents.loadFile).toHaveBeenCalledWith('/abs/dist/toolbar/index.html')
-		expect(view.webContents.loadURL).not.toHaveBeenCalled()
-	})
-
-	// MUST 4d: toolbar view webContents auto-trusted
-	it('toolbar view.webContents is automatically trusted (default senderPolicy lets its id through)', async () => {
-		const electron = createFakeElectron()
-		const ipcMain = createFakeIpcMain()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 60,
-				},
-				hostServices: { ping: () => 'pong' as JsonValue },
-			},
-			{ electron, wireTransport: { ipcMain } },
-		)
-		await app.start()
-
-		const toolbarWcId = (electron.webContentsViews[0] as FakeWebContentsView).webContents.id
-		const invoke = ipcMain.handlers.get(DeckChannel.Invoke)
-		if (!invoke) throw new Error('invoke handler missing')
-		const res = (await invoke(
-			{ sender: { id: toolbarWcId } },
-			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
-		expect(res.ok).toBe(true)
-		expect(res.result).toBe('pong')
-
-		await app.shutdown()
-	})
-
-	// MUST 4e: toolbar.height → view.setBounds, x=0,y=0, width=mainWindow.getContentBounds().width
-	it('toolbar.height drives view.setBounds: x=0, y=0, height=toolbar.height, width=mainWindow.getContentBounds().width', async () => {
-		const electron = createFakeElectron({ x: 0, y: 0, width: 1440, height: 900 })
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 48,
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-
-		const view = electron.webContentsViews[0] as FakeWebContentsView
-		expect(view.setBounds).toHaveBeenCalled()
-		const lastCall = view.setBounds.mock.calls[view.setBounds.mock.calls.length - 1]
-		const rect = lastCall?.[0] as MinimalRect
-		expect(rect.x).toBe(0)
-		expect(rect.y).toBe(0)
-		expect(rect.height).toBe(48)
-		expect(rect.width).toBe(1440)
-	})
-
-	// MUST 5: no toolbar → runtime.toolbarView is null, WebContentsView never constructed
-	it('config.toolbar absent → runtime.toolbarView === null and WebContentsView ctor was never called', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp({}, { electron })
-		await app.start()
-
-		expect(app.runtime.toolbarView).toBeNull()
-		expect(electron.webContentsViewCtorCalls).toHaveLength(0)
-	})
-
-	// MUST 6: declared windows in config.windows each → BrowserWindow ctor + load*
-	it('declared windows each construct a BrowserWindow with title/width/height/modal/preload from contribution', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				windows: {
-					reauth: {
-						title: 'Re-Authenticate',
-						source: { url: 'http://localhost:5173/reauth.html' },
-						preloadPath: '/abs/preload/reauth.cjs',
-						width: 480,
-						height: 320,
-						modal: true,
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({
+							source: { url: 'http://localhost:5173/reauth.html' },
+							preloadPath: '/abs/preload/reauth.cjs',
+							width: 480,
+							height: 320,
+							modal: true,
+						})
 					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
-		// First ctor = mainWindow; second = declared 'reauth'
+		// First ctor = mainWindow; second = the assemble-created window
 		expect(electron.browserWindowCtorCalls.length).toBeGreaterThanOrEqual(2)
 		const reauthOpts = electron.browserWindowCtorCalls[1]
 		expect(reauthOpts).toBeDefined()
-		expect(reauthOpts!.title).toBe('Re-Authenticate')
 		expect(reauthOpts!.width).toBe(480)
 		expect(reauthOpts!.height).toBe(320)
 		expect(reauthOpts!.modal).toBe(true)
@@ -886,17 +735,19 @@ describe('DeckApp — electron assembly', () => {
 		expect(reauthWin.webContents.loadURL).toHaveBeenCalledWith('http://localhost:5173/reauth.html')
 	})
 
-	it('declared window source.file → win.webContents.loadFile is called with that path', async () => {
+	it('runtime.windows.create({ source: file }) → win.webContents.loadFile is called with that path', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					welcome: {
-						source: { file: '/abs/dist/welcome/index.html' },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { file: '/abs/dist/welcome/index.html' } })
 					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -905,20 +756,23 @@ describe('DeckApp — electron assembly', () => {
 		expect(win.webContents.loadURL).not.toHaveBeenCalled()
 	})
 
-	// MUST 7: declared windows auto-trusted by default
-	it('declared windows webContents are automatically trusted', async () => {
+	// MUST 7: windows created via runtime.windows.create() are auto-trusted by default
+	it('runtime.windows.create()d windows are automatically trusted', async () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: {
-						source: { url: 'http://localhost:5173/reauth.html' },
-					},
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -928,7 +782,7 @@ describe('DeckApp — electron assembly', () => {
 		const res = (await invoke(
 			{ sender: { id: reauthWin.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(res.ok).toBe(true)
 		expect(res.result).toBe('pong')
 
@@ -961,7 +815,7 @@ describe('DeckApp — electron assembly', () => {
 		const res = (await invoke(
 			{ sender: { id: win.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(res.ok).toBe(true)
 
 		await app.shutdown()
@@ -986,61 +840,41 @@ describe('DeckApp — electron assembly', () => {
 		const res = (await invoke(
 			{ sender: { id: win.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(res.ok).toBe(false)
 		expect(res.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
 		await app.shutdown()
 	})
 
-	// MUST 10: runtime.windows.get(id) returns declared window by record key
-	it('runtime.windows.get("reauth") returns the declared window registered under that key', async () => {
+	// MUST 11: runtime.windows.all()
+	it('runtime.windows.all() includes mainWindow + assemble-created + runtime.windows.create() spawned windows', async () => {
 		const electron = createFakeElectron()
+		let reauth: Runtime['mainWindow'] | undefined
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: {
-						source: { url: 'http://localhost:5173/reauth.html' },
+				backend: {
+					assemble: (rt) => {
+						reauth = rt.windows.create({
+							source: { url: 'http://localhost:5173/reauth.html' },
+						}).window
 					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-
-		const declared = app.runtime.windows.get('reauth') as unknown as FakeBrowserWindow | undefined
-		expect(declared).toBeDefined()
-		expect(declared).toBe(electron.browserWindows[1])
-	})
-
-	it('runtime.windows.get(unknown-id) returns undefined', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp({}, { electron })
-		await app.start()
-		expect(app.runtime.windows.get('nope')).toBeUndefined()
-	})
-
-	// MUST 11: runtime.windows.all()
-	it('runtime.windows.all() includes mainWindow + declared + runtime.windows.create() spawned windows', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
 		const created = app.runtime.windows.create({
 			source: { url: 'http://localhost:5173/dyn.html' },
 		}).window
-		const all = app.runtime.windows.all()
-		expect(all.length).toBeGreaterThanOrEqual(3)
-		expect(all).toContain(app.runtime.mainWindow)
-		expect(all).toContain(app.runtime.windows.get('reauth') as unknown as Runtime['mainWindow'])
-		expect(all).toContain(created)
+		const allWindows = app.runtime.windows.all().map((w) => w.window)
+		expect(allWindows.length).toBeGreaterThanOrEqual(3)
+		expect(allWindows).toContain(app.runtime.mainWindow)
+		expect(allWindows).toContain(reauth)
+		expect(allWindows).toContain(created)
 	})
 
 	// MUST 12: runtime.windows.trust(win) → trusts; dispose → un-trusts
@@ -1065,7 +899,7 @@ describe('DeckApp — electron assembly', () => {
 		const before = (await invoke(
 			{ sender: { id: win.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(before.ok).toBe(false)
 		expect(before.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
@@ -1073,33 +907,37 @@ describe('DeckApp — electron assembly', () => {
 		const after = (await invoke(
 			{ sender: { id: win.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(after.ok).toBe(true)
 
 		dispose.dispose()
 		const afterDispose = (await invoke(
 			{ sender: { id: win.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(afterDispose.ok).toBe(false)
 		expect(afterDispose.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
 		await app.shutdown()
 	})
 
-	// MUST 13: shutdown destroys mainWindow + declared windows; idempotent.
-	// CONTRACT-AMBIGUOUS: order between mainWindow / declared / runtime-created
+	// MUST 13: shutdown destroys mainWindow + assemble-created windows; idempotent.
+	// CONTRACT-AMBIGUOUS: order between mainWindow / assemble-created / runtime-created
 	// is not asserted, only that all destroy() calls fire and none happen
 	// twice on an already-destroyed window.
-	it('shutdown() destroys mainWindow and declared windows (CONTRACT-AMBIGUOUS order)', async () => {
+	it('shutdown() destroys mainWindow and assemble-created windows (CONTRACT-AMBIGUOUS order)', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -1154,21 +992,20 @@ describe('DeckApp — electron assembly', () => {
 
 	// preload 在 ipcMain handler 未注册时 invoke 会失败。framework 必须保证
 	// ipcMain.handle 早于 webContents.loadURL。
-	it('declared windows loadURL/loadFile fires AFTER ipcMain.handle is registered (race regression)', async () => {
+	it('runtime.windows.create() loadURL fires AFTER ipcMain.handle is registered (race regression)', async () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
+			{},
 			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/abs/preload/toolbar.cjs',
-					height: 48,
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
+				electron,
+				wireTransport: { ipcMain },
 			},
-			{ electron, wireTransport: { ipcMain } },
 		)
 		await app.start()
 
@@ -1177,14 +1014,10 @@ describe('DeckApp — electron assembly', () => {
 		const lastHandle = Math.max(...handleOrders)
 
 		const reauth = electron.browserWindows[1] as unknown as FakeBrowserWindow
-		const toolbar = electron.webContentsViews[0] as unknown as FakeWebContentsView
 		const reauthLoad = reauth.webContents.loadURL.mock.invocationCallOrder
-		const toolbarLoad = toolbar.webContents.loadURL.mock.invocationCallOrder
 
 		expect(reauthLoad.length).toBe(1)
-		expect(toolbarLoad.length).toBe(1)
 		expect(reauthLoad[0]!).toBeGreaterThan(lastHandle)
-		expect(toolbarLoad[0]!).toBeGreaterThan(lastHandle)
 
 		await app.shutdown()
 	})
@@ -1204,33 +1037,39 @@ describe('DeckApp — mainWindow.closed → framework shutdown (#2 R2)', () => {
 		// Simulate the host destroying the main window
 		mainWin._emit('closed')
 		// Allow the async shutdown chain to settle
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// Wait for the shutdown promise as well (idempotent guard)
 		await app.shutdown()
 		expect(app.phase).toBe('quit')
 	})
 
-	it('declared window "closed" cleans up its tracked state but does NOT shut down the framework', async () => {
+	it('runtime.windows.create()d window "closed" cleans up its tracked state but does NOT shut down the framework', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 		const reauthWin = electron.browserWindows[1] as unknown as FakeBrowserWindow
 		const closedListeners = reauthWin._listeners.get('closed') ?? []
 		expect(closedListeners.length).toBeGreaterThan(0)
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// Framework should still be ready, not quit
 		expect(app.phase).toBe('ready')
-		// Declared window should no longer appear in windows.all()
+		// The window should no longer appear in windows.all()
 		const all = app.runtime.windows.all()
-		expect(all.find(w => (w as unknown as FakeBrowserWindow).id === reauthWin.id)).toBeUndefined()
+		expect(
+			all.find((w) => (w.window as unknown as FakeBrowserWindow).id === reauthWin.id),
+		).toBeUndefined()
 		// Cleanup
 		await app.shutdown()
 	})
@@ -1258,8 +1097,8 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 			assemble: vi.fn(async () => undefined),
 		} as RuntimeBackend & { assemble: ReturnType<typeof vi.fn> }
 		if (onMainWindowClose) {
-			;(backend as { onMainWindowClose?: RuntimeBackend['onMainWindowClose'] }).onMainWindowClose
-				= onMainWindowClose
+			;(backend as { onMainWindowClose?: RuntimeBackend['onMainWindowClose'] }).onMainWindowClose =
+				onMainWindowClose
 		}
 		return backend
 	}
@@ -1279,7 +1118,7 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 		expect(closeListeners.length).toBeGreaterThan(0)
 
 		mainWin._emit('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// ① cancelable event was prevented
 		expect(mainWin._lastCloseEvent?.preventDefault).toHaveBeenCalled()
@@ -1306,7 +1145,7 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 		const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
 
 		mainWin._emit('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(mainWin._lastCloseEvent?.preventDefault).toHaveBeenCalled()
 		expect(onMainWindowClose).toHaveBeenCalledTimes(1)
@@ -1316,7 +1155,7 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 		// Simulate Electron's destroy → 'closed' emission and assert the
 		// existing closed → shutdown chain still fires.
 		mainWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		await app.shutdown()
 		expect(app.phase).toBe('quit')
 	})
@@ -1327,7 +1166,10 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 		const electron = createFakeElectron()
 		let resolveDecision: ((v: 'keep' | 'close') => void) | undefined
 		const onMainWindowClose = vi.fn(
-			() => new Promise<'keep' | 'close'>((resolve) => { resolveDecision = resolve }),
+			() =>
+				new Promise<'keep' | 'close'>((resolve) => {
+					resolveDecision = resolve
+				}),
 		)
 		const backend = makeBackend(onMainWindowClose as RuntimeBackend['onMainWindowClose'])
 		const app = new DeckApp({}, { electron, backend })
@@ -1336,14 +1178,14 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 
 		// First close → dispatches the (pending) decision.
 		mainWin._emit('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(onMainWindowClose).toHaveBeenCalledTimes(1)
 		const firstEvent = mainWin._lastCloseEvent
 		expect(firstEvent?.preventDefault).toHaveBeenCalled()
 
 		// Second close WHILE the first decision is still pending.
 		mainWin._emit('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// ② swallowed: still prevented, but no re-dispatch.
 		expect(mainWin._lastCloseEvent?.preventDefault).toHaveBeenCalled()
 		expect(onMainWindowClose).toHaveBeenCalledTimes(1)
@@ -1352,7 +1194,7 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 
 		// Resolve to 'close' to drain in-flight state cleanly.
 		resolveDecision?.('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		await app.shutdown()
 	})
 
@@ -1367,7 +1209,7 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 		expect(closeListeners.length).toBeGreaterThan(0)
 
 		mainWin._emit('close')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(mainWin._lastCloseEvent?.preventDefault).toHaveBeenCalled()
 		expect(mainWin.destroy).toHaveBeenCalled()
@@ -1387,13 +1229,12 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 			const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
 
 			mainWin._emit('close')
-			await new Promise(r => setTimeout(r, 0))
+			await new Promise((r) => setTimeout(r, 0))
 
 			expect(mainWin._lastCloseEvent?.preventDefault).toHaveBeenCalled()
 			expect(onMainWindowClose).toHaveBeenCalledTimes(1)
 			expect(mainWin.destroy).toHaveBeenCalled()
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 			await app.shutdown()
 		}
@@ -1409,7 +1250,7 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 		const closedListeners = mainWin._listeners.get('closed') ?? []
 		expect(closedListeners.length).toBeGreaterThan(0)
 		mainWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		await app.shutdown()
 		expect(app.phase).toBe('quit')
 	})
@@ -1418,60 +1259,73 @@ describe('DeckApp — mainWindow close-decision machine (v2)', () => {
 // ── loadAssembledSources catches load errors ────────────────────────────────
 
 describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => {
-	it('toolbar loadURL rejection is caught and start() resolves', async () => {
+	it('runtime.windows.create()d window loadURL rejection is caught and start() resolves', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/p',
-					height: 48,
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/toolbar.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 		try {
-			// Make the toolbar webContents.loadURL reject
-			const origCtor = electron.WebContentsView
-			Object.defineProperty(electron, 'WebContentsView', {
-				value: class extends (origCtor as unknown as { new(opts?: { webPreferences?: { preload?: string } }): MinimalWebContentsView })  {
-					constructor(opts?: { webPreferences?: { preload?: string } }) {
+			// Make the created window's webContents.loadURL reject
+			let count = 0
+			const origCtor = electron.BrowserWindow
+			Object.defineProperty(electron, 'BrowserWindow', {
+				value: class extends (origCtor as unknown as {
+					new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+				}) {
+					constructor(opts?: MinimalBrowserWindowOptions) {
 						super(opts)
-						const wc = this.webContents as FakeWebContentsLike
-						wc.loadURL = vi.fn(async () => {
-							throw new Error('load-boom')
-						}) as FakeWebContentsLike['loadURL']
+						count++
+						if (count === 2) {
+							const wc = (this as unknown as FakeBrowserWindow).webContents
+							wc.loadURL = vi.fn(async () => {
+								throw new Error('load-boom')
+							}) as FakeWebContentsLike['loadURL']
+						}
 					}
 				},
 				configurable: true,
 			})
 			await expect(app.start()).resolves.toBeUndefined()
 			// Allow microtasks for caught rejection logging
-			await new Promise(r => setTimeout(r, 0))
+			await new Promise((r) => setTimeout(r, 0))
 			expect(errorSpy).toHaveBeenCalled()
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 			await app.shutdown()
 		}
 	})
 
-	it('declared window loadFile rejection is caught and start() resolves', async () => {
+	it('runtime.windows.create()d window loadFile rejection is caught and start() resolves', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					broken: { source: { file: '/abs/missing.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { file: '/abs/missing.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		// Patch BrowserWindow so the SECOND (declared) ctor produces a wc.loadFile that rejects
 		let count = 0
 		const origCtor = electron.BrowserWindow
 		Object.defineProperty(electron, 'BrowserWindow', {
-			value: class extends (origCtor as unknown as { new(opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow }) {
+			value: class extends (origCtor as unknown as {
+				new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+			}) {
 				constructor(opts?: MinimalBrowserWindowOptions) {
 					super(opts)
 					count++
@@ -1488,10 +1342,9 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 		try {
 			await expect(app.start()).resolves.toBeUndefined()
-			await new Promise(r => setTimeout(r, 0))
+			await new Promise((r) => setTimeout(r, 0))
 			expect(errorSpy).toHaveBeenCalled()
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 			await app.shutdown()
 		}
@@ -1501,31 +1354,37 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 	// emitFrameworkEvent('load-failed', {...})，host 在 setup 内订阅可观测到。
 	it('loadURL rejection emits FrameworkEvent "load-failed" with source + error', async () => {
 		const electron = createFakeElectron()
-		let receivedPayload: { source: WebviewSource, error: unknown } | null = null
+		let receivedPayload: { source: WebviewSource; error: unknown } | null = null
 		const app = new DeckApp(
+			{},
 			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/will-fail.html' },
-					preloadPath: '/p',
-					height: 48,
+				backend: {
+					assemble: (rt) => {
+						rt.on('load-failed', (p) => {
+							receivedPayload = p
+						})
+						rt.windows.create({ source: { url: 'http://localhost:5173/will-fail.html' } })
+					},
 				},
-				setup: (rt) => {
-					rt.on('load-failed', (p) => {
-						receivedPayload = p
-					})
-				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
-		const origCtor = electron.WebContentsView
-		Object.defineProperty(electron, 'WebContentsView', {
-			value: class extends (origCtor as unknown as { new(opts?: { webPreferences?: { preload?: string } }): MinimalWebContentsView }) {
-				constructor(opts?: { webPreferences?: { preload?: string } }) {
+		let count = 0
+		const origCtor = electron.BrowserWindow
+		Object.defineProperty(electron, 'BrowserWindow', {
+			value: class extends (origCtor as unknown as {
+				new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+			}) {
+				constructor(opts?: MinimalBrowserWindowOptions) {
 					super(opts)
-					const wc = this.webContents as FakeWebContentsLike
-					wc.loadURL = vi.fn(async () => {
-						throw new Error('load-failed-boom')
-					}) as FakeWebContentsLike['loadURL']
+					count++
+					if (count === 2) {
+						const wc = (this as unknown as FakeBrowserWindow).webContents
+						wc.loadURL = vi.fn(async () => {
+							throw new Error('load-failed-boom')
+						}) as FakeWebContentsLike['loadURL']
+					}
 				}
 			},
 			configurable: true,
@@ -1534,13 +1393,12 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		try {
 			await app.start()
 			// allow microtasks for catch -> emit
-			await new Promise(r => setTimeout(r, 0))
+			await new Promise((r) => setTimeout(r, 0))
 			expect(receivedPayload).not.toBeNull()
-			const p = receivedPayload as unknown as { source: WebviewSource, error: unknown }
+			const p = receivedPayload as unknown as { source: WebviewSource; error: unknown }
 			expect(p.source).toEqual({ url: 'http://localhost:5173/will-fail.html' })
 			expect((p.error as Error).message).toBe('load-failed-boom')
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 			await app.shutdown()
 		}
@@ -1548,17 +1406,22 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 
 	// declared/runtime-created window 'closed' 时必须把 webContents 从
 	// trustedWcRefs 移除，避免 wc.id 复用 + 内存泄漏。
-	it('declared window closed removes its webContents from trust set (D3)', async () => {
+	it('runtime.windows.create()d window closed removes its webContents from trust set (D3)', async () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					tmp: { source: { url: 'http://localhost:5173/tmp.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/tmp.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 		const tmpWin = electron.browserWindows[1] as unknown as FakeBrowserWindow
@@ -1570,11 +1433,13 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		const before = (await invoke(
 			{ sender: { id: wcId } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(before.ok).toBe(true)
 
 		// fire 'closed' callback → handleSubWindowClosed should evict from trustedWcRefs
-		const closedCb = (tmpWin.on.mock.calls.find(c => c[0] === 'closed')?.[1]) as (() => void) | undefined
+		const closedCb = tmpWin.on.mock.calls.find((c) => c[0] === 'closed')?.[1] as
+			| (() => void)
+			| undefined
 		expect(closedCb).toBeDefined()
 		closedCb!()
 
@@ -1582,7 +1447,7 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		const after = (await invoke(
 			{ sender: { id: wcId } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(after.ok).toBe(false)
 		expect(after.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
@@ -1592,35 +1457,41 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 	// load-failed catch microtask 可能在 setup callback 内 await 之后、register
 	// listener 之前就跑过 → listener 错过。pending queue + 第一个 listener
 	// register 时 splice 消费应当兜住。
-	it('load-failed pending payload is replayed to a listener registered AFTER an async setup boundary', async () => {
+	it('load-failed pending payload is replayed to a listener registered AFTER an async assemble boundary', async () => {
 		const electron = createFakeElectron()
-		let received: { source: WebviewSource, error: unknown } | null = null
+		let received: { source: WebviewSource; error: unknown } | null = null
 		const app = new DeckApp(
+			{},
 			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/late.html' },
-					preloadPath: '/p',
-					height: 48,
+				backend: {
+					assemble: async (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/late.html' } })
+						// host 先 await 一个真异步任务 — catch microtask 已经跑完
+						await new Promise((r) => setTimeout(r, 5))
+						rt.on('load-failed', (p) => {
+							received = p
+						})
+					},
 				},
-				setup: async (rt) => {
-					// host 先 await 一个真异步任务 — catch microtask 已经跑完
-					await new Promise(r => setTimeout(r, 5))
-					rt.on('load-failed', (p) => {
-						received = p
-					})
-				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
-		const origCtor = electron.WebContentsView
-		Object.defineProperty(electron, 'WebContentsView', {
-			value: class extends (origCtor as unknown as { new(opts?: { webPreferences?: { preload?: string } }): MinimalWebContentsView }) {
-				constructor(opts?: { webPreferences?: { preload?: string } }) {
+		let count = 0
+		const origCtor = electron.BrowserWindow
+		Object.defineProperty(electron, 'BrowserWindow', {
+			value: class extends (origCtor as unknown as {
+				new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+			}) {
+				constructor(opts?: MinimalBrowserWindowOptions) {
 					super(opts)
-					const wc = this.webContents as FakeWebContentsLike
-					wc.loadURL = vi.fn(async () => {
-						throw new Error('late-boom')
-					}) as FakeWebContentsLike['loadURL']
+					count++
+					if (count === 2) {
+						const wc = (this as unknown as FakeBrowserWindow).webContents
+						wc.loadURL = vi.fn(async () => {
+							throw new Error('late-boom')
+						}) as FakeWebContentsLike['loadURL']
+					}
 				}
 			},
 			configurable: true,
@@ -1628,12 +1499,11 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 		try {
 			await app.start()
-			await new Promise(r => setTimeout(r, 0))
+			await new Promise((r) => setTimeout(r, 0))
 			expect(received).not.toBeNull()
-			const p = received as unknown as { source: WebviewSource, error: unknown }
+			const p = received as unknown as { source: WebviewSource; error: unknown }
 			expect((p.error as Error).message).toBe('late-boom')
-		}
-		finally {
+		} finally {
 			errorSpy.mockRestore()
 			await app.shutdown()
 		}
@@ -1647,12 +1517,16 @@ describe('DeckApp — shutdown cleanup ordering (#4 R4/C3)', () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain },
 			},
-			{ electron, wireTransport: { ipcMain } },
 		)
 		await app.start()
 		const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
@@ -1678,7 +1552,9 @@ describe('DeckApp — start() rolls back on assembly failure (#5 C6)', () => {
 		let count = 0
 		const origCtor = electron.BrowserWindow
 		Object.defineProperty(electron, 'BrowserWindow', {
-			value: class extends (origCtor as unknown as { new(opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow }) {
+			value: class extends (origCtor as unknown as {
+				new (opts?: MinimalBrowserWindowOptions): MinimalBrowserWindow
+			}) {
 				constructor(opts?: MinimalBrowserWindowOptions) {
 					super(opts)
 					count++
@@ -1690,12 +1566,16 @@ describe('DeckApp — start() rolls back on assembly failure (#5 C6)', () => {
 			configurable: true,
 		})
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await expect(app.start()).rejects.toThrow('ctor-boom')
 		// mainWindow (first ctor) should have been destroyed by cleanup
@@ -1708,49 +1588,48 @@ describe('DeckApp — start() rolls back on assembly failure (#5 C6)', () => {
 // ── emitFrameworkEvent + window-created replay ─────────────────────────────
 
 describe('DeckApp — FrameworkEvents emission (#6 R3)', () => {
-	it('setup() can subscribe to window-created and observe replay for mainWindow / toolbar / declared windows', async () => {
+	it('backend.assemble can subscribe to window-created and observe replay for mainWindow / assemble-created windows', async () => {
 		const electron = createFakeElectron()
 		const seen: Array<{ role: string; id: number }> = []
 		const app = new DeckApp(
+			{},
 			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/p',
-					height: 40,
+				backend: {
+					assemble: (rt) => {
+						rt.on('window-created', (p) => {
+							const win = p.window as unknown as FakeBrowserWindow
+							seen.push({ role: p.role, id: win.id })
+						})
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
-				setup: (rt) => {
-					rt.on('window-created', (p) => {
-						const win = p.window as unknown as FakeBrowserWindow
-						seen.push({ role: p.role, id: win.id })
-					})
-				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
-		// Should have main + toolbar + host(reauth)
-		const roles = seen.map(s => s.role).sort()
+		// Should have main (replayed) + host (real-time)
+		const roles = seen.map((s) => s.role).sort()
 		expect(roles).toContain('main')
-		expect(roles).toContain('toolbar')
 		expect(roles).toContain('host')
 		await app.shutdown()
 	})
 
-	it('runtime.windows.create() emits window-created in real-time after setup', async () => {
+	it('runtime.windows.create() emits window-created in real-time after backend.assemble', async () => {
 		const electron = createFakeElectron()
 		const events: Array<{ role: string; id: number }> = []
 		const app = new DeckApp(
+			{},
 			{
-				setup: (rt) => {
-					rt.on('window-created', (p) => {
-						events.push({ role: p.role, id: (p.window as unknown as FakeBrowserWindow).id })
-					})
+				backend: {
+					assemble: (rt) => {
+						rt.on('window-created', (p) => {
+							events.push({ role: p.role, id: (p.window as unknown as FakeBrowserWindow).id })
+						})
+					},
 				},
+				electron,
 			},
-			{ electron },
 		)
 		await app.start()
 		const before = events.length
@@ -1768,22 +1647,24 @@ describe('DeckApp — FrameworkEvents emission (#6 R3)', () => {
 		const electron = createFakeElectron()
 		const closed: number[] = []
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.on('window-closed', (p) => {
+							closed.push((p.window as unknown as FakeBrowserWindow).id)
+						})
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
-				setup: (rt) => {
-					rt.on('window-closed', (p) => {
-						closed.push((p.window as unknown as FakeBrowserWindow).id)
-					})
-				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 		const reauthWin = electron.browserWindows[1] as unknown as FakeBrowserWindow
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(closed).toContain(reauthWin.id)
 		await app.shutdown()
 	})
@@ -1792,17 +1673,22 @@ describe('DeckApp — FrameworkEvents emission (#6 R3)', () => {
 // ── trust ref-count ────────────────────────────────────────────────────────
 
 describe('DeckApp — trust ref-count (#7 C5)', () => {
-	it('declared auto-trust + runtime.windows.trust() + dispose() → window remains trusted', async () => {
+	it('auto-trust + runtime.windows.trust() + dispose() → window remains trusted', async () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 		const reauthWin = electron.browserWindows[1] as unknown as FakeBrowserWindow
@@ -1815,7 +1701,7 @@ describe('DeckApp — trust ref-count (#7 C5)', () => {
 		const trustedRes = (await invoke(
 			{ sender: { id: reauthWin.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(trustedRes.ok).toBe(true)
 
 		// Dispose: ref-count goes from 2 → 1, NOT 0 → still trusted
@@ -1823,79 +1709,17 @@ describe('DeckApp — trust ref-count (#7 C5)', () => {
 		const afterRes = (await invoke(
 			{ sender: { id: reauthWin.webContents.id } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(afterRes.ok).toBe(true)
 
 		await app.shutdown()
 	})
 })
 
-// ── toolbar follows mainWindow resize ──────────────────────────────────────
-
-describe('DeckApp — toolbar resize tracking (#8 R7)', () => {
-	it('mainWindow.on("resize") → toolbarView.setBounds updates with new content width', async () => {
-		const initial = { x: 0, y: 0, width: 1024, height: 768 }
-		const electron = createFakeElectron(initial)
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/p',
-					height: 48,
-				},
-			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
-		)
-		await app.start()
-		const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
-		const view = electron.webContentsViews[0] as unknown as FakeWebContentsView
-		const callsBefore = view.setBounds.mock.calls.length
-		// Mutate the reported content bounds to simulate a real resize
-		mainWin.getContentBounds = vi.fn(() => ({ x: 0, y: 0, width: 1600, height: 900 })) as FakeBrowserWindow['getContentBounds']
-		mainWin._emit('resize')
-		expect(view.setBounds.mock.calls.length).toBeGreaterThan(callsBefore)
-		const lastCall = view.setBounds.mock.calls[view.setBounds.mock.calls.length - 1]
-		const rect = lastCall?.[0] as MinimalRect
-		expect(rect.width).toBe(1600)
-		expect(rect.height).toBe(48)
-		expect(rect.x).toBe(0)
-		expect(rect.y).toBe(0)
-		await app.shutdown()
-	})
-})
-
 // ── half-state config check ────────────────────────────────────────────────
 
-describe('DeckApp — wireTransport required when toolbar/windows declared (#12 C7)', () => {
-	it('electron + toolbar but no wireTransport → start() rejects with clear message', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				toolbar: {
-					source: { url: 'http://localhost:5173/toolbar.html' },
-					preloadPath: '/p',
-					height: 48,
-				},
-			},
-			{ electron },
-		)
-		await expect(app.start()).rejects.toThrow(/wireTransport\.ipcMain is required/)
-	})
-
-	it('electron + windows but no wireTransport → start() rejects with clear message', async () => {
-		const electron = createFakeElectron()
-		const app = new DeckApp(
-			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
-			},
-			{ electron },
-		)
-		await expect(app.start()).rejects.toThrow(/wireTransport\.ipcMain is required/)
-	})
-
-	it('electron only (no toolbar/windows) without wireTransport is permitted', async () => {
+describe('DeckApp — wireTransport is optional', () => {
+	it('electron only, without wireTransport, is permitted', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp({}, { electron })
 		await expect(app.start()).resolves.toBeUndefined()
@@ -1933,7 +1757,10 @@ describe('DeckApp — wireTransport required when toolbar/windows declared (#12 
 describe('unified-lifetime: shadow map (observation-only, zero-regression)', () => {
 	interface ShadowEntry {
 		window: MinimalBrowserWindow
-		windowScope: { readonly alive: boolean, on(ev: 'reset' | 'closed', cb: () => void): { dispose(): void } }
+		windowScope: {
+			readonly alive: boolean
+			on(ev: 'reset' | 'closed', cb: () => void): { dispose(): void }
+		}
 	}
 	interface LifetimeView {
 		__lifetimeShadow(): Map<MinimalWebContents, ShadowEntry>
@@ -1973,7 +1800,7 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 		// (A) shadow key set === trackedWindows membership (observed via all()).
 		const trackedIds = app.runtime.windows
 			.all()
-			.map(w => (w as unknown as FakeBrowserWindow).id)
+			.map((w) => (w.window as unknown as FakeBrowserWindow).id)
 			.sort((a, b) => a - b)
 		expect(shadowWindowIds(app)).toEqual(trackedIds)
 		// the consistency assertion must pass (no throw)
@@ -1987,12 +1814,16 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 	it('declared and runtime.windows.create() windows each add a shadow entry in lock-step with trackedWindows', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2013,7 +1844,7 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 		// (A) still holds across all three windows.
 		const trackedIds = app.runtime.windows
 			.all()
-			.map(w => (w as unknown as FakeBrowserWindow).id)
+			.map((w) => (w.window as unknown as FakeBrowserWindow).id)
 			.sort((a, b) => a - b)
 		expect(shadowWindowIds(app)).toEqual(trackedIds)
 		expect(() => lifetime(app).__assertLifetimeConsistent()).not.toThrow()
@@ -2025,12 +1856,16 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 	it('sub-window "closed" removes the shadow entry and closes its windowScope (alive → false)', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2042,13 +1877,13 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 
 		// Fire the real 'closed' path (→ handleSubWindowClosed).
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// shadow entry gone, trackedWindows no longer lists it.
 		expect(lifetime(app).__lifetimeShadow().has(wcKeyOf(reauthWin))).toBe(false)
 		const stillTracked = app.runtime.windows
 			.all()
-			.some(w => (w as unknown as FakeBrowserWindow).id === reauthWin.id)
+			.some((w) => (w.window as unknown as FakeBrowserWindow).id === reauthWin.id)
 		expect(stillTracked).toBe(false)
 		// (B) its windowScope was close()d.
 		expect(windowScope.alive).toBe(false)
@@ -2063,12 +1898,16 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 	it('a duplicate "closed" on the same window is idempotent (no throw, no stale shadow entry)', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2076,10 +1915,10 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 		const windowScope = lifetime(app).__lifetimeShadow().get(wcKeyOf(reauthWin))!.windowScope
 
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		// Second 'closed' for the same window must not throw nor leave residue.
 		expect(() => reauthWin._emit('closed')).not.toThrow()
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		expect(lifetime(app).__lifetimeShadow().has(wcKeyOf(reauthWin))).toBe(false)
 		expect(windowScope.alive).toBe(false)
@@ -2094,12 +1933,16 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 	it('consistency invariant (shadow key set === trackedWindows) holds after each create/close op', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2107,7 +1950,7 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 			expect(() => lifetime(app).__assertLifetimeConsistent()).not.toThrow()
 			const trackedIds = app.runtime.windows
 				.all()
-				.map(w => (w as unknown as FakeBrowserWindow).id)
+				.map((w) => (w.window as unknown as FakeBrowserWindow).id)
 				.sort((a, b) => a - b)
 			expect(shadowWindowIds(app)).toEqual(trackedIds)
 		}
@@ -2123,7 +1966,7 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 		assertConsistent() // after second runtime create
 
 		second._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		assertConsistent() // after closing one
 
 		await app.shutdown()
@@ -2135,12 +1978,16 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 	it('doShutdown releases windowScopes in LIFO (reverse creation) order', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2169,7 +2016,7 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 
 		await app.shutdown()
 		// Allow any trailing scope-teardown microtasks to settle.
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// LIFO === reverse creation order.
 		expect(closedOrder).toEqual([...creationOrder].reverse())
@@ -2183,12 +2030,16 @@ describe('unified-lifetime: shadow map (observation-only, zero-regression)', () 
 	it('zero-regression: shadow does not alter shutdown — windows still destroyed and phase reaches quit', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 		const mainWin = electron.browserWindows[0] as unknown as FakeBrowserWindow
@@ -2241,12 +2092,16 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 	it('windowScope.close() destroys its window exactly once and marks the scope dead', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2277,12 +2132,16 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 	it('shutdown drives destruction through rootScope.close(): root dead, all windows destroyed, all windowScopes dead', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2295,7 +2154,7 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 
 		// Capture every windowScope BEFORE shutdown (shadow is cleared by teardown).
 		const scopes = trackedWins.map(
-			win => lifetime(app).__lifetimeShadow().get(wcKeyOf(win))!.windowScope,
+			(win) => lifetime(app).__lifetimeShadow().get(wcKeyOf(win))!.windowScope,
 		)
 		expect(lifetime(app).__rootScope().alive).toBe(true)
 
@@ -2317,12 +2176,16 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain },
 			},
-			{ electron, wireTransport: { ipcMain } },
 		)
 		await app.start()
 
@@ -2345,12 +2208,16 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 	it('owned disposer does not re-destroy a window already destroyed before shutdown', async () => {
 		const electron = createFakeElectron()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain: createFakeIpcMain() },
 			},
-			{ electron, wireTransport: { ipcMain: createFakeIpcMain() } },
 		)
 		await app.start()
 
@@ -2369,12 +2236,16 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
+			{},
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
 				},
+				electron,
+				wireTransport: { ipcMain },
 			},
-			{ electron, wireTransport: { ipcMain } },
 		)
 		await app.start()
 
@@ -2398,12 +2269,17 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2416,18 +2292,18 @@ describe('unified-lifetime P1a: windowScope owns window destruction', () => {
 		const before = (await invoke(
 			{ sender: { id: wcId } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: true, result: JsonValue }
+		)) as { ok: true; result: JsonValue }
 		expect(before.ok).toBe(true)
 		expect(before.result).toBe('pong')
 
 		// fire 'closed' → trust must be revoked
 		declaredWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		const after = (await invoke(
 			{ sender: { id: wcId } },
 			{ kind: 'host', name: 'ping', args: [] },
-		)) as { ok: false, error: { code?: string } }
+		)) as { ok: false; error: { code?: string } }
 		expect(after.ok).toBe(false)
 		expect(after.error.code).toBe('DECK_UNTRUSTED_SENDER')
 
@@ -2484,10 +2360,7 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 	}
 
 	// invoke round-trip helpers — the ONLY way this suite observes trust.
-	async function isTrusted(
-		invoke: InvokeHandler,
-		wcId: number,
-	): Promise<boolean> {
+	async function isTrusted(invoke: InvokeHandler, wcId: number): Promise<boolean> {
 		const res = (await invoke(
 			{ sender: { id: wcId } },
 			{ kind: 'host', name: 'ping', args: [] },
@@ -2501,12 +2374,17 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2540,12 +2418,17 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2560,7 +2443,7 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		expect(wcScope.alive).toBe(true)
 
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 
 		// the cascade revoked trust
 		expect(await isTrusted(invoke, wcId)).toBe(false)
@@ -2578,12 +2461,17 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2611,12 +2499,17 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2638,7 +2531,7 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 
 		// window close → cascade zeroes the framework's auto-trust lease too
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(await isTrusted(invoke, wcId)).toBe(false)
 
 		await app.shutdown()
@@ -2676,7 +2569,7 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		// window close → revoked + record gone (host trust still landed under the
 		// window's windowScope, so the cascade reaps it).
 		win._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(await isTrusted(invoke, wcId)).toBe(false)
 		expect(lifetime(app).__wcRecords().has(wcKeyOf(win))).toBe(false)
 
@@ -2692,12 +2585,17 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2719,7 +2617,7 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		expect(lifetime(app).__wcRecords().size).toBe(0)
 		expect(lifetime(app).__rootScope().alive).toBe(false)
 
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 	})
 
 	// 7 — guard for both halves: (a) the trust ref-count contract (dispose one of
@@ -2731,12 +2629,17 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		const ipcMain = createFakeIpcMain()
 		const app = new DeckApp(
 			{
-				windows: {
-					reauth: { source: { url: 'http://localhost:5173/reauth.html' } },
-				},
 				hostServices: { ping: () => 'pong' as JsonValue },
 			},
-			{ electron, wireTransport: { ipcMain } },
+			{
+				backend: {
+					assemble: (rt) => {
+						rt.windows.create({ source: { url: 'http://localhost:5173/reauth.html' } })
+					},
+				},
+				electron,
+				wireTransport: { ipcMain },
+			},
 		)
 		await app.start()
 
@@ -2754,7 +2657,7 @@ describe('unified-lifetime P1b: wcScope owns trust leases', () => {
 		// (b) NO outstanding host ref now (auto-trust only) → close alone revokes,
 		//     which can ONLY happen if the auto-trust ref is owned by the wcScope.
 		reauthWin._emit('closed')
-		await new Promise(r => setTimeout(r, 0))
+		await new Promise((r) => setTimeout(r, 0))
 		expect(await isTrusted(invoke, wcId)).toBe(false)
 
 		await app.shutdown()

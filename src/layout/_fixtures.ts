@@ -115,7 +115,7 @@ function tabGroupProblems(n: TabGroupNode): string[] {
  * Structural-invariant assertions that must hold after ANY mutation.
  * Returns a list of problems ([] = ok). Used by the mutation tests to prove
  * collapse + sizes/active invariants without trusting the engine's own
- * validateTree.
+ * collectTreeProblems.
  */
 export function structuralProblems(t: LayoutTree): string[] {
 	const problems: string[] = []

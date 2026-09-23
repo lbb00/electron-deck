@@ -24,13 +24,14 @@ interface AnchorOpts {
   publish: (p: Placement) => void
   followScroll?: boolean
   followGeometry?: boolean
-  guardDisplayNone?: boolean
+  treatZeroAreaAsHidden?: boolean
 }
 
 interface CapturedAnchor {
   target: HTMLElement
   opts: AnchorOpts
   dispose: ReturnType<typeof vi.fn>
+  pulse: ReturnType<typeof vi.fn>
 }
 
 // ── FakeRaf ───────────────────────────────────────────────────────────────────
@@ -91,10 +92,11 @@ function makeBridge() {
 function makeAnchorFactory() {
   const anchors: CapturedAnchor[] = []
   const createAnchor = vi.fn(
-    (target: HTMLElement, opts: AnchorOpts): { dispose(): void } => {
+    (target: HTMLElement, opts: AnchorOpts): { dispose(): void; pulse(): void } => {
       const dispose = vi.fn()
-      anchors.push({ target, opts, dispose })
-      return { dispose }
+      const pulse = vi.fn()
+      anchors.push({ target, opts, dispose, pulse })
+      return { dispose, pulse }
     },
   )
   return { createAnchor, anchors }
@@ -114,8 +116,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
     createDeckLayoutClient({
       bridge: b.bridge,
       createAnchor: a.createAnchor,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     expect(b.bridge.onSlotGrant).toHaveBeenCalledTimes(1)
     expect(b.bridge.subscribe).toHaveBeenCalledTimes(1)
@@ -143,15 +145,15 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
     createDeckLayoutClient({
       bridge,
       createAnchor: a.createAnchor,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     expect(a.anchors).toHaveLength(1)
     expect(a.anchors[0]?.target).toBe(el)
     document.body.removeChild(el)
   })
 
-  it('on a grant, creates an anchor with followScroll/followGeometry/guardDisplayNone/visible all true', () => {
+  it('on a grant, creates an anchor with followScroll/followGeometry/treatZeroAreaAsHidden/visible all true', () => {
     const raf = new FakeRaf()
     const b = makeBridge()
     const a = makeAnchorFactory()
@@ -160,15 +162,15 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#sim', slotToken: 'tok-1', generation: 1 })
     const created = a.anchors[0]
     expect(created?.opts.visible).toBe(true)
     expect(created?.opts.followScroll).toBe(true)
     expect(created?.opts.followGeometry).toBe(true)
-    expect(created?.opts.guardDisplayNone).toBe(true)
+    expect(created?.opts.treatZeroAreaAsHidden).toBe(true)
   })
 
   it('a grant whose slotId resolves to no element creates no anchor and does not throw', () => {
@@ -178,8 +180,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
     createDeckLayoutClient({
       bridge: b.bridge,
       createAnchor: a.createAnchor,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     expect(() =>
       b.emitGrant({ viewId: 'v1', slotId: '#nope', slotToken: 'tok-1', generation: 1 }),
@@ -196,8 +198,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok-1', generation: 1 })
     a.anchors[0]?.opts.publish(placement(5))
@@ -213,8 +215,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok-XYZ', generation: 1 })
     const p = placement(5)
@@ -239,8 +241,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: (id) => (id === '#sim' ? sim : dev),
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v-sim', slotId: '#sim', slotToken: 'tok-sim', generation: 1 })
     b.emitGrant({ viewId: 'v-panel', slotId: '#panel', slotToken: 'tok-panel', generation: 1 })
@@ -262,8 +264,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 5 })
     a.anchors[0]?.opts.publish(placement(1))
@@ -281,8 +283,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 5 })
     a.anchors[0]?.opts.publish(placement(1))
@@ -304,8 +306,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok1', generation: 1 })
     a.anchors[0]?.opts.publish(placement(1))
@@ -326,8 +328,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => (resolves ? el : null),
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok-a', generation: 1 })
     b.emitGrant({ viewId: 'v2', slotId: '#b', slotToken: 'tok-b', generation: 1 })
@@ -357,8 +359,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => elements[i++] ?? elements[0]!,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     b.emitGrant({ viewId: 'v1', slotId: '#a', slotToken: 'tok-a', generation: 1 })
     b.emitGrant({ viewId: 'v2', slotId: '#b', slotToken: 'tok-b', generation: 1 })
@@ -387,8 +389,8 @@ describe('createDeckLayoutClient — handshake, anchor opts, snapshot sink, gene
       bridge: b.bridge,
       createAnchor: a.createAnchor,
       resolveSlot: () => el,
-      requestFrame: raf.request,
-      cancelFrame: raf.cancel,
+      schedulePublish: raf.request,
+      cancelScheduledPublish: raf.cancel,
     })
     client.dispose()
 

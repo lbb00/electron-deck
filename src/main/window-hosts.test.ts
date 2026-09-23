@@ -1,7 +1,7 @@
 /**
  * Behavior tests for `windowHostsWebContents` in `./window-hosts.ts`.
  *
- * The function must judge ownership across every shape a simulator/render
+ * The function must judge ownership across every shape a render
  * surface can take: the window's own renderer, a `WebContentsView` nested at
  * any depth in `contentView`, and a `<webview>` guest (reported via
  * `hostWebContents`, itself possibly a nested view). Fakes below model only

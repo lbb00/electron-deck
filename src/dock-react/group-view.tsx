@@ -167,7 +167,7 @@ export function GroupView(props: GroupViewProps): ReactNode {
 	}
 
 	// Panels that contribute a tab to the strip (`hideTab` panels carry their own
-	// chrome — e.g. the simulator's device picker — so the engine tab is omitted).
+	// chrome — e.g. a preview pane's device picker — so the engine tab is omitted).
 	// When NONE remain the tab strip is not rendered at all and the body fills the
 	// whole group region.
 	const visibleTabs = node.panels.filter((panelId) => !ctx.registry.get(panelId)?.hideTab)
@@ -176,7 +176,7 @@ export function GroupView(props: GroupViewProps): ReactNode {
 	// allotted panel region so a leaf native slot can stretch to the full area.
 	// Without this the group div is content-height (the tab strip only), the
 	// active body / NativeSlot measures 0 height, the view-anchor publishes a
-	// collapsed rect, and the simulator WebContentsView is invisible. The tab
+	// collapsed rect, and the preview WebContentsView is invisible. The tab
 	// strip is `shrink: 0`; the active body takes the remaining space (flex: 1).
 	return (
 		<div

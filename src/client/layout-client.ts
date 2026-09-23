@@ -1,5 +1,5 @@
-import { createPlacementAnchor } from 'view-anchor'
-import type { Placement } from 'view-anchor'
+import { createViewAnchor } from 'view-anchor'
+import type { Placement, ViewAnchorHandle } from 'view-anchor'
 import { createPlacementPublisher } from './placement-publisher.js'
 import type { PlacementSnapshot } from '../layout/index.js'
 
@@ -41,7 +41,7 @@ export interface LayoutClientDeps {
 	 *  `document.querySelector(slotId)`. Returns `null` when the slot is not
 	 *  mounted (graceful no-op). */
 	resolveSlot?(slotId: string): HTMLElement | null
-	/** Anchor factory. Default: view-anchor's `createPlacementAnchor`. Injected
+	/** Anchor factory. Default: view-anchor's `createViewAnchor`. Injected
 	 *  in tests to capture `(target, opts)` without real RO/IO/RAF. */
 	createAnchor?: (
 		target: HTMLElement,
@@ -50,24 +50,26 @@ export interface LayoutClientDeps {
 			publish: (p: Placement) => void
 			followScroll?: boolean
 			followGeometry?: boolean
-			guardDisplayNone?: boolean
+			treatZeroAreaAsHidden?: boolean
 		},
-	) => { dispose(): void }
-	/** Frame scheduler for the internal placement publisher. Default:
-	 *  requestAnimationFrame / cancelAnimationFrame. Injected in tests to drive
-	 *  coalesced publishes deterministically. */
-	requestFrame?: (cb: () => void) => number
-	cancelFrame?: (id: number) => void
+	) => Pick<ViewAnchorHandle, 'dispose' | 'pulse'>
+	/** Task scheduler for the internal placement publisher. Default: a
+	 *  MessageChannel-based post-task (see placement-publisher.ts), which runs
+	 *  right after the current render step instead of waiting for the next
+	 *  animation frame. Injected in tests to drive coalesced publishes
+	 *  deterministically. */
+	schedulePublish?: (cb: () => void) => number
+	cancelScheduledPublish?: (id: number) => void
 }
 
 /**
  * Renderer half of the slot-token handshake. Subscribes to main's `slot-grant`
  * pushes FIRST (so a grant replayed synchronously by `subscribe()` cannot be
  * missed), then on each grant anchors the granted DOM slot with this session's
- * hardening opts (followScroll / followGeometry / guardDisplayNone). Each anchor's
+ * hardening opts (followScroll / followGeometry / treatZeroAreaAsHidden). Each anchor's
  * measured `Placement` is written into a CENTRAL placement publisher keyed by
  * `viewId` — NOT sent per-view. The publisher coalesces every anchor's writes into
- * ONE window-level snapshot per animation frame, so a transient relayout that
+ * ONE window-level snapshot per render step, so a transient relayout that
  * momentarily measures 0×0 is overwritten before it is ever published. This is the
  * producer half of the level-triggered reconcile design (see
  * ../layout/placement-reconcile.ts); a per-view edge stream cannot self-correct a
@@ -78,9 +80,8 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	dispose(): void
 } {
 	const resolveSlot =
-		deps.resolveSlot ??
-		((id: string): HTMLElement | null => document.querySelector(id))
-	const createAnchor = deps.createAnchor ?? createPlacementAnchor
+		deps.resolveSlot ?? ((id: string): HTMLElement | null => document.querySelector(id))
+	const createAnchor = deps.createAnchor ?? createViewAnchor
 
 	// Max generation seen across all grants. Main assigns strictly-monotonic
 	// generations, so taking the max means a reload's higher-generation grants
@@ -91,9 +92,9 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	// publisher reads the whole table once per frame and publishes one snapshot.
 	const publisher = createPlacementPublisher<SlotExtra>({
 		generation: () => maxGeneration,
-		publish: snapshot => deps.bridge.sendSnapshot(snapshot),
-		requestFrame: deps.requestFrame,
-		cancelFrame: deps.cancelFrame,
+		publish: (snapshot) => deps.bridge.sendSnapshot(snapshot),
+		schedulePublish: deps.schedulePublish,
+		cancelScheduledPublish: deps.cancelScheduledPublish,
 	})
 
 	// One live anchor per `viewId`. Main intentionally re-delivers a grant on
@@ -102,8 +103,78 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	// create new). The map holds only CURRENTLY-LIVE anchors — a replaced anchor
 	// is disposed at replacement time and removed, so `dispose()` never
 	// double-disposes it.
-	const byViewId = new Map<string, { token: string; anchor: { dispose(): void } }>()
+	const byViewId = new Map<
+		string,
+		{ token: string; anchor: Pick<ViewAnchorHandle, 'dispose' | 'pulse'> }
+	>()
 	let disposed = false
+
+	// A separator can move a slot without resizing it. The anchor's short follow
+	// window closes while a pointer rests, so each subsequent move must reopen it.
+	// Keep pointermove listeners only for an active separator drag.
+	const heldPointers = new Set<number>()
+	const pulseAnchors = (): void => {
+		for (const { anchor } of byViewId.values()) anchor.pulse()
+	}
+	const onPointerMove = (event: PointerEvent): void => {
+		if (!heldPointers.has(event.pointerId)) return
+		// A release outside the window can miss pointerup without blurring it.
+		if (event.buttons === 0) {
+			heldPointers.delete(event.pointerId)
+			if (heldPointers.size === 0) stopTracking()
+			return
+		}
+		pulseAnchors()
+	}
+	const stopTracking = (): void => {
+		heldPointers.clear()
+		window.removeEventListener('pointermove', onPointerMove, true)
+		window.removeEventListener('pointerup', onPointerEnd, true)
+		window.removeEventListener('pointercancel', onPointerEnd, true)
+		window.removeEventListener('lostpointercapture', onPointerEnd, true)
+		window.removeEventListener('blur', stopTracking)
+	}
+	const onPointerEnd = (event: PointerEvent): void => {
+		// Capture may transfer to another element while the drag is still active.
+		if (event.type === 'lostpointercapture' && event.buttons !== 0) return
+		if (!heldPointers.delete(event.pointerId)) return
+		pulseAnchors()
+		if (heldPointers.size === 0) stopTracking()
+	}
+	const onPointerDown = (event: PointerEvent): void => {
+		// Browsers can reuse an ID after an out-of-window release.
+		if (heldPointers.delete(event.pointerId) && heldPointers.size === 0) stopTracking()
+		if (byViewId.size === 0) return
+		// react-resizable-panels can resize from its hit region even when the
+		// pointer targets the adjacent panel rather than the separator element.
+		const path = event.composedPath()
+		const onSeparator =
+			path.some((node) => (node as Element).matches?.('[role="separator"]')) ||
+			path.some((node) => {
+				if (!(node as Element).hasAttribute?.('data-deck-split')) return false
+				return [
+					...(node as Element).querySelectorAll<HTMLElement>('[data-deck-resize-handle]'),
+				].some((el) => {
+					const rect = el.getBoundingClientRect()
+					return (
+						event.clientX >= rect.left &&
+						event.clientX <= rect.right &&
+						event.clientY >= rect.top &&
+						event.clientY <= rect.bottom
+					)
+				})
+			})
+		if (!onSeparator) return
+		if (heldPointers.size === 0) {
+			window.addEventListener('pointermove', onPointerMove, true)
+			window.addEventListener('pointerup', onPointerEnd, true)
+			window.addEventListener('pointercancel', onPointerEnd, true)
+			window.addEventListener('lostpointercapture', onPointerEnd, true)
+			window.addEventListener('blur', stopTracking)
+		}
+		heldPointers.add(event.pointerId)
+		pulseAnchors()
+	}
 
 	// Register the grant listener BEFORE requesting replay (handshake):
 	// a grant the main side replays synchronously inside `subscribe()` must find
@@ -126,8 +197,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 			// second time.
 			try {
 				existing.anchor.dispose()
-			}
-			finally {
+			} finally {
 				byViewId.delete(grant.viewId)
 				publisher.remove(grant.viewId)
 			}
@@ -140,7 +210,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 			visible: true,
 			followScroll: true,
 			followGeometry: true,
-			guardDisplayNone: true,
+			treatZeroAreaAsHidden: true,
 			// Capture THIS grant's viewId + slotToken so the measured placement lands
 			// in the central publisher under the right key with its own token (no
 			// cross-talk between slots). layer is 0: z-order is host-controlled
@@ -152,13 +222,17 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 		byViewId.set(grant.viewId, { token, anchor })
 	})
 
-	// Request replay AFTER the listener is attached.
+	// Request replay AFTER the listener is attached. Pointer input is registered
+	// only after subscription succeeds so a synchronous failure leaves no listener.
 	deps.bridge.subscribe()
+	window.addEventListener('pointerdown', onPointerDown, true)
 
 	return {
 		dispose(): void {
 			if (disposed) return
 			disposed = true
+			window.removeEventListener('pointerdown', onPointerDown, true)
+			stopTracking()
 			unsub()
 			for (const { anchor } of byViewId.values()) anchor.dispose()
 			byViewId.clear()

@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  # Emits the OIDC token that npm trusted publishing exchanges for a short-lived
+  # publish credential, and that signs the provenance attestation. No NPM_TOKEN.
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # push already only fires on main; this also stops a workflow_dispatch from
+    # a feature branch turning into a publish.
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      # Pinned by commit SHA: this is the one workflow that can publish to npm,
+      # so a moved tag here would be a supply-chain problem. ci.yml keeps
+      # floating tags — changing that is a separate call.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Printed so a failed OIDC exchange can be told apart from a toolchain
+      # that is simply too old to do trusted publishing.
+      - name: Print toolchain versions
+        run: |
+          node -v
+          npm -v
+          pnpm -v
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # With changesets present: opens/updates the "Version Packages" PR.
+      # Without: runs `pnpm release`, which publishes only if the version is not
+      # on the registry yet, then tags. The action pushes those tags and cuts
+      # the GitHub Releases from CHANGELOG.md.
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          publish-script: pnpm release

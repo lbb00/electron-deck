@@ -85,7 +85,6 @@ function makeHarness(opts: {
 		senderPolicy,
 		trustedWebContents: () => [] as readonly MinimalWebContents[],
 		invokeHost: async () => null as JsonValue,
-		invokeSimulator: async () => null as JsonValue,
 		declaredEvents: () => ['e1'],
 		...(opts.withOnSnapshot ?? true ? { onSnapshot } : {}),
 		...(opts.withOnLayoutSubscribe ?? true ? { onLayoutSubscribe } : {}),

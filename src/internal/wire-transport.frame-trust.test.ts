@@ -67,27 +67,23 @@ interface Harness {
 	ipcMain: FakeIpcMain
 	bus: EventBus
 	invokeHost: ReturnType<typeof vi.fn>
-	invokeSimulator: ReturnType<typeof vi.fn>
 	getInvokeHandler: () => InvokeHandler
 }
 
 function makeHarness(opts: {
 	trustedIds?: number[]
 	invokeHost?: WireTransportDeps['invokeHost']
-	invokeSimulator?: WireTransportDeps['invokeSimulator']
 } = {}): Harness {
 	const ipcMain = createFakeIpcMain()
 	const bus = new EventBus()
 	const senderPolicy = createFakeSenderPolicy(new Set(opts.trustedIds ?? []))
 	const invokeHost = vi.fn(opts.invokeHost ?? (async () => 'host-ok' as JsonValue))
-	const invokeSimulator = vi.fn(opts.invokeSimulator ?? (async () => 'sim-ok' as JsonValue))
 	const transport = new WireTransport({
 		ipcMain,
 		bus,
 		senderPolicy,
 		trustedWebContents: () => [] as readonly MinimalWebContents[],
 		invokeHost: invokeHost as WireTransportDeps['invokeHost'],
-		invokeSimulator: invokeSimulator as WireTransportDeps['invokeSimulator'],
 		declaredEvents: () => ['e1'],
 	})
 	return {
@@ -95,7 +91,6 @@ function makeHarness(opts: {
 		ipcMain,
 		bus,
 		invokeHost,
-		invokeSimulator,
 		getInvokeHandler: () => {
 			const h = ipcMain.handlers.get(DeckChannel.Invoke)
 			if (!h) throw new Error('invoke handler not registered')
@@ -142,7 +137,6 @@ describe('WireTransport — invoke handler: main-frame trust (frame-level gating
 		expect(res.error?.code).toBe(UNTRUSTED_FRAME)
 		expect(res.error?.remoteName).toBe('doThing')
 		expect(h.invokeHost).not.toHaveBeenCalled()
-		expect(h.invokeSimulator).not.toHaveBeenCalled()
 	})
 
 	// Same-routingId but a DIFFERENT processId is still a foreign frame (OOPIF).
@@ -177,7 +171,6 @@ describe('WireTransport — invoke handler: main-frame trust (frame-level gating
 		expect(res.ok).toBe(false)
 		expect(res.error?.code).toBe(UNTRUSTED_FRAME)
 		expect(h.invokeHost).not.toHaveBeenCalled()
-		expect(h.invokeSimulator).not.toHaveBeenCalled()
 	})
 
 	// Symmetric fail-closed: senderFrame present but sender.mainFrame null.

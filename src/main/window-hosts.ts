@@ -1,6 +1,6 @@
 /**
  * Whether a `BrowserWindow` hosts a given `webContents`, across every shape a
- * simulator/render surface can take: a `<webview>` guest (its embedder is
+ * render surface can take: a `<webview>` guest (its embedder is
  * reported through `hostWebContents`, which is itself either the window's own
  * renderer or one of its WebContentsViews), or a native-host WebContentsView
  * hanging directly off the window's `contentView` tree.

@@ -33,9 +33,9 @@ const LAYOUT_SUBSCRIBE_CHANNEL = '__electron-deck:layout-subscribe'
 
 // Frame-aware event shape so the snapshot handler's main-frame gate sees a real
 // main frame. All sends here come from the main frame of the authorized wc.
-type FrameRef = { routingId: number, processId: number } | null
+type FrameRef = { routingId: number; processId: number } | null
 interface FrameEvent {
-	sender: { id: number, mainFrame?: FrameRef }
+	sender: { id: number; mainFrame?: FrameRef }
 	senderFrame?: FrameRef
 }
 type Handler = (event: FrameEvent, ...args: unknown[]) => unknown | Promise<unknown>
@@ -138,7 +138,9 @@ function createFakeElectron(
 				removeChildView: vi.fn(),
 			}
 			this.contentView = cv as FakeBrowserWindow['contentView']
-			this.getContentBounds = vi.fn(() => initialContentBounds) as FakeBrowserWindow['getContentBounds']
+			this.getContentBounds = vi.fn(
+				() => initialContentBounds,
+			) as FakeBrowserWindow['getContentBounds']
 			this.show = vi.fn() as FakeBrowserWindow['show']
 			this.destroy = vi.fn(() => {
 				this.destroyed = true
@@ -146,15 +148,17 @@ function createFakeElectron(
 			}) as FakeBrowserWindow['destroy']
 			this._listeners = new Map()
 			this._lastCloseEvent = null
-			this.on = vi.fn((event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
-				let arr = this._listeners.get(event)
-				if (!arr) {
-					arr = []
-					this._listeners.set(event, arr)
-				}
-				arr.push(listener)
-				return this
-			}) as FakeBrowserWindow['on']
+			this.on = vi.fn(
+				(event: 'resize' | 'closed' | 'close', listener: (...args: unknown[]) => void) => {
+					let arr = this._listeners.get(event)
+					if (!arr) {
+						arr = []
+						this._listeners.set(event, arr)
+					}
+					arr.push(listener)
+					return this
+				},
+			) as FakeBrowserWindow['on']
 			browserWindows.push(this as unknown as FakeBrowserWindow)
 		}
 
@@ -200,14 +204,17 @@ function createFakeElectron(
 }
 
 // ── Typed escape hatch for the slot-token surface ────────────────────────────
-interface ViewSource { url?: string, file?: string }
+interface ViewSource {
+	url?: string
+	file?: string
+}
 interface HostViewHandle {
-	placeIn(win: unknown, opts: { zone?: number, anchor?: string }): HostViewHandle
+	placeIn(win: unknown, opts: { zone?: number; anchor?: string }): HostViewHandle
 	applyPlacement(p: ViewPlacement): HostViewHandle
 	dispose(): Promise<void>
 }
 interface RuntimeWithView {
-	view(spec: { source: ViewSource, scope?: unknown }): HostViewHandle
+	view(spec: { source: ViewSource; scope?: unknown }): HostViewHandle
 }
 function withView(runtime: Runtime): RuntimeWithView {
 	return runtime as unknown as RuntimeWithView
@@ -278,7 +285,7 @@ function buildSnapshot(
 	return {
 		generation,
 		epoch,
-		views: views.map(v => ({ placement: v.placement, extra: { slotToken: v.slotToken } })),
+		views: views.map((v) => ({ placement: v.placement, extra: { slotToken: v.slotToken } })),
 	}
 }
 
@@ -308,8 +315,9 @@ describe('DeckApp slot-token — placeIn({anchor}) pushes slot-grant', () => {
 		lastWcv(electron)
 		handle.placeIn(app.runtime.mainWindow, { zone: 0, anchor: '#sim' })
 
-		const sendCalls = (mainWc.send as ReturnType<typeof vi.fn>).mock.calls
-			.filter(c => c[0] === SLOT_GRANT_CHANNEL)
+		const sendCalls = (mainWc.send as ReturnType<typeof vi.fn>).mock.calls.filter(
+			(c) => c[0] === SLOT_GRANT_CHANNEL,
+		)
 		expect(sendCalls.length).toBe(1)
 
 		const grant = lastSlotGrant(mainWc)
@@ -340,7 +348,12 @@ describe('DeckApp slot-token — authorized snapshot drives setBounds', () => {
 		await snapshotHandler(
 			mainFrameEvent(mainWcId),
 			buildSnapshot(
-				[{ slotToken: grant.slotToken, placement: { visible: true, bounds: { x: 10, y: 20, width: 300, height: 200 } } }],
+				[
+					{
+						slotToken: grant.slotToken,
+						placement: { visible: true, bounds: { x: 10, y: 20, width: 300, height: 200 } },
+					},
+				],
 				grant.generation,
 				0,
 			),
@@ -372,11 +385,16 @@ describe('DeckApp slot-token — anti-spoof (SECURITY)', () => {
 		const snapshotHandler = getSnapshotHandler(ipcMain)
 		// otherWc is trusted + main-frame, but NOT the wc the token was granted to.
 		// authorizedWcId !== senderId → token authorization fails → whole snapshot
-		// rejected (non-empty but fully unauthorized → cleanSnapshot returns null).
+		// rejected (non-empty but fully unauthorized → authorizeSnapshot returns null).
 		await snapshotHandler(
 			mainFrameEvent(otherWc.id),
 			buildSnapshot(
-				[{ slotToken: grant.slotToken, placement: { visible: true, bounds: { x: 1, y: 1, width: 50, height: 50 } } }],
+				[
+					{
+						slotToken: grant.slotToken,
+						placement: { visible: true, bounds: { x: 1, y: 1, width: 50, height: 50 } },
+					},
+				],
 				grant.generation,
 				0,
 			),
@@ -405,7 +423,12 @@ describe('DeckApp slot-token — unknown token', () => {
 		await snapshotHandler(
 			mainFrameEvent(mainWcId),
 			buildSnapshot(
-				[{ slotToken: 'totally-forged-token', placement: { visible: true, bounds: { x: 1, y: 1, width: 50, height: 50 } } }],
+				[
+					{
+						slotToken: 'totally-forged-token',
+						placement: { visible: true, bounds: { x: 1, y: 1, width: 50, height: 50 } },
+					},
+				],
 				0,
 				0,
 			),
@@ -433,7 +456,12 @@ describe('DeckApp slot-token — negative origin allowed (scroll-follow)', () =>
 		await snapshotHandler(
 			mainFrameEvent(mainWcId),
 			buildSnapshot(
-				[{ slotToken: grant.slotToken, placement: { visible: true, bounds: { x: -50, y: -20, width: 300, height: 200 } } }],
+				[
+					{
+						slotToken: grant.slotToken,
+						placement: { visible: true, bounds: { x: -50, y: -20, width: 300, height: 200 } },
+					},
+				],
 				grant.generation,
 				0,
 			),
@@ -463,7 +491,12 @@ describe('DeckApp slot-token — visible:false detaches', () => {
 		await snapshotHandler(
 			mainFrameEvent(mainWcId),
 			buildSnapshot(
-				[{ slotToken: grant.slotToken, placement: { visible: true, bounds: { x: 0, y: 0, width: 10, height: 10 } } }],
+				[
+					{
+						slotToken: grant.slotToken,
+						placement: { visible: true, bounds: { x: 0, y: 0, width: 10, height: 10 } },
+					},
+				],
 				grant.generation,
 				0,
 			),
@@ -543,7 +576,12 @@ describe('DeckApp slot-token — token revoked on dispose', () => {
 		await snapshotHandler(
 			mainFrameEvent(mainWcId),
 			buildSnapshot(
-				[{ slotToken: grant.slotToken, placement: { visible: true, bounds: { x: 5, y: 5, width: 5, height: 5 } } }],
+				[
+					{
+						slotToken: grant.slotToken,
+						placement: { visible: true, bounds: { x: 5, y: 5, width: 5, height: 5 } },
+					},
+				],
 				grant.generation,
 				0,
 			),
@@ -567,6 +605,68 @@ describe('DeckApp slot-token — placeIn without anchor (back-compat)', () => {
 		handle.placeIn(app.runtime.mainWindow, { zone: 0 })
 
 		expect(countSlotGrants(mainWc)).toBe(0)
+
+		await app.shutdown()
+	})
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. placement is either/or: an anchor-placed view is page-driven — the host
+//     calling the PUBLIC applyPlacement on it must throw a clear error instead
+//     of fighting the page for control of the same placement. A view placed
+//     WITHOUT an anchor is host-driven and unaffected.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('DeckApp slot-token — applyPlacement is rejected on an anchor-placed view', () => {
+	it('handle.applyPlacement(...) on a placeIn({anchor}) view throws; the view stays anchor-placed (no partial effect)', async () => {
+		const { app, electron } = await bootApp()
+
+		const handle = withView(app.runtime).view({ source: { url: 'data:text/html,x' } })
+		lastWcv(electron)
+		handle.placeIn(app.runtime.mainWindow, { zone: 0, anchor: '#sim' })
+
+		expect(() =>
+			handle.applyPlacement({
+				visible: true,
+				bounds: { x: 0, y: 0, width: 10, height: 10 },
+			}),
+		).toThrow(/anchor-placed/)
+
+		await app.shutdown()
+	})
+
+	it('handle.applyPlacement(...) on a placeIn({anchor}) MOVED view (re-anchored in dest) still throws', async () => {
+		const { app, electron } = await bootApp()
+
+		const winB = app.runtime.windows.create({
+			source: { url: 'http://localhost:5173/winB.html' },
+		}).window
+		const handle = withView(app.runtime).view({ source: { url: 'data:text/html,x' } })
+		lastWcv(electron)
+		handle.placeIn(app.runtime.mainWindow, { zone: 0, anchor: '#a' })
+		await (
+			handle as unknown as {
+				moveTo(win: unknown, opts: { zone?: number; anchor?: string }): Promise<void>
+			}
+		).moveTo(winB, { zone: 0, anchor: '#b' })
+
+		expect(() => handle.applyPlacement({ visible: false })).toThrow(/anchor-placed/)
+
+		await app.shutdown()
+	})
+
+	it('handle.applyPlacement(...) on a placeIn WITHOUT anchor (host-driven) does NOT throw', async () => {
+		const { app, electron } = await bootApp()
+
+		const handle = withView(app.runtime).view({ source: { url: 'data:text/html,x' } })
+		lastWcv(electron)
+		handle.placeIn(app.runtime.mainWindow, { zone: 0 })
+
+		expect(() =>
+			handle.applyPlacement({
+				visible: true,
+				bounds: { x: 0, y: 0, width: 10, height: 10 },
+			}),
+		).not.toThrow()
 
 		await app.shutdown()
 	})
