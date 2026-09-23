@@ -1165,7 +1165,9 @@ async function runE2EVerification(mainWin) {
 	// own: stop the publisher from sending, make reconcile drop the setBounds, or
 	// break the native apply, and the model still moves — only the three checks
 	// below go red. The drag leaves a net +20px, well outside the 8px tolerance.
-	const afterFollow = await waitForNativeFollow(mainWin, 'split drag')
+	// The window can change slot height independently of the split width.
+	// Wait for the full rectangle required by nativeFollowCheck, not width alone.
+	const afterFollow = await waitForNativeFollow(mainWin, 'split drag', 12_000, true)
 	assertE2E(
 		afterFollow.state.slot.width !== beforeFollow.state.slot.width,
 		'split drag resizes the native slot',
