@@ -526,6 +526,7 @@ async function driveSplitDrag(mainWin, { rounds = 40, onPeak, returnToStart = tr
 // native child view. A vertical move keeps the horizontal split width fixed;
 // translating the slot changes its viewport position without resizing it.
 async function verifyPositionOnlyDrag(mainWin) {
+	await waitForWindowFocus(mainWin, 2_000)
 	const js = (code) => mainWin.webContents.executeJavaScript(code)
 	const handle = await js(`
 		(() => {
@@ -584,6 +585,10 @@ async function verifyPositionOnlyDrag(mainWin) {
 		assertE2E(
 			Math.abs(followed.state.slot.width - moved.from.width) < 1
 				&& Math.abs(followed.state.slot.height - moved.from.height) < 1
+				&& Math.abs(followed.state.slot.y - moved.from.y) < 1
+				&& Math.abs(followed.bounds.y - before.bounds.y) < 1
+				&& Math.abs(followed.bounds.width - before.bounds.width) < 1
+				&& Math.abs(followed.bounds.height - before.bounds.height) < 1
 				&& before.bounds.x - followed.bounds.x >= 24,
 			'position-only drag moves the native view after a pause',
 			JSON.stringify({ before: before.bounds, after: followed.bounds, slot: followed.state.slot }),
@@ -1138,7 +1143,6 @@ async function runE2EVerification(mainWin) {
 	const initial = await waitForWindowFocus(mainWin)
 	assertE2E(initial.documentFocused, 'window focus', JSON.stringify({ window: mainWin.isFocused(), document: initial.documentFocused }))
 	await captureE2EMetrics(mainWin, 'before-drag')
-	await verifyPositionOnlyDrag(mainWin)
 
 	// A completed separator drag must persist a new model split ratio, not merely
 	// resize react-resizable-panels' transient DOM layout.
@@ -1173,6 +1177,9 @@ async function runE2EVerification(mainWin) {
 		JSON.stringify({ before: beforeBounds, after: afterFollow.bounds }),
 	)
 	nativeFollowCheck(mainWin, afterFollow.state, 'split drag')
+	// Run after the first native/DOM bounds check so Xvfb startup resize
+	// cannot masquerade as part of the position-only gesture.
+	await verifyPositionOnlyDrag(mainWin)
 
 	if (E2E_METRICS) {
 		// Keep this bounded and use the same sendInputEvent pointer path as the
