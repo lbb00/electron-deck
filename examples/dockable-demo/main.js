@@ -535,7 +535,6 @@ async function verifyPositionOnlyDrag(mainWin) {
 		})()
 	`)
 	assertE2E(!!handle, 'position-only drag has a separator', JSON.stringify({ handle }))
-	const before = await waitForNativeFollow(mainWin, 'pre-position-only-drag', 12_000, true)
 	const previousTransform = await js(`document.querySelector('[data-deck-native-slot="preview"]').style.transform`)
 	const send = (type, y, modifiers = []) => mainWin.webContents.sendInputEvent({
 		type, x: handle.x, y, button: 'left',
@@ -550,19 +549,28 @@ async function verifyPositionOnlyDrag(mainWin) {
 			const next = () => ++frames === 4 ? resolve() : requestAnimationFrame(next)
 			requestAnimationFrame(next)
 		})`)
+		// The window can finish a separate layout adjustment during those four
+		// frames. Confirm the native view caught up before measuring THIS movement.
+		const before = await waitForNativeFollow(mainWin, 'pre-position-only-move', 12_000, true)
 		const moved = await js(`
 			(() => {
 				const slot = document.querySelector('[data-deck-native-slot="preview"]')
+				const measure = () => {
+					const r = slot.getBoundingClientRect()
+					return { x: r.x, y: r.y, width: r.width, height: r.height }
+				}
+				const from = measure()
 				slot.style.transform = 'translateX(-32px)'
-				const r = slot.getBoundingClientRect()
-				return { x: r.x, y: r.y, width: r.width, height: r.height }
+				return { from, to: measure() }
 			})()
 		`)
 		assertE2E(
-			Math.abs(moved.width - before.state.slot.width) < 1
-				&& Math.abs(moved.height - before.state.slot.height) < 1
-				&& Math.abs(moved.y - before.state.slot.y) < 1
-				&& Math.abs(moved.x - before.state.slot.x + 32) < 1,
+			Math.abs(moved.from.width - before.state.slot.width) < 1
+				&& Math.abs(moved.from.height - before.state.slot.height) < 1
+				&& Math.abs(moved.to.width - moved.from.width) < 1
+				&& Math.abs(moved.to.height - moved.from.height) < 1
+				&& Math.abs(moved.to.y - moved.from.y) < 1
+				&& Math.abs(moved.to.x - moved.from.x + 32) < 1,
 			'position-only drag moves the slot without resizing it',
 			JSON.stringify({ before: before.state.slot, moved }),
 		)
@@ -574,7 +582,8 @@ async function verifyPositionOnlyDrag(mainWin) {
 		}
 		const followed = await waitForNativeFollow(mainWin, 'position-only drag', 12_000, true)
 		assertE2E(
-			Math.abs(followed.state.slot.width - before.state.slot.width) < 1
+			Math.abs(followed.state.slot.width - moved.from.width) < 1
+				&& Math.abs(followed.state.slot.height - moved.from.height) < 1
 				&& before.bounds.x - followed.bounds.x >= 24,
 			'position-only drag moves the native view after a pause',
 			JSON.stringify({ before: before.bounds, after: followed.bounds, slot: followed.state.slot }),
@@ -968,7 +977,11 @@ async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000, checkPosi
 			const { bounds } = previewBounds(mainWin)
 			samples.push({ at: Date.now() - started, slot: state.slot, view: bounds })
 			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8
-				&& (!checkPosition || Math.abs(bounds.x - state.slot.x) <= 8)) {
+				&& (!checkPosition || (
+					Math.abs(bounds.x - state.slot.x) <= 8
+					&& Math.abs(bounds.y - state.slot.y) <= 8
+					&& Math.abs(bounds.height - state.slot.height) <= 8
+				))) {
 				log(`[e2e] ${label} native follow settled in ${Date.now() - started}ms`)
 				return { state, bounds }
 			}
