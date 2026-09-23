@@ -219,4 +219,63 @@ describe('createDeckLayoutClient — separator following', () => {
 			client.dispose()
 		}
 	})
+
+	it.each(['light', 'shadow'] as const)(
+		'follows a separator hit inside %s DOM without following an unrelated overlay',
+		(mode) => {
+			const host = document.createElement('div')
+			const overlay = document.createElement('div')
+			document.body.append(host, overlay)
+			const mount = mode === 'shadow' ? host.attachShadow({ mode: 'open' }) : host
+			const split = document.createElement('div')
+			split.setAttribute('data-deck-split', 'root')
+			mount.append(split)
+			const separator = document.createElement('div')
+			separator.setAttribute('role', 'separator')
+			separator.setAttribute('data-deck-resize-handle', '')
+			separator.getBoundingClientRect = () =>
+				({ left: 100, right: 110, top: 50, bottom: 250 }) as DOMRect
+			const panel = document.createElement('div')
+			const slot = document.createElement('div')
+			split.append(separator, panel, slot)
+			let onGrant: ((grant: SlotGrant) => void) | undefined
+			const pulse = vi.fn()
+			const client = createDeckLayoutClient({
+				bridge: {
+					onSlotGrant: (cb) => {
+						onGrant = cb
+						return () => {}
+					},
+					subscribe: () => {},
+					sendSnapshot: () => {},
+				},
+				resolveSlot: () => slot,
+				createAnchor: () => ({ dispose: vi.fn(), pulse }),
+			})
+			const pointer = (target: HTMLElement, type: string, x: number) => {
+				const event = new Event(type, { bubbles: true, composed: true })
+				Object.defineProperties(event, {
+					pointerId: { value: 1 },
+					buttons: { value: type === 'pointerup' ? 0 : 1 },
+					clientX: { value: x },
+					clientY: { value: 100 },
+				})
+				target.dispatchEvent(event)
+			}
+			try {
+				onGrant!({ viewId: 'preview', slotId: '#slot', slotToken: 'first', generation: 1 })
+				pointer(overlay, 'pointerdown', 105)
+				pointer(overlay, 'pointermove', 105)
+				pointer(panel, 'pointerdown', 120)
+				pointer(panel, 'pointermove', 120)
+				expect(pulse).not.toHaveBeenCalled()
+				pointer(panel, 'pointerdown', 105)
+				pointer(panel, 'pointermove', 105)
+				expect(pulse).toHaveBeenCalledTimes(2)
+				pointer(panel, 'pointerup', 105)
+			} finally {
+				client.dispose()
+			}
+		},
+	)
 })

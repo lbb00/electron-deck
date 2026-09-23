@@ -144,11 +144,27 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	const onPointerDown = (event: PointerEvent): void => {
 		// Browsers can reuse an ID after an out-of-window release.
 		if (heldPointers.delete(event.pointerId) && heldPointers.size === 0) stopTracking()
-		if (
-			byViewId.size === 0 ||
-			!event.composedPath().some((node) => (node as Element).matches?.('[role="separator"]'))
-		)
-			return
+		if (byViewId.size === 0) return
+		// react-resizable-panels can resize from its hit region even when the
+		// pointer targets the adjacent panel rather than the separator element.
+		const path = event.composedPath()
+		const onSeparator =
+			path.some((node) => (node as Element).matches?.('[role="separator"]')) ||
+			path.some((node) => {
+				if (!(node as Element).hasAttribute?.('data-deck-split')) return false
+				return [
+					...(node as Element).querySelectorAll<HTMLElement>('[data-deck-resize-handle]'),
+				].some((el) => {
+					const rect = el.getBoundingClientRect()
+					return (
+						event.clientX >= rect.left &&
+						event.clientX <= rect.right &&
+						event.clientY >= rect.top &&
+						event.clientY <= rect.bottom
+					)
+				})
+			})
+		if (!onSeparator) return
 		if (heldPointers.size === 0) {
 			window.addEventListener('pointermove', onPointerMove, true)
 			window.addEventListener('pointerup', onPointerEnd, true)

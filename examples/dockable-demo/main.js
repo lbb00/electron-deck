@@ -522,6 +522,75 @@ async function driveSplitDrag(mainWin, { rounds = 40, onPeak, returnToStart = tr
 	return { handleRect }
 }
 
+// Exercise position-only following through Chromium pointer input and the real
+// native child view. A vertical move keeps the horizontal split width fixed;
+// translating the slot changes its viewport position without resizing it.
+async function verifyPositionOnlyDrag(mainWin) {
+	const js = (code) => mainWin.webContents.executeJavaScript(code)
+	const handle = await js(`
+		(() => {
+			const el = document.querySelector('[data-deck-resize-handle]')
+			const r = el?.getBoundingClientRect()
+			return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null
+		})()
+	`)
+	assertE2E(!!handle, 'position-only drag has a separator', JSON.stringify({ handle }))
+	const before = await waitForNativeFollow(mainWin, 'pre-position-only-drag', 12_000, true)
+	const previousTransform = await js(`document.querySelector('[data-deck-native-slot="preview"]').style.transform`)
+	const send = (type, y, modifiers = []) => mainWin.webContents.sendInputEvent({
+		type, x: handle.x, y, button: 'left',
+		clickCount: type === 'mouseMove' ? 0 : 1, modifiers,
+	})
+	send('mouseDown', handle.y)
+	try {
+		// The initial pulse must finish before moving the slot. Four browser
+		// frames exceed the anchor's two steady frames without a timed sleep.
+		await js(`new Promise(resolve => {
+			let frames = 0
+			const next = () => ++frames === 4 ? resolve() : requestAnimationFrame(next)
+			requestAnimationFrame(next)
+		})`)
+		const moved = await js(`
+			(() => {
+				const slot = document.querySelector('[data-deck-native-slot="preview"]')
+				slot.style.transform = 'translateX(-32px)'
+				const r = slot.getBoundingClientRect()
+				return { x: r.x, y: r.y, width: r.width, height: r.height }
+			})()
+		`)
+		assertE2E(
+			Math.abs(moved.width - before.state.slot.width) < 1
+				&& Math.abs(moved.height - before.state.slot.height) < 1
+				&& Math.abs(moved.y - before.state.slot.y) < 1
+				&& Math.abs(moved.x - before.state.slot.x + 32) < 1,
+			'position-only drag moves the slot without resizing it',
+			JSON.stringify({ before: before.state.slot, moved }),
+		)
+		// Space held movements by browser frames so each one can be delivered
+		// before we sample the native view.
+		for (let step = 1; step <= 5; step++) {
+			send('mouseMove', handle.y + step * 4, ['leftbuttondown'])
+			await js(`new Promise(resolve => requestAnimationFrame(resolve))`)
+		}
+		const followed = await waitForNativeFollow(mainWin, 'position-only drag', 12_000, true)
+		assertE2E(
+			Math.abs(followed.state.slot.width - before.state.slot.width) < 1
+				&& before.bounds.x - followed.bounds.x >= 24,
+			'position-only drag moves the native view after a pause',
+			JSON.stringify({ before: before.bounds, after: followed.bounds, slot: followed.state.slot }),
+		)
+		nativeFollowCheck(mainWin, followed.state, 'position-only drag')
+	} finally {
+		try {
+			await js(`document.querySelector('[data-deck-native-slot="preview"]').style.transform = ${JSON.stringify(previousTransform)}`)
+		} finally {
+			send('mouseUp', handle.y + 20)
+		}
+	}
+	const restored = await waitForNativeFollow(mainWin, 'post-position-only-drag', 12_000, true)
+	nativeFollowCheck(mainWin, restored.state, 'post-position-only-drag')
+}
+
 // Drive Chromium's actual HTML drag-and-drop path. We deliberately do not
 // synthesize DragEvents in the renderer: this validates the BrowserWindow input
 // route, native drag threshold, DataTransfer payload, and DockView handlers as
@@ -890,15 +959,16 @@ function nativeFollowCheck(mainWin, state, label) {
 // A view that stops tracking never converges, so waiting longer cannot hide
 // it; the elapsed time is logged on success so a real slowdown shows up as a
 // number instead of an intermittent red.
-async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000) {
+async function waitForNativeFollow(mainWin, label, timeoutMs = 12_000, checkPosition = false) {
 	const started = Date.now()
 	const samples = []
 	while (Date.now() - started < timeoutMs) {
 		try {
 			const state = await waitForDeckState(mainWin, `${label} slot`, 250)
 			const { bounds } = previewBounds(mainWin)
-			samples.push({ at: Date.now() - started, slot: state.slot.width, view: bounds ? bounds.width : null })
-			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8) {
+			samples.push({ at: Date.now() - started, slot: state.slot, view: bounds })
+			if (bounds && Math.abs(bounds.width - state.slot.width) <= 8
+				&& (!checkPosition || Math.abs(bounds.x - state.slot.x) <= 8)) {
 				log(`[e2e] ${label} native follow settled in ${Date.now() - started}ms`)
 				return { state, bounds }
 			}
@@ -1055,6 +1125,7 @@ async function runE2EVerification(mainWin) {
 	const initial = await waitForWindowFocus(mainWin)
 	assertE2E(initial.documentFocused, 'window focus', JSON.stringify({ window: mainWin.isFocused(), document: initial.documentFocused }))
 	await captureE2EMetrics(mainWin, 'before-drag')
+	await verifyPositionOnlyDrag(mainWin)
 
 	// A completed separator drag must persist a new model split ratio, not merely
 	// resize react-resizable-panels' transient DOM layout.

@@ -198,7 +198,7 @@ handle.pulse(durationMs?: number)   // 命令式核心：开 RAF 哨兵窗口，
 ### 抖动来源与封堵
 
 - 唯一会抖的是「IO 把滚出视口误判成意图隐藏」——§3 已封死（IO 不动意图）。
-- 哨兵关窗用「连续 2 帧静止」而非「1 帧静止」；拖动期间 `pointerHeld` 阻止关窗，松手后才允许静止计数收敛。
+- 哨兵关窗用「连续 2 帧静止」而非「1 帧静止」；拖动暂停时允许关窗，下一次移动由客户端重新调用 `pulse()`。
 
 ---
 
@@ -303,7 +303,7 @@ interface UseViewAnchorOptions extends ViewAnchorOptions {
 ### `electron-deck` 侧（host 胶水，不进 view-anchor）
 
 - split 的每个叶子占位 div 用 Placement 锚开 `followScroll` / `followGeometry` / `treatZeroAreaAsHidden`。
-- `createDeckLayoutClient` 在捕获阶段识别 `[role="separator"]` 的 `pointerdown`，对活动锚调用 `pulse()`；按住期间每次 `pointermove` 再调用，松开、取消、失去指针捕获且按键已释放，或窗口失焦后撤销临时监听；按键仍按住时即使捕获转移，也继续跟随。若松手发生在窗口外，下一次无按键的移动或新一轮按下也会清除失效的拖拽状态。锚本身不再识别分隔条。
+- `createDeckLayoutClient` 在捕获阶段识别分隔条 `pointerdown`：除事件路径中的 `[role="separator"]`，还检测来自本组件 `[data-deck-split]` 内部的指针是否落在其 `[data-deck-resize-handle]` 的矩形内，因为 `react-resizable-panels` 可以从命中区域开始拖动，而事件目标是旁边的面板。这样不把遮挡在 split 外的其他元素误认为分隔条，也适用于事件路径中的 ShadowRoot。当前只覆盖分隔条元素矩形；若库的额外命中边距伸出该矩形，仍需单独验证。对活动锚调用 `pulse()`；按住期间每次 `pointermove` 再调用，松开、取消、失去指针捕获且按键已释放，或窗口失焦后撤销临时监听；按键仍按住时即使捕获转移，也继续跟随。若松手发生在窗口外，下一次无按键的移动或新一轮按下也会清除失效的拖拽状态。锚本身不识别分隔条。
 - tab 容器切换时对非活动成员发意图 `visible:false`，对活动成员 `visible:true`。
 
 ---
