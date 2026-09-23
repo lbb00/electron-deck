@@ -62,14 +62,9 @@ window.addEventListener('resize', emit) // ② 整窗 resize
 
 ### C. 祖先 scroll 监听（`followScroll`，事件驱动）
 
-slot 落在可滚动容器里滚动时，`scroll` 事件**不冒泡**到 window。修法：在 **捕获阶段**于 `window` 上挂一个 `scroll` 监听，`{ capture: true, passive: true }`：
+slot 落在可滚动容器里滚动时，`scroll` 事件**不冒泡**到 window。`view-anchor` 同时在 window 捕获阶段和可滚动祖先上监听：普通页面滚动由 window 接住；事件到不了 window 的 Shadow DOM 或脱离文档子树由祖先监听补上。`overflow: hidden` 的祖先也纳入检查，因为程序可以改变其滚动位置。能到 window 的同一次事件不会从祖先重复处理。
 
-```ts
-window.addEventListener('scroll', onAncestorScroll, { capture: true, passive: true })
-```
-
-- **为什么捕获阶段挂 window**：`scroll` 不冒泡，但**会**在捕获阶段从 window 往下传到目标滚动容器。在 window 捕获即可收到页面内**任意**滚动容器的滚动，无需遍历 target 的祖先链逐个 `addEventListener`（祖先链是动态的，slot 不该知道自己嵌在谁里）。
-- **passive**：纯读，不 `preventDefault`，让浏览器滚动不被阻塞。
+- **passive**：监听只读，不 `preventDefault`，让浏览器滚动不被阻塞。
 - **回调**：scroll 是连续高频信号。`followGeometry` 关时，scroll 回调做一次同步 `emit()`；`followGeometry` 开时，scroll **打开 §2.D 的 RAF 哨兵窗口**（滚动期间每帧测一次，停了就关），与 D 共用同一个「交互期每帧测、静止零测」的机制，避免两套节流。
 
 ### D. RAF 几何哨兵（`followGeometry`，**非常驻**，是 transform/祖先移动唯一兜底）
@@ -84,8 +79,8 @@ RAF 哨兵 = 一个「窗口化」的 requestAnimationFrame 轮询：
 ```
 
 哨兵**只在「有理由相信几何在动」时存活**：
-- 触发开窗的信号：祖先 scroll（§2.C）、`pointerdown` 命中页面内任意 `[role="separator"]`/splitter（拖动开始）、以及调用方经 `pulse()` 显式声明的「动画期」（§2.F）。
-- 自动关窗：检测到连续静止帧。所以一次 splitter 拖动 = 开窗→拖动中每帧跟随→松手后 2~3 帧内判静止→关窗，**拖完即零成本**。
+- 触发开窗的信号：祖先 scroll（§2.C），以及调用方经 `pulse()` 显式声明的拖拽或动画期（§2.F）。`view-anchor` 不再自动监听 splitter。
+- 自动关窗：检测到连续静止帧。拖拽中若指针暂停到窗口关闭，调用方须在下一次移动时再次 `pulse()`；拖完即零成本。
 
 > 为什么不直接每帧测就好、还要 dedup 关窗：见 §7。一句话——常驻 RAF 对「同时存在 N 个锚、其中大多数静止」的多面板场景是纯浪费；窗口化把成本压到只在真正交互的那个锚上。
 
@@ -109,7 +104,7 @@ handle.pulse(durationMs?: number)   // 命令式核心：开 RAF 哨兵窗口，
 |---|---|---|---|
 | target 自身尺寸 | ResizeObserver | 事件 | 是（但静止零回调） |
 | 整窗 resize | window `resize` | 事件 | 是（静止零回调） |
-| 祖先 scroll | window capture `scroll`（`followScroll`） | 事件 → 开 RAF 窗 | 是（静止零回调） |
+| 祖先 scroll | window capture + 可滚动祖先 `scroll`（`followScroll`） | 事件 → 开 RAF 窗 | 是（静止零回调） |
 | 祖先 transform / 重排位移 | **RAF 几何哨兵**（`followGeometry`） | 轮询 | **否**（窗口化） |
 | display:none / 出视口 | IntersectionObserver（`treatZeroAreaAsHidden`） | 事件 | 是（静止零回调） |
 | 动画期位移 | `pulse()` → RAF 窗 | 调用方提示 | 否（窗口化） |
@@ -243,8 +238,8 @@ handle.pulse(durationMs?: number)   // 命令式核心：开 RAF 哨兵窗口，
 考虑**纯左移不变宽**的退化变体（外层 splitter 在右半边内部、或右半边是固定宽时整体被推走）：占位 div 的 **width/height 都没变、只有 x 变**（祖先把它整体推走）。此时：
 
 2. ResizeObserver **不触发**（尺寸没变）——这正是信号 #1。
-3. 拖动从 splitter 的 `pointerdown` 开始 → §2.D/§6 的「命中 `[role="separator"]` 开窗」启动 **RAF 哨兵** → 拖动中每帧 measure 占位 div → x 每帧在变 → 与 lastPublished 不同 → 当帧同步 publish 新 x。✅ 原生 view 跟随左移，逐帧贴住。
-4. 松手 → 占位 div 稳定 → 哨兵连续 N 帧测到相同矩形 → 关窗 → 回到零成本静止态。
+3. 拖动从 splitter 的 `pointerdown` 开始 → `createDeckLayoutClient` 给活动锚调用 `pulse()`；拖动中每次 `pointermove` 都再次调用，即使指针曾暂停到哨兵关窗，也会在下一次移动时重开 → x 改变时 publish 新 x。✅ 原生 view 跟随左移。
+4. 松手或取消拖动 → 客户端撤掉临时监听；哨兵测到连续静止帧后关窗。
 
 再叠 **scroll 变体**：若右下叶子是可滚动容器、原生 view 占位随内容滚动：
 
@@ -269,16 +264,14 @@ follow option（默认全关）与 `pulse` 落在 `ViewAnchorOptions` / `ViewAnc
 ```ts
 interface ViewAnchorOptions {
   // ...visible / publish...
-  /** 追加祖先 scroll 跟随（window 捕获阶段监听）。默认 false。 */
+  /** 追加祖先 scroll 跟随（window 捕获 + 可滚动祖先监听）。默认 false。 */
   followScroll?: boolean
   /** 启用 RAF 几何哨兵（兜 transform / 祖先移动）。默认 false。
-   *  开窗由 scroll / splitter pointerdown / pulse() 触发，静止自动关窗。 */
+   *  开窗由 scroll / pulse() 触发，静止自动关窗。 */
   followGeometry?: boolean
   /** display:none 兜底：挂 IntersectionObserver，进入 display:none（无几何盒）时
    *  发 `{ visible:false }`（detach-but-keep，不带 bounds），恢复时重测。默认 false。 */
   treatZeroAreaAsHidden?: boolean
-  /** followGeometry 的按住开窗选择器，默认 `[role="separator"]`，传 null 关闭。 */
-  holdSelector?: string | null
   /** 与上一条已接受的 Placement 相同时不重发，默认 true。 */
   dedupe?: boolean
   /** 中止即停锚，创建时读一次；update() 不接受这个字段。 */
@@ -287,7 +280,7 @@ interface ViewAnchorOptions {
 
 interface ViewAnchorHandle {
   /** 整份替换：省略的 option 回到默认值（三个 follow 开关回 false、
-   *  holdSelector 回 `[role="separator"]`、dedupe 回 true），不是浅合并。 */
+   *  dedupe 回 true），不是浅合并。 */
   update(opts: Omit<ViewAnchorOptions, 'signal'>): void
   dispose(): void
   /** 开一次 RAF 哨兵窗口（动画期跟随）；durationMs 后或判静止后自动关。
@@ -310,7 +303,7 @@ interface UseViewAnchorOptions extends ViewAnchorOptions {
 ### `electron-deck` 侧（host 胶水，不进 view-anchor）
 
 - split 的每个叶子占位 div 用 Placement 锚开 `followScroll` / `followGeometry` / `treatZeroAreaAsHidden`。
-- splitter 开窗机制已定案并实现为锚自身的 capture `pointerdown` 命中 `[role="separator"]` 自动开窗（更自治，不需要 splitter 显式调 `pulse()`），命中选择器由 `holdSelector` 配置，默认 `[role="separator"]`。
+- `createDeckLayoutClient` 在捕获阶段识别 `[role="separator"]` 的 `pointerdown`，对活动锚调用 `pulse()`；按住期间每次 `pointermove` 再调用，松开、取消、失去指针捕获且按键已释放，或窗口失焦后撤销临时监听；按键仍按住时即使捕获转移，也继续跟随。若松手发生在窗口外，下一次无按键的移动或新一轮按下也会清除失效的拖拽状态。锚本身不再识别分隔条。
 - tab 容器切换时对非活动成员发意图 `visible:false`，对活动成员 `visible:true`。
 
 ---
@@ -320,7 +313,7 @@ interface UseViewAnchorOptions extends ViewAnchorOptions {
 **保证跟随的信号**：
 1. target 自身尺寸变化（RO，同步发）。
 2. 整窗 resize（同步发）。
-3. 祖先滚动（`followScroll`，window 捕获 scroll，开窗逐帧跟）。
+3. 祖先滚动（`followScroll`，window 捕获并监听可滚动祖先，开窗逐帧跟）。
 4. 祖先 transform / 祖先重排导致的纯位移（`followGeometry` RAF 哨兵，开窗逐帧跟）。
 5. 动画期位移（`pulse()` 开窗）。
 6. `display:none` 隐藏（`treatZeroAreaAsHidden` IO）→ 发 `{ visible:false }`（detach-but-keep，无几何盒），恢复重测、瞬时贴回。

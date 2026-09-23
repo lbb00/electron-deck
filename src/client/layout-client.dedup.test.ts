@@ -30,6 +30,7 @@ interface CapturedAnchor {
   target: HTMLElement
   opts: AnchorOpts
   dispose: ReturnType<typeof vi.fn>
+  pulse: ReturnType<typeof vi.fn>
 }
 
 // ── FakeRaf ───────────────────────────────────────────────────────────────────
@@ -85,10 +86,11 @@ function makeBridge() {
 function makeAnchorFactory() {
   const anchors: CapturedAnchor[] = []
   const createAnchor = vi.fn(
-    (target: HTMLElement, opts: AnchorOpts): { dispose(): void } => {
+    (target: HTMLElement, opts: AnchorOpts): { dispose(): void; pulse(): void } => {
       const dispose = vi.fn()
-      anchors.push({ target, opts, dispose })
-      return { dispose }
+      const pulse = vi.fn()
+      anchors.push({ target, opts, dispose, pulse })
+      return { dispose, pulse }
     },
   )
   return { createAnchor, anchors }

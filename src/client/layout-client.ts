@@ -1,5 +1,5 @@
 import { createViewAnchor } from 'view-anchor'
-import type { Placement } from 'view-anchor'
+import type { Placement, ViewAnchorHandle } from 'view-anchor'
 import { createPlacementPublisher } from './placement-publisher.js'
 import type { PlacementSnapshot } from '../layout/index.js'
 
@@ -52,7 +52,7 @@ export interface LayoutClientDeps {
 			followGeometry?: boolean
 			treatZeroAreaAsHidden?: boolean
 		},
-	) => { dispose(): void }
+	) => Pick<ViewAnchorHandle, 'dispose' | 'pulse'>
 	/** Task scheduler for the internal placement publisher. Default: a
 	 *  MessageChannel-based post-task (see placement-publisher.ts), which runs
 	 *  right after the current render step instead of waiting for the next
@@ -80,8 +80,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	dispose(): void
 } {
 	const resolveSlot =
-		deps.resolveSlot ??
-		((id: string): HTMLElement | null => document.querySelector(id))
+		deps.resolveSlot ?? ((id: string): HTMLElement | null => document.querySelector(id))
 	const createAnchor = deps.createAnchor ?? createViewAnchor
 
 	// Max generation seen across all grants. Main assigns strictly-monotonic
@@ -93,7 +92,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	// publisher reads the whole table once per frame and publishes one snapshot.
 	const publisher = createPlacementPublisher<SlotExtra>({
 		generation: () => maxGeneration,
-		publish: snapshot => deps.bridge.sendSnapshot(snapshot),
+		publish: (snapshot) => deps.bridge.sendSnapshot(snapshot),
 		schedulePublish: deps.schedulePublish,
 		cancelScheduledPublish: deps.cancelScheduledPublish,
 	})
@@ -104,8 +103,62 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 	// create new). The map holds only CURRENTLY-LIVE anchors — a replaced anchor
 	// is disposed at replacement time and removed, so `dispose()` never
 	// double-disposes it.
-	const byViewId = new Map<string, { token: string; anchor: { dispose(): void } }>()
+	const byViewId = new Map<
+		string,
+		{ token: string; anchor: Pick<ViewAnchorHandle, 'dispose' | 'pulse'> }
+	>()
 	let disposed = false
+
+	// A separator can move a slot without resizing it. The anchor's short follow
+	// window closes while a pointer rests, so each subsequent move must reopen it.
+	// Keep pointermove listeners only for an active separator drag.
+	const heldPointers = new Set<number>()
+	const pulseAnchors = (): void => {
+		for (const { anchor } of byViewId.values()) anchor.pulse()
+	}
+	const onPointerMove = (event: PointerEvent): void => {
+		if (!heldPointers.has(event.pointerId)) return
+		// A release outside the window can miss pointerup without blurring it.
+		if (event.buttons === 0) {
+			heldPointers.delete(event.pointerId)
+			if (heldPointers.size === 0) stopTracking()
+			return
+		}
+		pulseAnchors()
+	}
+	const stopTracking = (): void => {
+		heldPointers.clear()
+		window.removeEventListener('pointermove', onPointerMove, true)
+		window.removeEventListener('pointerup', onPointerEnd, true)
+		window.removeEventListener('pointercancel', onPointerEnd, true)
+		window.removeEventListener('lostpointercapture', onPointerEnd, true)
+		window.removeEventListener('blur', stopTracking)
+	}
+	const onPointerEnd = (event: PointerEvent): void => {
+		// Capture may transfer to another element while the drag is still active.
+		if (event.type === 'lostpointercapture' && event.buttons !== 0) return
+		if (!heldPointers.delete(event.pointerId)) return
+		pulseAnchors()
+		if (heldPointers.size === 0) stopTracking()
+	}
+	const onPointerDown = (event: PointerEvent): void => {
+		// Browsers can reuse an ID after an out-of-window release.
+		if (heldPointers.delete(event.pointerId) && heldPointers.size === 0) stopTracking()
+		if (
+			byViewId.size === 0 ||
+			!event.composedPath().some((node) => (node as Element).matches?.('[role="separator"]'))
+		)
+			return
+		if (heldPointers.size === 0) {
+			window.addEventListener('pointermove', onPointerMove, true)
+			window.addEventListener('pointerup', onPointerEnd, true)
+			window.addEventListener('pointercancel', onPointerEnd, true)
+			window.addEventListener('lostpointercapture', onPointerEnd, true)
+			window.addEventListener('blur', stopTracking)
+		}
+		heldPointers.add(event.pointerId)
+		pulseAnchors()
+	}
 
 	// Register the grant listener BEFORE requesting replay (handshake):
 	// a grant the main side replays synchronously inside `subscribe()` must find
@@ -128,8 +181,7 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 			// second time.
 			try {
 				existing.anchor.dispose()
-			}
-			finally {
+			} finally {
 				byViewId.delete(grant.viewId)
 				publisher.remove(grant.viewId)
 			}
@@ -154,13 +206,17 @@ export function createDeckLayoutClient(deps: LayoutClientDeps): {
 		byViewId.set(grant.viewId, { token, anchor })
 	})
 
-	// Request replay AFTER the listener is attached.
+	// Request replay AFTER the listener is attached. Pointer input is registered
+	// only after subscription succeeds so a synchronous failure leaves no listener.
 	deps.bridge.subscribe()
+	window.addEventListener('pointerdown', onPointerDown, true)
 
 	return {
 		dispose(): void {
 			if (disposed) return
 			disposed = true
+			window.removeEventListener('pointerdown', onPointerDown, true)
+			stopTracking()
 			unsub()
 			for (const { anchor } of byViewId.values()) anchor.dispose()
 			byViewId.clear()

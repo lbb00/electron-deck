@@ -113,8 +113,8 @@ importers:
         specifier: ^4.10.0
         version: 4.12.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       view-anchor:
-        specifier: 1.0.0-beta.1
-        version: 1.0.0-beta.1(react@18.3.1)
+        specifier: 1.0.0-beta.2
+        version: 1.0.0-beta.2(react@18.3.1)
     devDependencies:
       '@changesets/cli':
         specifier: ^3.0.2
@@ -1477,8 +1477,8 @@ packages:
     resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
 
-  view-anchor@1.0.0-beta.1:
-    resolution: {integrity: sha512-rFZIJUAFbQqz+CblXQgdBFhu/Jxq69QgT5AYNBm0Caa2qiFRA2jgFYuoMxbMcBIYt1RO+V9FAHH5Y2aHijUhaQ==}
+  view-anchor@1.0.0-beta.2:
+    resolution: {integrity: sha512-AABGrmsHu2rp5tc6Zu7/BF8Oan0vNSzTvzX8/zy2MceUA8iqe3INEfHEZtQLVqvNJUnUYMgaEFwUZFTHqJHzIw==}
     peerDependencies:
       react: '>=18'
     peerDependenciesMeta:
@@ -2671,7 +2671,7 @@ snapshots:
 
   undici@7.29.1: {}
 
-  view-anchor@1.0.0-beta.1(react@18.3.1):
+  view-anchor@1.0.0-beta.2(react@18.3.1):
     optionalDependencies:
       react: 18.3.1
 
