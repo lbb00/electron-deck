@@ -17,8 +17,10 @@ test('stable and other prerelease versions use their own dist-tags', () => {
 	assert.equal(publishTagForVersion('1.0.0-rc.2'), 'rc')
 })
 
-test('an unsupported prerelease cannot silently become latest', () => {
+test('a prerelease cannot publish under latest', () => {
 	assert.throws(() => publishTagForVersion('1.0.0-1'), /Unsupported prerelease/)
+	assert.throws(() => publishTagForVersion('1.0.0-latest.0'), /cannot use latest/)
+	assert.throws(() => publishTagForVersion('1.0.0-Latest.0'), /cannot use latest/)
 })
 
 test('the release command publishes a beta under beta with provenance', () => {
