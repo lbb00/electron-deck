@@ -1,4 +1,6 @@
-# view-anchor 跟随契约硬化（split / nested / tab 的几何地基）
+# view-anchor following contract (historical design reference)
+
+> **Historical design reference.** This document describes the prerelease design of `view-anchor`. Refer to the upstream documentation for the stable API. See [Dock layout epoch and view-anchor](./dock-layout-epoch.md) for the current electron-deck integration, `useDockLayoutEpoch()` timing, and client-side splitter following.
 
 > 本页定义 `view-anchor` 正向锚（`createViewAnchor` / `useViewAnchor`）让原生 `WebContentsView` **跟随任意 DOM slot** 所需的观测面与时序契约：
 > 哪些位移信号必须被观测、各自怎么观测、可见性归谁、首帧与终止如何保证。落点在

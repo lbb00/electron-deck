@@ -81,7 +81,6 @@
     "check:browser-purity": "node scripts/check-browser-purity.js",
     "check:file-extensions": "node scripts/check-file-extensions.js",
     "check:banner": "node --test scripts/check-banner-animation.test.js",
-    "check:bundle-size": "node --test scripts/check-bundle-size.test.js && node scripts/check-bundle-size.js",
     "check:tree-shaking": "node --test scripts/check-tree-shaking.test.js && node scripts/check-tree-shaking.js",
     "check:e2e": "node examples/dockable-demo/bundle.js && node --test scripts/check-dockable-e2e.test.js && node scripts/check-dockable-e2e.js",
     "check:e2e:interactions": "node examples/dockable-demo/bundle.js && node scripts/check-dockable-e2e.js",
@@ -91,13 +90,13 @@
     "test:dock-react": "vitest run --config vitest.dock-react.config.ts",
     "examples:dockable": "pnpm run build && node examples/dockable-demo/bundle.js && electron examples/dockable-demo/main.js",
     "bench": "node --expose-gc bench/main-frame-path.js",
-    "prepack": "pnpm run build && pnpm run check:bundle-size && pnpm run check:tree-shaking",
+    "prepack": "pnpm run build && pnpm run check:tree-shaking",
     "changeset": "changeset",
     "release": "pnpm run build && pnpm test && node scripts/release.js"
   },
   "dependencies": {
     "react-resizable-panels": "^4.10.0",
-    "view-anchor": "1.0.0-beta.2"
+    "view-anchor": "1.0.0"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.2",

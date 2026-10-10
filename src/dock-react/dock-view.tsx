@@ -92,17 +92,21 @@ export interface DockViewProps {
  * fixed-width preview column left↔right, moving a region — produces NO such
  * event (a same-size flex reorder fires nothing), so the overlay would freeze
  * at its old position. The epoch is the layout layer's explicit "something
- * moved" signal: a panel hosting a native overlay re-measures (e.g. pulses its
- * view-anchor) when the epoch changes, catching the translate the browser never
- * reports. Default 0 (outside a provider): the consuming effect runs once on
+ * moved" signal: a panel hosting a native overlay re-measures with
+ * `useViewAnchor({ deps: [epoch] })` or `handle.remeasure()` when it changes,
+ * catching the translate the browser never reports. Default 0 (outside a provider): the consuming effect runs once on
  * mount, which is harmless.
  */
 const LayoutEpochContext = createContext<number>(0)
 
 /**
- * Read the current dock layout epoch (the model revision). Re-renders the caller
- * whenever a layout mutation commits. Keyed into a panel's effect deps, it lets
- * a native-overlay host re-measure on a reorder that fires no geometry event.
+ * Read the latest committed layout notification. Re-renders the caller after a
+ * `DockView` subscription receives a successful model mutation; it is not a
+ * replayed mirror of revisions committed before that subscription. The matching
+ * React DOM is available to `useLayoutEffect`, although a SplitView may still
+ * settle programmatic panel sizes in later animation frames. Key it into an
+ * anchor's `deps` or call `remeasure()` for a reorder with no geometry event.
+ * CSS transitions are separate: this epoch does not mean they have finished.
  * Returns 0 when used outside a `<DockView>`.
  */
 export function useDockLayoutEpoch(): number {
