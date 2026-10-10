@@ -1,7 +1,7 @@
 /**
  * Lifecycle phase machine.
  *
- * 8 个 phase 严格递增，无跳跃：
+ * Advance through all 8 phases in order, without skipping:
  *   init → bind → setup → ready → drain → cleanup → destroy → quit
  *
  * @internal
@@ -66,8 +66,8 @@ export class LifecycleManager {
 	}
 
 	/**
-	 * Abnormal-path setter：setup throw / 紧急 shutdown 跳过中间 phase 直达
-	 * 指定 teardown phase。不做顺序校验，仅 framework 内部使用。
+	 * Set a teardown phase directly after a setup error or emergency shutdown,
+	 * skipping intermediate phases. This bypasses order checks and is framework-internal only.
 	 *
 	 * @internal
 	 */

@@ -10,13 +10,14 @@ type AnyHandler = (...args: JsonValue[]) => MaybePromise<JsonValue>
 type AnyListener = (payload: JsonValue) => void
 
 /**
- * In-memory `TypedIpcRegistry` impl —— Phase 2 不接真 Electron `ipcMain`，提
- * 供 main-process 同进程 `handle` / `on` / `send` / `invoke` 的 fake。
+ * In-memory `TypedIpcRegistry` implementation. Phase 2 does not use real Electron
+ * `ipcMain`; this fake provides `handle`, `on`, `send`, and `invoke` within the main process.
  *
- * - `handle` / `invoke` 与 `on` / `send` 是**独立 channel space**：send 只触
- *   发 on listener；invoke 只调 handle handler；同 channel 名互不影响。
- * - audience / validator option Phase 2 不强制，仅 accept；Phase 3 接 trusted
- *   sender set 时再实施。
+ * - `handle` / `invoke` and `on` / `send` use **independent channel namespaces**:
+ *   send only notifies on listeners; invoke only calls handle handlers. They do not
+ *   interfere even when the channel names match.
+ * - Phase 2 accepts audience / validator options without enforcing them. Enforcement
+ *   is deferred to Phase 3, when the trusted sender set is connected.
  *
  * @internal
  */

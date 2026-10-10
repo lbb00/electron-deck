@@ -1,31 +1,32 @@
 /**
- * Deck framework wire protocol —— main ↔ webview 之间的 channel 名 + 帧
- * 形态。SoT 在此，preload / client / main runtime 都从这里 import。
+ * Deck framework wire protocol: channel names and frame shapes for main ↔ webview communication.
+ * This is the source of truth imported by preload, client, and the main runtime.
  *
- * 设计：把 declared `hostServices` / `events` 两类全部走 **两个** 统一
- * channel，避免 channel name 爆炸 / 难以加 senderPolicy 白名单。
- * - `__electron-deck:invoke`  — webview → main RPC (ipcRenderer.invoke)
- * - `__electron-deck:event`   — main → webview event push (webContents.send)
- * - `__electron-deck:probe`   — webview → main 探活，bridge ready 检查
+ * Declared `hostServices` and `events` share **two** channels, avoiding a proliferation
+ * of channel names and making senderPolicy allowlisting straightforward:
+ * - `__electron-deck:invoke` — webview → main RPC (ipcRenderer.invoke)
+ * - `__electron-deck:event` — main → webview event push (webContents.send)
+ * - `__electron-deck:probe` — webview → main liveness probe for the bridge-ready check
  *
- * 帧用 JSON 对象一层 envelope，便于扩展 + 校验。
+ * Each frame uses a JSON-object envelope for extensibility and validation.
  *
  * @internal
  */
 
 import type { JsonValue } from '../types.js'
 
-/** Bridge global 默认挂的全局名（contextBridge.exposeInMainWorld） */
+/** Default global name used to expose the bridge via contextBridge.exposeInMainWorld. */
 export const DEFAULT_BRIDGE_GLOBAL = '__electronDeckBridge'
 
 /**
- * Slot-token LAYOUT bridge 默认挂的全局名。`exposeDeckLayoutBridge()` 默认暴露到
- * 此名，renderer 的 `createDeckLayoutClient({ bridge: window.__electronDeckLayoutBridge })`
- * 读取同名。单一来源避免 preload helper 与 client 之间字符串漂移。
+ * Default global name for the slot-token LAYOUT bridge. `exposeDeckLayoutBridge()` exposes
+ * this name, and the renderer reads it via
+ * `createDeckLayoutClient({ bridge: window.__electronDeckLayoutBridge })`.
+ * A shared constant keeps the preload helper and client names in sync.
  */
 export const DEFAULT_LAYOUT_BRIDGE_GLOBAL = '__electronDeckLayoutBridge'
 
-/** Bridge protocol semver；client 在 ready() 时校验 major 一致 */
+/** Bridge protocol semver; the client checks major-version compatibility during ready(). */
 export const BRIDGE_PROTOCOL_VERSION = '1.0.0'
 
 export const DeckChannel = {
@@ -74,17 +75,17 @@ export interface ProbeResponse {
 }
 
 /**
- * Bridge global 暴露到 webview window 的 shape。preload 把它通过
- * `contextBridge.exposeInMainWorld(globalName, bridge)` 注入；webview-side
- * `createDeckClient()` 通过 `globalThis[globalName]` 读取。
+ * Shape of the bridge global exposed on the webview window. Preload injects it via
+ * `contextBridge.exposeInMainWorld(globalName, bridge)`; the webview-side
+ * `createDeckClient()` reads it through `globalThis[globalName]`.
  *
- * 注意所有方法必须是 contextBridge-friendly（plain values + serializable
- * arguments），不要把 Map / Set / Date / Promise.race 等 leak 进 bridge 接口。
+ * All methods must be contextBridge-friendly (plain values and serializable arguments).
+ * Do not expose Map, Set, Date, Promise.race, or similar values through the bridge interface.
  */
 export interface DeckBridge {
 	readonly version: typeof BRIDGE_PROTOCOL_VERSION
 	probe(): Promise<ProbeResponse>
 	invoke(req: InvokeRequest): Promise<InvokeResponse>
-	/** 订阅 event channel；返回 unsubscribe 函数（不是 Disposable，因为要跨 contextBridge） */
+	/** Subscribe to the event channel; return an unsubscribe function rather than a Disposable so it can cross contextBridge. */
 	onEvent(listener: (env: EventEnvelope) => void): () => void
 }
