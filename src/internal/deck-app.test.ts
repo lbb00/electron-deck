@@ -990,8 +990,8 @@ describe('DeckApp — electron assembly', () => {
 		expect(mainWin.webContents.loadFile).not.toHaveBeenCalled()
 	})
 
-	// preload 在 ipcMain handler 未注册时 invoke 会失败。framework 必须保证
-	// ipcMain.handle 早于 webContents.loadURL。
+	// Preload invokes fail before ipcMain handlers are registered. The framework must
+	// register ipcMain.handle before calling webContents.loadURL.
 	it('runtime.windows.create() loadURL fires AFTER ipcMain.handle is registered (race regression)', async () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
@@ -1350,8 +1350,8 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		}
 	})
 
-	// types.ts 加 'load-failed' FrameworkEvent 后，safeLoad 在 catch 里
-	// emitFrameworkEvent('load-failed', {...})，host 在 setup 内订阅可观测到。
+	// safeLoad catches load failures and emits the 'load-failed' FrameworkEvent
+	// declared in types.ts; a host listener registered during setup must receive it.
 	it('loadURL rejection emits FrameworkEvent "load-failed" with source + error', async () => {
 		const electron = createFakeElectron()
 		let receivedPayload: { source: WebviewSource; error: unknown } | null = null
@@ -1404,8 +1404,8 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		}
 	})
 
-	// declared/runtime-created window 'closed' 时必须把 webContents 从
-	// trustedWcRefs 移除，避免 wc.id 复用 + 内存泄漏。
+	// When a declared or runtime-created window closes, remove its webContents from
+	// trustedWcRefs to prevent stale trust if wc.id is reused and to avoid memory leaks.
 	it('runtime.windows.create()d window closed removes its webContents from trust set (D3)', async () => {
 		const electron = createFakeElectron()
 		const ipcMain = createFakeIpcMain()
@@ -1454,9 +1454,9 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 		await app.shutdown()
 	})
 
-	// load-failed catch microtask 可能在 setup callback 内 await 之后、register
-	// listener 之前就跑过 → listener 错过。pending queue + 第一个 listener
-	// register 时 splice 消费应当兜住。
+	// A load-failed catch microtask may run after an await in setup but before a
+	// listener registers. Buffer the payload and drain the queue via splice when
+	// the first listener registers so it does not miss the failure.
 	it('load-failed pending payload is replayed to a listener registered AFTER an async assemble boundary', async () => {
 		const electron = createFakeElectron()
 		let received: { source: WebviewSource; error: unknown } | null = null
@@ -1466,7 +1466,7 @@ describe('DeckApp — loadURL failures do not reject start() (#3 R5/C2)', () => 
 				backend: {
 					assemble: async (rt) => {
 						rt.windows.create({ source: { url: 'http://localhost:5173/late.html' } })
-						// host 先 await 一个真异步任务 — catch microtask 已经跑完
+						// Await a genuinely asynchronous task so the catch microtask has already run.
 						await new Promise((r) => setTimeout(r, 5))
 						rt.on('load-failed', (p) => {
 							received = p

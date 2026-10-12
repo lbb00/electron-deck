@@ -1,12 +1,12 @@
 /**
- * Contract tests for "keepAlive" (view-handle.md「keepAlive 保活」/
- * docs/contracts/capability-and-lifecycle.md「tab 保活归属」). TWO parts:
+ * Contract tests for "keepAlive" (view-handle.md "keepAlive" /
+ * docs/contracts/capability-and-lifecycle.md "tab keep-alive ownership"). TWO parts:
  *
  * PART 1 — LIFETIME / LEAK FIX (the critical half). Today a `runtime.view`'s
  * native `WebContentsView` is only DETACHED on teardown (removeChildView); its
  * backing `webContents` is NEVER destroyed (the slice-1 host-view test even
  * pins `wcv.destroyed === false`). That leaks a renderer process for the life
- * of the app. The contract (「保活寿命归 Scope、淘汰策略归 host」): the keep-alive view's WebContents is `own()`d
+ * of the app. The contract ("Scope owns keep-alive lifetime; the host owns eviction policy"): the keep-alive view's WebContents is `own()`d
  * by its Scope, so it is DESTROYED (`webContents.close()`, guarded by
  * `isDestroyed()`) when the view is explicitly disposed, when its window closes
  * (windowScope cascade), or when an explicit `opts.scope` (home/session) closes —

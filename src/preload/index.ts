@@ -15,13 +15,13 @@ import type {
 import type { LayoutBridge, SlotGrant } from '../client/layout-client.js'
 
 export interface ExposeBridgeOptions {
-	/** 暴露到 window 的全局名，默认 `__electronDeckBridge` */
+	/** Global name exposed on window; defaults to `__electronDeckBridge`. */
 	readonly globalName?: string
 }
 
 /**
- * 在 host preload 内调用，把 framework typed RPC + event push bridge 暴露到
- * webview window：
+ * Call from the host preload to expose the framework's typed RPC and event-push bridge
+ * on the webview window:
  *
  * ```ts
  * import { contextBridge, ipcRenderer } from 'electron'
@@ -29,7 +29,7 @@ export interface ExposeBridgeOptions {
  * exposeDeckBridge()
  * ```
  *
- * 见 `DeckBridge` 接口（`shared/protocol.ts`）。
+ * See the `DeckBridge` interface (`shared/protocol.ts`).
  *
  * `@experimental` No production consumer yet — pairs with `createDeckClient` /
  * `DeckConfig.hostServices` / `events`, which only `examples/` uses;
@@ -42,7 +42,7 @@ export function exposeDeckBridge(options?: ExposeBridgeOptions): void {
 	}
 
 	const globalName = options?.globalName ?? DEFAULT_BRIDGE_GLOBAL
-	// 自检 globalThis —— contextBridge 内部也维护去重，但我们抢先抛更明确的诊断
+	// Check globalThis first to provide a clearer error than contextBridge's own duplicate-exposure check.
 	const g = globalThis as unknown as Record<string, unknown>
 	if (g[globalName] !== undefined) {
 		throw new Error(`Deck bridge already exposed at "${globalName}"`)
@@ -71,14 +71,14 @@ export function exposeDeckBridge(options?: ExposeBridgeOptions): void {
 }
 
 export interface ExposeLayoutBridgeOptions {
-	/** 暴露到 window 的全局名，默认 `__electronDeckLayoutBridge` */
+	/** Global name exposed on window; defaults to `__electronDeckLayoutBridge`. */
 	readonly globalName?: string
 }
 
 /**
- * 在 host preload 内调用，把三条 slot-token LAYOUT channel（`slot-grant` PUSH /
- * `snapshot` send / `layout-subscribe` invoke）封装成一个 `LayoutBridge`-shaped
- * 对象暴露到 webview window，供 renderer：
+ * Call from the host preload to wrap the three slot-token LAYOUT channels
+ * (`slot-grant` push / `snapshot` send / `layout-subscribe` invoke) in a `LayoutBridge`
+ * object exposed on the webview window for the renderer:
  *
  * ```ts
  * import { exposeDeckLayoutBridge } from 'electron-deck/preload'
@@ -87,8 +87,9 @@ export interface ExposeLayoutBridgeOptions {
  * createDeckLayoutClient({ bridge: window.__electronDeckLayoutBridge })
  * ```
  *
- * channel 名一律取自框架 `DeckChannel`（不手抄字符串）。`onSlotGrant` 返回一个
- * 纯 unsubscribe 函数（可跨 contextBridge），不是 Disposable 对象。
+ * Always use channel names from the framework's `DeckChannel` instead of copying strings.
+ * `onSlotGrant` returns a plain unsubscribe function, which can cross contextBridge,
+ * rather than a Disposable object.
  */
 export function exposeDeckLayoutBridge(options?: ExposeLayoutBridgeOptions): void {
 	if (typeof contextBridge?.exposeInMainWorld !== 'function' || typeof ipcRenderer?.on !== 'function') {

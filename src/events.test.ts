@@ -33,7 +33,7 @@ describe('defineEvent', () => {
 	})
 
 	it('throws TypeError on non-string name', () => {
-		// CONTRACT-AMBIGUOUS: doc says "非空 string，否则 throw TypeError". We
+		// CONTRACT-AMBIGUOUS: the docs say "non-empty string; otherwise throw TypeError". We
 		// assert that runtime guards against non-string at the JS layer too,
 		// since TS types alone cannot stop a JS caller.
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -91,8 +91,8 @@ describe('defineEvent', () => {
 		// CONTRACT-AMBIGUOUS: actual fan-out delivery requires a bound
 		// transport, which Phase 1 does not provide. We only assert that
 		// registering multiple listeners is itself a non-throwing op — the
-		// delivery contract ("一旦 publisher 绑定后, 多次 on() 不同 listener 都
-		// 要被通知") will be covered in Phase 2 once bind() exists.
+		// delivery contract ("once the publisher is bound, every listener registered by on() is notified")
+		// will be covered in Phase 2 once bind() exists.
 		const ev = defineEvent<JsonValue>('multi-listener')
 		expect(() => {
 			ev.on(() => {})

@@ -2,330 +2,330 @@
 
 > **Historical design reference.** This document describes the prerelease design of `view-anchor`. Refer to the upstream documentation for the stable API. See [Dock layout epoch and view-anchor](./dock-layout-epoch.md) for the current electron-deck integration, `useDockLayoutEpoch()` timing, and client-side splitter following.
 
-> 本页定义 `view-anchor` 正向锚（`createViewAnchor` / `useViewAnchor`）让原生 `WebContentsView` **跟随任意 DOM slot** 所需的观测面与时序契约：
-> 哪些位移信号必须被观测、各自怎么观测、可见性归谁、首帧与终止如何保证。落点在
-> `view-anchor/src/{view-anchor,react,types}.ts`。
+> This page defines the observation and timing contracts that let the forward `view-anchor` APIs (`createViewAnchor` / `useViewAnchor`) make a native `WebContentsView` **follow any DOM slot**: which movement signals must be observed, how to observe them, who owns visibility, and how to guarantee first-frame and termination behavior. Implementation belongs in `view-anchor/src/{view-anchor,react,types}.ts`.
 >
-> 为什么这份文档住 `electron-deck/`：跟随的「为什么必须做实」由 host-shell 的
-> split/nested/tab 需求驱动（electron-deck 是 host），而「**怎么做实**」是 view-anchor
-> 这条原语的契约。两包之间的 seam = 注入的 `publish`，所以契约在 host 侧立、原语侧实现。
+> Why this document lives in `electron-deck/`: host-shell split/nested/tab requirements explain **why reliable following is necessary** (`electron-deck` is the host); **how to provide it** is the view-anchor primitive's contract. The boundary between the packages is the injected `publish`, so the host defines the contract and the primitive implements it.
 
 ---
 
-## 0. 默认观测面（关闭 opt-in 时）
+## 0. Default observation coverage: opt-ins disabled
 
-不开任何 opt-in option 时，正向锚只观测**两类信号**：
+Without any opt-in options, a forward anchor observes **two types of signal**:
 
 ```ts
-observer = new ResizeObserver(emit)   // ① target 自身 border-box 变化
+observer = new ResizeObserver(emit) // ① target's own border-box changes
 observer.observe(target)
-window.addEventListener('resize', emit) // ② 整窗 resize
+window.addEventListener('resize', emit) // ② whole-window resize
 ```
 
-这把「target 的屏幕矩形会变」**等同于**「target 自己的尺寸会变」。这个等式在**单一固定面板**里成立（preview / notes 占位即如此：占位是 flex:1 的直接子，矩形只随容器尺寸变）。一旦 slot 嵌进 split / nested / tab，等式破裂——矩形会因为**祖先**的动作而变，target 自己尺寸却纹丝不动，ResizeObserver 测不到，原生 view 当场跟丢。
+This **equates** changes to the target's screen rectangle with changes to its own size. That holds for a **single fixed panel**: preview / notes placeholders are direct flex:1 children whose rectangles change only with container size. Once a slot lives inside split / nested / tab layouts, the equivalence breaks. **Ancestor** actions can change the rectangle without changing the target's size; ResizeObserver cannot detect that, and the native view immediately loses alignment.
 
-`useViewAnchor` 的 `deps`（`react.ts`）让调用方把「会移动矩形但 DOM 看不见的状态」塞进数组强制 re-publish。但这要求调用方**预先枚举每一种会移动矩形的状态**——对一个能放进任意 split/tab 的 slot，这不可能预先枚举（外层 splitter 是谁、有几层、在不在可滚动容器里，slot 自己都不知道）。所以「跟随任意 slot」不能靠 `deps`，必须由锚**自己**把观测面补全——这是下面 §2 的 opt-in option（`followScroll` / `followGeometry` / `treatZeroAreaAsHidden`）做的事。
+`useViewAnchor`'s `deps` (`react.ts`) lets callers force re-publication for state that moves the rectangle but is invisible to DOM observation. However, callers must **enumerate every such state in advance**. A slot usable in arbitrary split/tab layouts cannot know its outer splitters, nesting depth, or scroll containers. Following arbitrary slots therefore cannot depend on `deps`: **the anchor itself** must complete its observation coverage. The §2 opt-ins `followScroll` / `followGeometry` / `treatZeroAreaAsHidden` provide that coverage.
 
 ---
 
-## 1. 六类位移信号（及各自修法）
+## 1. Six movement signals and their remedies
 
-| # | 信号 | 默认为何测不到 | 修法（§见） |
-|---|---|---|---|
-| 1 | **祖先移动**（嵌套 split 外层 splitter 拖动） | 内层 slot 尺寸没变 → RO 不触发；window 没 resize → resize 不触发 | RAF 几何哨兵（§2.D） |
-| 2 | **scroll**（slot 在可滚动容器里滚动） | 滚动改的是位置不是尺寸，RO 盲；scroll 不冒泡到 window 的 resize | 祖先 scroll 捕获监听 + RAF 哨兵（§2.C/D） |
-| 3 | **CSS transform**（祖先 transform / translate 动画） | 屏幕位置变、`getBoundingClientRect` 的 left/top 跟着变，但**没有任何 DOM 事件**通告 | RAF 几何哨兵（§2.D）——这是 RAF 不可替代的核心理由 |
-| 4 | **`display:none`**（tab 用 display 隐藏） | slot 从渲染树消失，`getBoundingClientRect` 返回全 0 → 被当成「移到 (0,0) 且 0×0」，原生 view 残留/闪到角落 | IntersectionObserver 判可见性 + 几何守卫（§3） |
-| 5 | **slot 未 mount / 首帧 layout 未稳** | 同步 measure 拿到 0 矩形或脏矩形 → 原生 view 闪在 (0,0) | 首帧守卫（§4） |
-| 6 | **销毁不发终止 hidden** | 核心 `dispose()` 只停观察、刻意不再发布；slot 卸载后宿主收不到 hidden → 原生 view 冻在最后矩形 | 终止性 hidden（§5） |
+| #   | Signal                                                                      | Why default observation misses it                                                                                                                           | Remedy                                                                |
+| --- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| 1   | **Ancestor movement**, such as dragging an outer splitter in a nested split | Inner slot size is unchanged, so RO does not fire; window is not resized                                                                                    | RAF geometry sentinel (§2.D)                                          |
+| 2   | **Scroll**, with the slot inside a scrollable container                     | Scroll changes position, not size; RO is blind, and scroll does not become a window resize                                                                  | Ancestor scroll capture listeners + RAF sentinel (§2.C/D)             |
+| 3   | **CSS transform**, such as an ancestor transform / translate animation      | Screen position and getBoundingClientRect left/top change, but **no DOM event** reports it                                                                  | RAF geometry sentinel (§2.D): the central reason RAF is indispensable |
+| 4   | **`display:none`**, such as a hidden tab                                    | Slot leaves the render tree and getBoundingClientRect returns all zeros, interpreted as visible at (0,0), 0×0; native view remains or flashes in the corner | IntersectionObserver visibility geometry + geometry guard (§3)        |
+| 5   | **Slot not mounted / first-frame layout unstable**                          | Synchronous measurement returns a zero or stale rectangle; native view flashes at (0,0)                                                                     | First-frame guard (§4)                                                |
+| 6   | **Destruction without a terminal hidden publication**                       | Core dispose deliberately stops observing without further publications; host receives no hidden on slot unmount, so native view stays at its last rectangle | Terminal hidden publication (§5)                                      |
 
-总策略：**保留正向「同步发布」的不可动摇内核**（§7 论证为何不能整包搬去 RAF），只在它之外**叠加**一组观测器，每个观测器的回调仍走现有的同步 `emit()`。
+Overall strategy: **preserve the forward anchor's synchronous-publication core** (§7 explains why publication cannot all move to RAF). **Add observers around it**, with each callback still using the existing synchronous `emit()`.
 
 ---
 
-## 2. 观测面扩展：最小够用且不抖的组合
+## 2. Extending observation coverage with a minimal, stable combination
 
-### 设计判据
+### Design criterion
 
-「跟随任意 slot」= 凡是会改变 `target.getBoundingClientRect()` 屏幕矩形的信号，锚都要能重新 measure+publish。把信号按「能否被某个 DOM 事件/Observer 精确通告」分两类：
+“Follow any slot” means remeasure and publish for every signal that changes `target.getBoundingClientRect()` on screen. Classify signals by whether a DOM event or Observer can report them precisely:
 
-- **可被事件精确通告的**（A/B/C）：自身尺寸、整窗 resize、祖先 scroll。→ **事件驱动**，零空转。
-- **无任何事件通告的**（D）：祖先 transform、祖先因兄弟变化而**重排导致的位移**、以及一切「我尺寸没变但我被推走了」。→ 只能**轮询** `getBoundingClientRect` 比对。
+- **Precisely reported by events (A/B/C)**: own-size changes, whole-window resize, and ancestor scroll. Use **event-driven** observation with no idle work.
+- **Reported by no event (D)**: ancestor transforms, displacement caused by ancestor reflow when siblings change, and any movement that leaves the target's own size unchanged. These require **polling** and comparing `getBoundingClientRect`.
 
-最小组合 = **A+B+C 事件驱动兜住绝大多数 + D 的 RAF 哨兵只在「有理由怀疑在动」时启动**。关键：**RAF 不常驻**，由交互窗口 gating（§2.D + §6），静止时零成本。
+The minimum combination is **event-driven A+B+C for most changes, plus a D RAF sentinel activated only when movement is plausible**. **RAF is not permanent**: interaction-window gating (§2.D + §6) gives zero idle cost.
 
-### A. ResizeObserver（默认开）
+### A. ResizeObserver: enabled by default
 
-`observer.observe(target)` —— target 自身 border-box 变化。与 `display:none`（RO 不触发、IO 触发）的协同见 §2.E。
+`observer.observe(target)` observes the target's own border-box changes. See §2.E for coordination with `display:none` (RO does not fire; IO does).
 
-### B. window `resize`（默认开）
+### B. Window resize: enabled by default
 
-整窗尺寸变。
+Observe whole-window size changes.
 
-### C. 祖先 scroll 监听（`followScroll`，事件驱动）
+### C. Ancestor scroll listeners: followScroll, event-driven
 
-slot 落在可滚动容器里滚动时，`scroll` 事件**不冒泡**到 window。`view-anchor` 同时在 window 捕获阶段和可滚动祖先上监听：普通页面滚动由 window 接住；事件到不了 window 的 Shadow DOM 或脱离文档子树由祖先监听补上。`overflow: hidden` 的祖先也纳入检查，因为程序可以改变其滚动位置。能到 window 的同一次事件不会从祖先重复处理。
+When a slot scrolls inside a container, `scroll` **does not bubble** to window. `view-anchor` listens both during window capture and on scrollable ancestors. Window handles ordinary page scroll; ancestor listeners cover Shadow DOM or detached subtrees whose events do not reach window. Include `overflow: hidden` ancestors because code can change their scroll position. Do not process the same event again at an ancestor if it reaches window.
 
-- **passive**：监听只读，不 `preventDefault`，让浏览器滚动不被阻塞。
-- **回调**：scroll 是连续高频信号。`followGeometry` 关时，scroll 回调做一次同步 `emit()`；`followGeometry` 开时，scroll **打开 §2.D 的 RAF 哨兵窗口**（滚动期间每帧测一次，停了就关），与 D 共用同一个「交互期每帧测、静止零测」的机制，避免两套节流。
+- **Passive**: listeners only read and never call preventDefault, so browser scrolling is not blocked.
+- **Callback**: scroll is continuous and frequent. With `followGeometry` disabled, synchronously `emit()` once. With it enabled, scroll **opens the §2.D RAF sentinel window**: measure once per frame during scrolling and stop when scrolling stops. Share D's “measure during interaction, never while idle” mechanism instead of adding a second throttler.
 
-### D. RAF 几何哨兵（`followGeometry`，**非常驻**，是 transform/祖先移动唯一兜底）
+### D. RAF geometry sentinel: followGeometry, non-permanent
 
-transform 和「祖先重排把我推走」**没有任何事件**。dockview 的 `OverlayRenderContainer` 用常驻 RAF 每帧 `getBoundingClientRect` 重测来兜这一类——本锚的哨兵不照搬常驻（§7 成本论证），而是窗口化：
+The sentinel is the only fallback for transforms and ancestor movement. Transforms and ancestor reflow that pushes the target **have no events**. dockview's `OverlayRenderContainer` handles them with permanent RAF remeasurement of getBoundingClientRect. This anchor instead uses a bounded observation window (§7 explains the cost):
 
 ```
-RAF 哨兵 = 一个「窗口化」的 requestAnimationFrame 轮询：
-  - 每帧 measure(target) → 与 lastPublished 比 → 不同才 emit（复用现有同步 emit+dedup）
-  - 何时启动（开窗）：见 §6 的「交互窗口」gating
-  - 何时停止（关窗）：连续 N 帧（建议 N=2~3，真机调）测出矩形与上帧逐字段相等 → 判定静止 → cancelAnimationFrame
+RAF sentinel = windowed requestAnimationFrame polling:
+  - Each frame: measure(target), compare with lastPublished, emit only on change
+    (reuse existing synchronous emit + dedup).
+  - Start: interaction-window gating in §6.
+  - Stop: N consecutive frames (suggest N=2–3, tune on real hardware) have rectangles
+    equal field by field to the previous frame → stationary → cancelAnimationFrame.
 ```
 
-哨兵**只在「有理由相信几何在动」时存活**：
-- 触发开窗的信号：祖先 scroll（§2.C），以及调用方经 `pulse()` 显式声明的拖拽或动画期（§2.F）。`view-anchor` 不再自动监听 splitter。
-- 自动关窗：检测到连续静止帧。拖拽中若指针暂停到窗口关闭，调用方须在下一次移动时再次 `pulse()`；拖完即零成本。
+The sentinel lives **only while there is reason to believe geometry is moving**:
 
-> 为什么不直接每帧测就好、还要 dedup 关窗：见 §7。一句话——常驻 RAF 对「同时存在 N 个锚、其中大多数静止」的多面板场景是纯浪费；窗口化把成本压到只在真正交互的那个锚上。
+- Opening signals: ancestor scroll (§2.C), or callers explicitly declaring drag/animation periods with `pulse()` (§2.F). `view-anchor` no longer automatically listens for splitters.
+- Automatic closing: consecutive stationary frames. If a drag pauses long enough to close the window, the caller must `pulse()` again on the next movement. Idle cost returns to zero after dragging.
 
-### E. IntersectionObserver（`treatZeroAreaAsHidden`，**仅供可见性几何**，不抢调用方意图）
+> Why not measure every frame permanently, even with dedup? See §7. Permanent RAF wastes work when N anchors coexist and most are still. Windowing limits the work to the anchor actually being interacted with.
 
-见 §3：IO 负责回答「target 是否**几何上**在视口里有非零可见面积 / 是否被 `display:none`」，**不**负责「调用方想不想显示它」。职责切分见 §3 表。
+### E. IntersectionObserver: treatZeroAreaAsHidden, geometry only
 
-### F. 显式动画提示（`pulse()`）
+See §3. IO answers whether the target has **geometrically visible, nonzero area** in the viewport or is `display:none`. It **does not** decide whether the caller wants it shown. The §3 table defines that boundary.
 
-某些位移由 CSS transition/animation 驱动（tab 切换的滑入、面板展开动画），既非 scroll 也非 splitter 拖动。`pulse()` 让调用方**临时开窗**：
+### F. Explicit animation hint: pulse()
+
+CSS transitions/animations—tab slide-ins and panel expansion, for example—can move slots without scroll or splitter dragging. `pulse()` lets callers **open a temporary window**:
 
 ```ts
-handle.pulse(durationMs?: number)   // 命令式核心：开 RAF 哨兵窗口，durationMs 后或判静止后自动关
+handle.pulse(durationMs?: number)   // imperative core: open RAF window; close after durationMs or once stationary
 ```
 
-与 `deps` 的区别：`deps` 是「立刻重发一次」（一帧），`pulse` 是「接下来一段时间每帧跟随」（动画全程）。调用方只需知道「现在开始有动画」这一个事实，不需要枚举动画把矩形挪到哪。`pulse()` 在 `followGeometry` 关时为 no-op。
+`deps` means “republish immediately once,” for one frame; `pulse` means “follow every frame for a period,” throughout an animation. Callers only need to know that an animation is beginning, without enumerating its rectangle positions. `pulse()` is a no-op when `followGeometry` is disabled.
 
-### 观测组合总表
+### Observation combinations
 
-| 信号 | 观测器 | 驱动 | 常驻？ |
-|---|---|---|---|
-| target 自身尺寸 | ResizeObserver | 事件 | 是（但静止零回调） |
-| 整窗 resize | window `resize` | 事件 | 是（静止零回调） |
-| 祖先 scroll | window capture + 可滚动祖先 `scroll`（`followScroll`） | 事件 → 开 RAF 窗 | 是（静止零回调） |
-| 祖先 transform / 重排位移 | **RAF 几何哨兵**（`followGeometry`） | 轮询 | **否**（窗口化） |
-| display:none / 出视口 | IntersectionObserver（`treatZeroAreaAsHidden`） | 事件 | 是（静止零回调） |
-| 动画期位移 | `pulse()` → RAF 窗 | 调用方提示 | 否（窗口化） |
+| Signal                                   | Observer                                                     | Driver             | Permanent?                   |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------ | ---------------------------- |
+| Target's own size                        | ResizeObserver                                               | Event              | Yes; no callbacks while idle |
+| Whole-window resize                      | Window resize                                                | Event              | Yes; no callbacks while idle |
+| Ancestor scroll                          | Window capture + scrollable ancestor scroll (`followScroll`) | Event → RAF window | Yes; no callbacks while idle |
+| Ancestor transform / reflow displacement | **RAF geometry sentinel** (`followGeometry`)                 | Polling            | **No**; windowed             |
+| display:none / outside viewport          | IntersectionObserver (`treatZeroAreaAsHidden`)               | Event              | Yes; no callbacks while idle |
+| Animation movement                       | `pulse()` → RAF window                                       | Caller hint        | No; windowed                 |
 
 ---
 
-## 3. 可见性来源：几何 vs 调用方意图（精确划线）
+## 3. Visibility sources: geometry and caller intent
 
-`createViewAnchor` 的 `{ visible:false }` **纯粹是调用方意图**（`visible:false` 选项）——锚自己绝不从几何推断隐藏（`measurePlacement` 永远返回 `visible:true`，「hiddenness is a caller decision」）。这个设计是对的，IO **不**去翻它。划线如下：
+`createViewAnchor`'s `{ visible:false }` option expresses **caller intent only**. The anchor does not infer hiddenness from geometry by itself: `measurePlacement` always returns `visible:true`, following “hiddenness is a caller decision.” That design is correct; IO **does not reverse it**.
 
-| 维度 | 谁说了算 | 机制 | 失败模式（若搞错） |
-|---|---|---|---|
-| **意图**：这块 view **应不应该**在屏上（tab 切走、面板手动收起） | **调用方** | `visible:false` 等显隐 API | 若让 IO 接管 → 用户滚动让 slot 暂时滚出视口，view 被「自作主张」detach，滚回来又 attach，闪烁 + 跨进程抖动 |
-| **几何**：target 此刻**在不在 DOM、有没有非零屏幕矩形、是不是 `display:none`** | **锚（IO + measure）** | IntersectionObserver + `getBoundingClientRect` 全 0 检测 | 若让调用方负责 → tab 用 `display:none` 隐藏时调用方忘了发意图，view 残留在原位（信号 #4） |
+| Dimension                                                                                    | Authority                     | Mechanism                                                       | Failure if confused                                                                                                         |
+| -------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **Intent**: should the view appear on screen (inactive tab, manually collapsed panel)?       | **Caller**                    | `visible:false` and other visibility APIs                       | If IO takes over, scrolling out of view causes unsolicited detach, then reattach on return: flicker and cross-process churn |
+| **Geometry**: is target in DOM, does it have a nonzero screen rectangle, is it display:none? | **Anchor (IO + measurement)** | IntersectionObserver + all-zero getBoundingClientRect detection | If callers handle it, forgetting intent on display:none leaves the view at its old position (signal #4)                     |
 
-**职责边界**：
+**Responsibility boundary**:
 
-1. **显隐意图永远是调用方说了算**。tab 切换 = 调用方对被切走的 slot 显式发意图 `visible:false`（或 electron-deck 的 tab 容器统一替成员 slot 发）。锚**不**用 IO 把「滚出视口」翻译成 `visible:false`——那会把「暂时不可见」误判成「意图隐藏」。
+1. **Visibility intent always belongs to the caller**. On tab switch, the caller explicitly publishes `visible:false` for the inactive slot, or electron-deck's tab container does so for its member slots. The anchor **never** converts “scrolled outside viewport” to `visible:false` through IO; temporary invisibility is not intent to hide.
+2. **IO adds one geometry fallback: prevent display:none remnants**. When target becomes display:none (IO reports `isIntersecting:false`, an all-zero `intersectionRect`, and an all-zero `boundingClientRect`), publish **`{ visible:false }`**, meaning detach without bounds, **not** zero-sized `visible:true`. Reasons:
+   - `display:none` or a slot without any geometry box means **no geometry to anchor to**: an objective fact, not changed caller intent. The Placement discriminant (`types.ts`) requires two distinct states: `{ visible:true, bounds:0×0 }` for an existing element legitimately rendered at zero size, and `{ visible:false }` for no geometry box / hidden, **without bounds**. This eliminates “magic zero.” display:none belongs to the latter; **never** disguise it as visible 0×0, which would again conflate no box with a legitimate zero-size element.
+   - Hosts interpret `{ visible:false }` as **detach but keep alive**: detach the native view while retaining WebContents. When display returns (IO reports intersection / measurement obtains a nonzero box), reattach immediately.
+   - **This does not overwrite caller intent**. `visible:false` means **do not show this view**, reached by an **OR of two causes**: caller hide intent **or** anchor-observed absence of a geometry box (display:none / not mounted). IO reports the objective second cause and ORs it with caller intent without overwriting or flipping that intent bit. Either cause produces the same hidden final state. “No geometry to anchor to” is a fact, not an intent.
 
-2. **IO 只补一件事：几何兜底，防 `display:none` 残留**。当 target 进入 `display:none`（IO 报 `isIntersecting:false` 且 `intersectionRect` 全 0，且 `boundingClientRect` 也全 0），锚发一条 **`{ visible:false }`（detach，不带 bounds）**——**不是** 0 尺寸的 `visible:true`。理由：
-   - `display:none` / slot 无任何几何盒 = **没有可锚的几何**，这是一个**客观事实**，不是「调用方改了显隐意图」。Placement 的判别式（`types.ts`）把 `{ visible:true, bounds:0×0 }`（元素在、但渲染成 0×0 的**合法罕见**情形）与 `{ visible:false }`（无几何盒 / 隐藏，**不带 bounds**）钉成**必须可区分**的两态——这正是消「魔法 0」的核心。`display:none` 没有几何盒，归后者，**不能**伪装成 0×0 的 visible（那会把「客观无盒」与「合法 0×0 元素」重新混成一谈，复活魔法 0）。
-   - 宿主侧把 `{ visible:false }` 读作「detach but keep alive」：原生 view 被摘下但 WebContents 存活，`display` 恢复（IO 再报有交集 / measure 拿到非零盒）时瞬时贴回。
-   - **这不算「IO 篡改调用方意图」**：`visible:false` 的语义是「**不显示这个 view**」，而「不显示」由**两路 OR** 得出——调用方意图 hide（`visible:false`）**或** 锚测出无几何盒（`display:none` / 未 mount）。IO 报告的是后一路（客观事实），与前一路（调用方意图）做 **OR**，不覆盖、不翻转调用方的意图位；只要任一路为「不显示」，最终就 `visible:false`。所以这与「锚不替调用方决定意图」不冲突——「无几何可锚」不是一个意图，是一个事实，事实与意图 OR 进同一个 `visible:false` 终态。
-
-   > **与 `{visible:true, bounds:0×0}` 的边界**：后者**只**保留给「元素仍在渲染树、有几何盒，但被排版成 0×0」这一**合法罕见**情形（例如内容真的塌成 0 高）。`display:none` / 未 mount / 无几何盒 一律走 `{visible:false}`。判别口诀：**有盒但 0 面积 → visible:true+0×0；无盒 → visible:false**。
+   > **Boundary with `{visible:true, bounds:0×0}`**: reserve the latter **only** for an element that is still in the render tree, has a geometry box, but legitimately has zero area (for example, content collapsing to zero height). display:none / not mounted / no geometry box always uses `{visible:false}`. Rule: **box with zero area → visible:true+0×0; no box → visible:false**.
    >
-   > 这条判别式是 v1 唯一的可见性表达。1.0 之前还有一条只发 `Bounds` 的通道，`display:none` 时靠「全 0 矩形」当 detach 用，分不清「合法 0×0」和「无几何盒」；v1 把两种锚合并进 `createViewAnchor`，开 `treatZeroAreaAsHidden` 时无几何盒一律走 `{ visible:false }`。
+   > This discriminant is v1's sole visibility representation. Before 1.0, a Bounds-only channel used all-zero rectangles as detach for display:none, conflating legitimate 0×0 and no box. v1 combines both anchor forms into createViewAnchor; with treatZeroAreaAsHidden enabled, no geometry box always publishes `{ visible:false }`.
 
-3. **一句话边界**：**「想不想显示」是意图（调用方）；「现在贴得上贴不上、贴在哪」是几何（锚）。** 锚永远不替调用方决定意图；调用方永远不该手算几何。
-
----
-
-## 4. 首帧守卫（防原生 view 闪 (0,0)）
-
-信号 #5：slot 还没进 DOM、或刚进但 layout 未稳时，同步 measure 报出脏/0 矩形，原生 view 闪在 (0,0)。契约：
-
-**「首个有效矩形之前，绝不 publish 一个会让原生 view 出现在错误位置的矩形。」**
-
-具体规则（落在 `apply()` 的初次发布与 IO 首帧）：
-
-1. **判「无效矩形」**：`width===0 || height===0`（含未 mount 的全 0、`display:none` 的全 0、layout 未稳的塌缩）。
-2. **首帧若无效 → 不发非零、改发 detach 信号**：
-   - 发 **`{ visible:false }`**（detach，不带 bounds；§3.2 同款，未 mount / 全 0 = 无几何盒），**绝不**发非零 bounds、也**不**发 0 尺寸的 `visible:true`。
-3. **挂 IO + RAF 哨兵等第一个非零矩形**：IO 的 `isIntersecting` 转 true（或哨兵某帧测到非零 width/height）即触发一次正常 `emit()` → 发首个真实矩形 → 原生 view **直接出现在正确位置**，从无闪 (0,0)。
-4. **不发非零 (0,0)**：(0,0) 作为**位置**是合法的（slot 真在左上角），所以不能用「位置==0」判无效；判据只用 **尺寸==0**（与 `clampRect` 的 width/height 钳零、x/y 不钳零的不变量一致）。
-
-> 取舍：「首帧直接不 publish 任何东西，静默到第一个有效矩形」也能防闪，但会让宿主侧的 view 处于「创建了但从没收到过 placement」的未定义初态。发一帧 `{ visible:false }`（detach-but-keep）让宿主从一开始就处于明确的 detached 态，恢复时只是一次 attach，时序更干净 → **发 visible:false detach**。
+3. **Boundary in one sentence**: **whether to show is caller intent; whether and where a view can currently attach is anchor geometry**. The anchor never decides intent; the caller should never calculate geometry manually.
 
 ---
 
-## 5. 终止性 hidden（dispose / 卸载必须发 detach，防残留）
+## 4. First-frame guard: avoid a native-view flash at (0,0)
 
-信号 #6：核心 `dispose()` 刻意只停观察、**永不再发布**。这对「调用方会先发 `{ visible:false }` 再 dispose」的用法成立——但跟随任意 slot 时，slot 可能在调用方来不及发 detach 之前就被 React 卸载。契约：
+Signal #5: before a slot enters DOM, or while initial layout is unstable, synchronous measurement returns a stale/zero rectangle and the native view flashes at (0,0). Contract:
 
-**「锚的生命终点（dispose）或 slot 卸载，必须有且仅有一条终止性 detach 信号抵达宿主，让原生 view 被摘除——不依赖调用方记得先发。」**
+**Before the first valid rectangle, never publish a rectangle that puts the native view in the wrong place.**
 
-落点分两层（核心保持纯净、把补发放适配层）：
+Rules for the initial `apply()` publication and first IO frame:
 
-- **核心 `createViewAnchor.dispose()`**：**不**自动补发（保持「dispose 后静默」不变量；core 不替调用方决定「摘掉这块 view」是不是它想要的终态——宿主可能正把同一块 view 交给另一个锚）。
-- **React 适配层 `useViewAnchor`**：`ref → null` / 卸载时先发一条 `{ visible:false }`（`update({ ...options, visible:false })`）再 `dispose()`。这是「任意 slot 的硬契约」：
-  - `ref(null)`（元素 detach）→ 必发一条 detach 再 dispose。
-  - 组件卸载（`elRef.current===null` 的 cleanup）→ 必发一条 detach。
-  - **命令式直接用 `createViewAnchor` 时**（无 React 适配层）：调用方必须在 `dispose()` 前发 `{ visible:false }`——这在 `createViewAnchor` 的 JSDoc 用 **FOOTGUN** 标注（与 size-anchor 的 `<body>` 守卫同风格），因为命令式核心刻意不补发。
+1. **Invalid rectangle**: `width===0 || height===0`, including all-zero unmounted/display:none rectangles and collapsed unstable layout.
+2. **Invalid first frame publishes detach instead of a nonzero rectangle**:
+   - Publish **`{ visible:false }`**, detach without bounds as in §3.2 (unmounted / all-zero means no geometry box). **Never** publish nonzero bounds or zero-sized `visible:true`.
+3. **Use IO + RAF sentinel to wait for the first nonzero rectangle**. `isIntersecting` becoming true, or a sentinel frame measuring nonzero width/height, triggers normal `emit()`, publishing the first real rectangle. The native view **appears directly at the correct position**, without a (0,0) flash.
+4. **Do not publish placeholder nonzero bounds at (0,0)**. (0,0) is a legitimate **position** for a slot truly at the top-left. Position==0 cannot determine invalidity; use only **size==0**, consistent with clampRect clamping width/height to zero but not x/y.
 
-**为什么不让核心自动补发**：`dispose()` 的语义是「停止观察」，不是「摘掉 view」。同一块原生 view 可能正从一个锚交接给另一个锚（slot 换宿、moveTo），core 自动补一条 `{ visible:false }` 会把交接打成一次可见的闪断。补发的归属 = **知道宿主协议的那一层**（React 适配层在卸载时补；命令式调用方自己补）。所以契约是「**终止 detach 必达**」，实现位置随适配层走，core 维持静默不变量。
-
----
-
-## 6. 性能 / 抖动：多锚 + RAF 的成本与收敛
-
-### 成本模型
-
-设页面同时有 N 个锚（N 个 split 叶子各一块原生 view）。各信号成本：
-
-| 信号 | 静止态成本 | 交互态成本 |
-|---|---|---|
-| ResizeObserver ×N | 0 回调 | 仅尺寸真变的那个锚触发 |
-| window resize | 0 | 整窗拖动期间所有 N 个一起重测（本就该全测，合理） |
-| capture scroll | 0 | 仅滚动期间，开对应锚的 RAF 窗 |
-| **RAF 哨兵** | **0（窗口关闭）** | **仅「正在动」的锚开窗**——通常是被拖的那 1 个，不是 N 个 |
-| IntersectionObserver ×N | 0 回调 | 仅可见性翻转时触发 |
-
-**核心论点**：把 RAF **窗口化**（§2.D）而非常驻，使静止态成本严格为 0，交互态成本正比于「正在动的锚数」而非 N。dockview 常驻 RAF 是「单一 overlay 容器」语境下可接受的简化；本锚是「N 个独立锚」语境，常驻会让 N 个锚每帧各测一次 `getBoundingClientRect`（N 次强制布局读），**即使只有一个在动**——这是必须窗口化的原因。
-
-### dedup / coalesce
-
-- **同值去重**（`lastPublished` + `sameRect` / `samePlacement`）：一次连续拖拽里每个不同矩形至多发一次 IPC；RAF 哨兵每帧测到相同矩形直接丢，**不发 IPC**。这也是哨兵「连续静止帧 → 关窗」（§2.D）的判据来源——dedup 命中即静止信号。
-- **同帧多信号合并**：scroll + RAF 哨兵共用同一个「每帧测一次」的 RAF 体，一帧内 scroll 触发多次也只测一次。ResizeObserver/resize 的同步 `emit` 与 RAF 体之间靠 `lastPublished` 去重防重复发。
-- **不加时间节流**：与 size-anchor 同立场——RAF 跟随刷新率已是终极限流，额外 throttle 会吞掉合法的离散位移。
-
-### 抖动来源与封堵
-
-- 唯一会抖的是「IO 把滚出视口误判成意图隐藏」——§3 已封死（IO 不动意图）。
-- 哨兵关窗用「连续 2 帧静止」而非「1 帧静止」；拖动暂停时允许关窗，下一次移动由客户端重新调用 `pulse()`。
+> Trade-off: publishing nothing until the first valid rectangle also avoids the flash, but leaves a host view in an undefined “created, never received placement” state. One `{ visible:false }` frame (detach-but-keep) establishes detached state from the start; recovery is simply attach. Therefore **publish visible:false detach**.
 
 ---
 
-## 7. 为什么不整包搬去 RAF（与「禁 RAF」测试的调和）
+## 5. Terminal hidden: detach on disposal/unmount to prevent remnants
 
-强约束：`view-anchor.test.ts` 断言正向锚**事件驱动路径「never schedules a requestAnimationFrame」**。理由：正向 sink 是跨进程 `setBounds`，本就晚约 1 合成帧，RAF 再叠一帧 → 拖拽可见拖尾（GROWING 时露背景最明显）。这条不变量保留。
+Signal #6: core `dispose()` deliberately stops observation and **never publishes again**. This works when callers publish `{ visible:false }` first. An arbitrary React slot may unmount before the caller can send detach. Contract:
 
-调和方式——**区分两类触发的发布时机**：
+**At anchor end-of-life (dispose) or slot unmount, exactly one terminal detach signal must reach the host and remove the native view, without relying on the caller remembering to send it first.**
 
-1. **事件驱动触发**（RO / resize / scroll-induced 的「我知道刚发生了一次离散变化」）：**同步发布**，不进 RAF。信号 #1/#2 中「事件能精确通告」的部分走这条，无新增帧。
-2. **轮询触发**（RAF 几何哨兵，信号 #1 祖先移动 / #3 transform 的「无事件、只能每帧问一次」）：**本质上就是每帧轮询**，RAF 是它**唯一**的实现方式——这不是「把同步发布推迟一帧」，而是「在没有事件的情况下，每帧主动 measure 一次」。哨兵在 RAF 体内**测到变化就同步发**（当帧 measure+publish，不再往后推一帧），所以它**不引入**「发布晚一帧」的拖尾——它引入的只是「**发现**变化最晚晚一帧」（轮询固有，无事件就只能下一帧才知道）。
+Split implementation between core and adapter:
 
-因此「禁 RAF」测试的精确含义是：**事件驱动路径不得 RAF-defer 其发布**——而不是「整个包不许出现 requestAnimationFrame」。哨兵的 RAF 属于**轮询机制**，不是**发布延迟**。
+- **Core createViewAnchor.dispose()**: **do not** publish automatically. Preserve post-disposal silence: core cannot decide that removing this view is the caller's desired final state, because the host may be handing the same view to another anchor.
+- **React useViewAnchor adapter**: on `ref → null` / unmount, first publish `{ visible:false }` with `update({ ...options, visible:false })`, then dispose. This is the arbitrary-slot contract:
+  - `ref(null)` (element detach) must publish detach before disposal.
+  - Component unmount cleanup (`elRef.current===null`) must publish detach.
+  - **Direct imperative createViewAnchor use**, without the React adapter: callers must publish `{ visible:false }` **before** dispose. Mark this **FOOTGUN** in createViewAnchor JSDoc, in the same style as size-anchor's `<body>` guard, because core intentionally does not add this publication.
 
-> 一句话：**事件能告诉你的，同步发；事件告诉不了你的（transform/祖先移动），每帧轮询、当帧发。** 两者都没有「为了合并而推迟发布」的那一帧——拖尾的根因被保留封死。
+**Why core must not publish automatically**: dispose means **stop observing**, not **remove the view**. A native view may be moving from one anchor to another (slot reparenting, moveTo); automatic hidden publication would visibly interrupt that handoff. The extra publication belongs to **the layer that knows the host protocol**: React adapter on unmount, imperative caller otherwise. The contract requires delivery of terminal detach; adapter-specific implementation preserves core silence.
 
 ---
 
-## 8. 嵌套 split 场景演示（证明观测组合够用）
+## 6. Performance and jitter: multiple anchors and bounded RAF cost
 
-场景：**左 | 右 分；右侧再 上 / 下 分；原生 view 在右下叶子；拖外层（左|右）splitter。**
+### Cost model
+
+Assume N simultaneous anchors, one native view for each split leaf:
+
+| Signal                  | Idle cost             | Interaction cost                                                         |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------ |
+| ResizeObserver ×N       | 0 callbacks           | Only the anchor whose size actually changes fires                        |
+| Window resize           | 0                     | All N remeasure during whole-window dragging; all need it                |
+| Capture scroll          | 0                     | Only while scrolling; opens the corresponding anchor's RAF window        |
+| **RAF sentinel**        | **0 (window closed)** | **Only moving anchors open windows**; normally one dragged anchor, not N |
+| IntersectionObserver ×N | 0 callbacks           | Only visibility changes trigger callbacks                                |
+
+**Core argument**: **windowed RAF** (§2.D), rather than permanent RAF, makes idle cost strictly zero and interaction cost proportional to moving anchors rather than N. dockview's permanent RAF is an acceptable simplification for one overlay container. Here N independent anchors would each read getBoundingClientRect every frame (N forced layout reads), **even if only one moves**. That requires windowing.
+
+### Deduplication and coalescing
+
+- **Equal-value deduplication** (`lastPublished` + `sameRect` / `samePlacement`): during continuous dragging, each distinct rectangle produces at most one IPC. Equal sentinel measurements are discarded **without IPC**. Dedup hits also provide the stationary signal for consecutive-frame window closing (§2.D).
+- **Multiple signals within one frame**: scroll and sentinel share one once-per-frame RAF body; multiple scroll events still produce one measurement. `lastPublished` prevents duplicate publication between synchronous RO/resize emit and the RAF body.
+- **No time-based throttling**: like size-anchor, RAF following the refresh rate already supplies the limiting cadence. Extra throttling would discard legitimate discrete movement.
+
+### Jitter sources and prevention
+
+- The only jitter source is **IO treating out-of-viewport geometry as hide intent**, excluded by §3: IO does not modify intent.
+- Close the sentinel after **two consecutive stationary frames**, not one. Drag pauses may close it; the client calls pulse again on the next movement.
+
+---
+
+## 7. Why publication must not all move to RAF
+
+The strong constraint in `view-anchor.test.ts` is that the forward anchor's **event-driven path “never schedules a requestAnimationFrame.”** Its sink is cross-process setBounds, already roughly one composition frame late. Another RAF frame causes visible drag trailing, especially exposed background while GROWING. Keep this invariant.
+
+Reconcile it by distinguishing **publication timing for two trigger types**:
+
+1. **Event-driven triggers** (RO / resize / scroll-induced signals reporting a known discrete change) **publish synchronously**, without RAF. Event-observable parts of signals #1/#2 take this path, adding no frame.
+2. **Polling triggers** (RAF sentinel for eventless ancestor movement #1 / transform #3) **are inherently per-frame polling**. RAF is their **only** implementation mechanism. This does not delay a synchronous publication; it actively measures once per frame when there is no event. Inside RAF, the sentinel **publishes synchronously as soon as it measures a change**, within that same frame, without another-frame deferral. It adds no publication-delay trailing; only **discovery** can be up to one frame late, inherent in polling without an event.
+
+Thus “no RAF” means **event-driven paths must not defer publication through RAF**, not that the package can never contain requestAnimationFrame. Sentinel RAF is a **polling mechanism**, not a **publication delay**.
+
+> **If an event reports it, publish synchronously. If no event reports it (transform/ancestor movement), poll each frame and publish in that frame.** Neither adds a frame for coalescing, preserving the protection against delayed-publication trailing.
+
+---
+
+## 8. Nested split walkthrough
+
+Scenario: **left | right split; right subdivided into top / bottom; native view in bottom-right leaf; drag the outer left|right splitter**.
 
 ```
 ┌───────────────┬─────────────────────────┐
-│               │  右上 (叶子，无原生 view)  │
-│   左 (叶子)    ├─────────────────────────┤
-│               │  右下 (叶子)              │
-│               │   └─ [占位 div] ← 锚      │  ← 原生 WCV 贴这里
+│               │ top-right: no native view │
+│   left leaf   ├─────────────────────────┤
+│               │ bottom-right leaf        │
+│               │   └─ [placeholder div]   │ ← anchor / native WCV
 └───────────────┴─────────────────────────┘
-        ▲ 拖这条外层 splitter（左|右）向右
+        ▲ drag the outer left|right splitter to the right
 ```
 
-拖外层 splitter 向右：
+Dragging the outer splitter to the right:
 
-1. 左叶子变窄、右半边整体变宽并**左移**。右下占位 div 的 **width 变了**（右半边变宽）→ **ResizeObserver 触发**（§2.A）→ 同步 emit → 新矩形（宽变、x 也左移了）→ publish。✅ 宽度变化这一维**事件能告诉你**，同步发，无拖尾。
+1. The left leaf narrows, the right half widens and **moves left**. The bottom-right placeholder's **width changes** → **ResizeObserver fires** (§2.A) → synchronous emit → new rectangle with changed width and left-shifted x → publish. ✅ The width dimension **has an event**, so publication is synchronous with no trailing.
 
-考虑**纯左移不变宽**的退化变体（外层 splitter 在右半边内部、或右半边是固定宽时整体被推走）：占位 div 的 **width/height 都没变、只有 x 变**（祖先把它整体推走）。此时：
+Now consider **leftward movement without a width change**: an outer splitter inside the right half, or a fixed-width right half displaced as a whole. The placeholder's **width/height stay unchanged; only x changes** because its ancestor moves it:
 
-2. ResizeObserver **不触发**（尺寸没变）——这正是信号 #1。
-3. 拖动从 splitter 的 `pointerdown` 开始 → `createDeckLayoutClient` 给活动锚调用 `pulse()`；拖动中每次 `pointermove` 都再次调用，即使指针曾暂停到哨兵关窗，也会在下一次移动时重开 → x 改变时 publish 新 x。✅ 原生 view 跟随左移。
-4. 松手或取消拖动 → 客户端撤掉临时监听；哨兵测到连续静止帧后关窗。
+2. ResizeObserver **does not fire**: size has not changed. This is signal #1.
+3. Splitter pointerdown starts dragging; createDeckLayoutClient calls `pulse()` on active anchors, again on every pointermove. If a pause closed the sentinel, the next movement reopens it. Changing x publishes the new x. ✅ The native view follows the leftward movement.
+4. Pointer release or cancellation removes temporary client listeners; consecutive stationary frames close the sentinel.
 
-再叠 **scroll 变体**：若右下叶子是可滚动容器、原生 view 占位随内容滚动：
+Add a **scroll variant**, with the bottom-right leaf scrollable and the placeholder moving with content:
 
-5. 滚动 → `scroll` 不冒泡到 window，但 **window 捕获阶段**收到（§2.C）→ 开 RAF 窗 → 滚动期间每帧测占位新 y → publish。✅ 滚动跟随。停滚 → 判静止 → 关窗。
+5. Scroll does not bubble to window, but **window capture** receives it (§2.C), opens RAF, measures the new y each scrolling frame, and publishes. ✅ Following stops at rest when the window closes.
 
-再叠 **transform 变体**（外层 split 用 CSS transform 做展开动画而非改 flex 尺寸）：
+Add a **transform variant**, where outer split expansion uses CSS transform rather than changing flex size:
 
-6. transform 改屏幕位置、`getBoundingClientRect` 的 left/top 变、但**无任何事件**。调用方在动画开始时 `pulse()`（§2.F）→ 开 RAF 窗 → 动画全程每帧跟随 → 动画结束判静止关窗。✅。
+6. Transform changes screen position and getBoundingClientRect left/top, but **no event reports it**. Call `pulse()` at animation start (§2.F); RAF follows every frame, then closes when stationary after the animation. ✅
 
-**结论**：A（宽高变）+ C（滚动）+ D（splitter/transform 引发的纯位移）+ F（动画）覆盖了嵌套 split 下原生 view 会经历的全部位移来源。每一类都有对应触发，且静止后全部回到零成本。
+**Conclusion**: A (size), C (scroll), D (pure splitter/transform displacement), and F (animation) cover every movement source a native view encounters in this nested split. Each has a trigger; all return to zero cost at rest.
 
 ---
 
-## 9. API 总览
+## 9. API overview
 
-> 全部是**叠加**，不破坏现有签名；不开 option 即退化成「自身尺寸 + 整窗 resize」的默认行为。
+> All changes are **additive**, preserving existing signatures. With options disabled, behavior remains “own-size changes + whole-window resize.”
 
-### `createViewAnchor`（Placement 命令式核心）
+### createViewAnchor: imperative Placement core
 
-follow option（默认全关）与 `pulse` 落在 `ViewAnchorOptions` / `ViewAnchorHandle`：
+Follow options (all default off) and pulse belong to ViewAnchorOptions / ViewAnchorHandle:
 
 ```ts
 interface ViewAnchorOptions {
-  // ...visible / publish...
-  /** 追加祖先 scroll 跟随（window 捕获 + 可滚动祖先监听）。默认 false。 */
-  followScroll?: boolean
-  /** 启用 RAF 几何哨兵（兜 transform / 祖先移动）。默认 false。
-   *  开窗由 scroll / pulse() 触发，静止自动关窗。 */
-  followGeometry?: boolean
-  /** display:none 兜底：挂 IntersectionObserver，进入 display:none（无几何盒）时
-   *  发 `{ visible:false }`（detach-but-keep，不带 bounds），恢复时重测。默认 false。 */
-  treatZeroAreaAsHidden?: boolean
-  /** 与上一条已接受的 Placement 相同时不重发，默认 true。 */
-  dedupe?: boolean
-  /** 中止即停锚，创建时读一次；update() 不接受这个字段。 */
-  signal?: AbortSignal
+	// ...visible / publish...
+	/** Follow ancestor scroll with window capture + scrollable ancestor listeners. Default false. */
+	followScroll?: boolean
+	/** Enable RAF geometry sentinel for transforms / ancestor movement. Default false.
+	 *  Scroll / pulse() opens the window; stationary detection closes it. */
+	followGeometry?: boolean
+	/** display:none fallback: observe with IntersectionObserver and publish `{ visible:false }`
+	 *  for no geometry box (detach-but-keep, no bounds); remeasure on return. Default false. */
+	treatZeroAreaAsHidden?: boolean
+	/** Do not republish a Placement equal to the last accepted one. Default true. */
+	dedupe?: boolean
+	/** Abort stops the anchor. Read once at creation; update() does not accept this field. */
+	signal?: AbortSignal
 }
 
 interface ViewAnchorHandle {
-  /** 整份替换：省略的 option 回到默认值（三个 follow 开关回 false、
-   *  dedupe 回 true），不是浅合并。 */
-  update(opts: Omit<ViewAnchorOptions, 'signal'>): void
-  dispose(): void
-  /** 开一次 RAF 哨兵窗口（动画期跟随）；durationMs 后或判静止后自动关。
-   *  followGeometry 为 false 时为 no-op。 */
-  pulse(durationMs?: number): void
+	/** Replace all options, not shallow-merge. Omitted options reset to defaults:
+	 *  all three follow switches false, dedupe true. */
+	update(opts: Omit<ViewAnchorOptions, 'signal'>): void
+	dispose(): void
+	/** Open one RAF sentinel window to follow an animation; close after durationMs or at rest.
+	 *  No-op when followGeometry is false. */
+	pulse(durationMs?: number): void
 }
 ```
 
-### `useViewAnchor`（React 适配层）
+### useViewAnchor: React adapter
 
 ```ts
 interface UseViewAnchorOptions extends ViewAnchorOptions {
-  deps?: ReadonlyArray<unknown>   // 非 DOM 依赖变化 → 强制 re-publish 一次
+	deps?: ReadonlyArray<unknown> // non-DOM dependency changes → force one republication
 }
 ```
 
-- 终止性 detach（§5）由适配层覆盖（`ref→null` / 卸载发一条 `{ visible:false }` 再 dispose）。
-- `deps` 之外的选项就是 `ViewAnchorOptions` 全集，follow option 与 `pulse` 对 hook 一样可用。
+- The adapter handles terminal detach (§5): ref→null / unmount publishes `{ visible:false }` before disposal.
+- Apart from deps, options are the full ViewAnchorOptions set. Follow options and pulse are also available to the hook.
 
-### `electron-deck` 侧（host 胶水，不进 view-anchor）
+### electron-deck host integration: outside view-anchor
 
-- split 的每个叶子占位 div 用 Placement 锚开 `followScroll` / `followGeometry` / `treatZeroAreaAsHidden`。
-- `createDeckLayoutClient` 在捕获阶段识别分隔条 `pointerdown`：除事件路径中的 `[role="separator"]`，还检测来自本组件 `[data-deck-split]` 内部的指针是否落在其 `[data-deck-resize-handle]` 的矩形内，因为 `react-resizable-panels` 可以从命中区域开始拖动，而事件目标是旁边的面板。这样不把遮挡在 split 外的其他元素误认为分隔条，也适用于事件路径中的 ShadowRoot。当前只覆盖分隔条元素矩形；若库的额外命中边距伸出该矩形，仍需单独验证。对活动锚调用 `pulse()`；按住期间每次 `pointermove` 再调用，松开、取消、失去指针捕获且按键已释放，或窗口失焦后撤销临时监听；按键仍按住时即使捕获转移，也继续跟随。若松手发生在窗口外，下一次无按键的移动或新一轮按下也会清除失效的拖拽状态。锚本身不识别分隔条。
-- tab 容器切换时对非活动成员发意图 `visible:false`，对活动成员 `visible:true`。
+- Each split leaf placeholder div uses a Placement anchor with `followScroll` / `followGeometry` / `treatZeroAreaAsHidden` enabled.
+- `createDeckLayoutClient` recognizes splitter pointerdown during capture. Besides `[role="separator"]` in the event path, it checks whether a pointer originating inside this component's `[data-deck-split]` lies within a `[data-deck-resize-handle]` rectangle. `react-resizable-panels` may begin a drag from a hit area even when the event target is the neighboring panel. This avoids treating an element covering the split from outside as a separator, and also works for ShadowRoot in the event path. Only the separator element's rectangle is currently covered; any library hit margin outside that rectangle still needs separate verification. Call pulse on active anchors and again on every pointermove while pressed. Remove temporary listeners on release, cancellation, lost capture with buttons released, or window blur; continue following if capture transfers while buttons remain pressed. If release happens outside the window, the next button-free movement or a new press clears stale drag state. The anchor itself does not recognize splitters.
+- Tab containers publish `visible:false` intent for inactive members and `visible:true` for active members.
 
 ---
 
-## 10. 契约小结（锚保证 / 不保证）
+## 10. Contract summary: guarantees and limits
 
-**保证跟随的信号**：
-1. target 自身尺寸变化（RO，同步发）。
-2. 整窗 resize（同步发）。
-3. 祖先滚动（`followScroll`，window 捕获并监听可滚动祖先，开窗逐帧跟）。
-4. 祖先 transform / 祖先重排导致的纯位移（`followGeometry` RAF 哨兵，开窗逐帧跟）。
-5. 动画期位移（`pulse()` 开窗）。
-6. `display:none` 隐藏（`treatZeroAreaAsHidden` IO）→ 发 `{ visible:false }`（detach-but-keep，无几何盒），恢复重测、瞬时贴回。
-7. 首帧未 mount / layout 未稳 → 不发非零脏矩形，发 `{ visible:false }` detach，等首个有效矩形（§4）。
-8. dispose / 卸载 → 终止性 detach 必达（§5，由知道 sink 语义的那层补发）。
+**Signals guaranteed to be followed**:
 
-**不保证 / 明确不做**：
-- **不替调用方决定显隐意图**：滚出视口 ≠ 意图隐藏，锚绝不据此 detach（§3）。
-- **不承诺跨进程呈现延迟**：本包在发现变化时发布 placement，不控制 IPC 与主进程合成时序。
-- **不常驻 RAF**：静止态严格零轮询成本（§2.D / §6）。
-- **不在包里做时间节流**（dedup + RAF 跟随刷新率已是终极限流）。
-- **不在核心 dispose 后自动补发**（终止 detach 的形状随 sink 语义，归适配层/调用方，§5）。
-- **不提供 `decide` / 收敛策略 / tab 容器**（host 胶水，留 electron-deck）。
+1. Target's own size changes (RO, synchronous publication).
+2. Whole-window resize (synchronous publication).
+3. Ancestor scroll (`followScroll`, window capture + scrollable ancestor listeners, per-frame following while the window is open).
+4. Pure displacement from ancestor transform/reflow (`followGeometry` RAF sentinel, per-frame following while open).
+5. Animation movement (`pulse()` opens the window).
+6. display:none hiding (`treatZeroAreaAsHidden` IO) → `{ visible:false }` (detach-but-keep, no geometry box); remeasure on return and reattach immediately.
+7. First-frame unmounted/unstable layout → no stale nonzero rectangle; publish hidden detach and await the first valid rectangle (§4).
+8. Disposal/unmount → terminal detach must arrive (§5, added by the layer knowing sink semantics).
+
+**Limits and deliberate exclusions**:
+
+- **No decisions about caller visibility intent**: outside viewport ≠ hide intent, and never causes anchor detach (§3).
+- **No cross-process presentation-latency guarantee**: publish when a change is discovered; IPC and main-process composition timing are outside this package's control.
+- **No permanent RAF**: strictly zero polling cost at rest (§2.D / §6).
+- **No time-based throttling**: dedup + refresh-rate RAF already supplies the limiting cadence.
+- **No automatic publication after core disposal**: the terminal detach form depends on sink semantics and belongs to adapters/callers (§5).
+- **No decide / convergence policy / tab container**: host integration belongs in electron-deck.

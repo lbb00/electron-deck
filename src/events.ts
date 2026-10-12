@@ -2,12 +2,11 @@ import { EventNotBoundError } from './errors.js'
 import type { Disposable, HostEvent, JsonValue } from './types.js'
 
 /**
- * Module-private internals。把 publisher 和 listener 集合放在 WeakMap 而不是
- * 类实例字段上，外部即便拿到 HostEvent 也无法通过 `as any` / 原型链触达。
+ * Module-private internals. Publishers and listener sets live in a WeakMap rather than
+ * class fields, so code holding a HostEvent cannot reach them through `as any` or the prototype chain.
  *
- * Limitation：同 process 内若加载了**两份**不同 instance 的 `electron-deck`，
- * 它们的 WeakMap 互不相通——这是 packaging 问题，不是 API 设计问题。framework
- * 期待 monorepo + peer-dep 锁定单实例。
+ * Limitation: two separately loaded copies of `electron-deck` in one process have separate WeakMaps.
+ * This is a packaging issue, not an API-design issue; the framework expects a monorepo and peer dependency to keep one instance.
  */
 interface EventInternals {
 	publisher: ((payload: JsonValue) => void) | null
@@ -66,8 +65,8 @@ export function defineEvent<P extends JsonValue>(name: string): HostEvent<P> {
 }
 
 /**
- * 校验 `ev` 是否真的来自 `defineEvent()`。判定方式是 WeakMap 身份，而非
- * `instanceof` —— 这样跨 vm.Context（同 module instance）也能工作。
+ * Validates that `ev` came from `defineEvent()` by WeakMap identity rather than
+ * `instanceof`, which also works across vm.Context instances sharing one module.
  *
  * @internal
  */
@@ -76,7 +75,7 @@ export function isHostEvent(ev: unknown): ev is HostEvent<JsonValue> {
 	return internals.has(ev as HostEvent<JsonValue>)
 }
 
-/** @internal framework 在 Bind 阶段调；同实例重复 bind 覆盖前任 */
+/** @internal Called by the framework during Bind; a repeated bind on one instance replaces the previous publisher. */
 export function bindHostEvent<P extends JsonValue>(
 	event: HostEvent<P>,
 	publisher: (payload: P) => void,
@@ -90,7 +89,7 @@ export function bindHostEvent<P extends JsonValue>(
 	it.publisher = publisher as (payload: JsonValue) => void
 }
 
-/** @internal framework 在 Cleanup 阶段调 */
+/** @internal Called by the framework during Cleanup. */
 export function unbindHostEvent<P extends JsonValue>(event: HostEvent<P>): void {
 	const it = internals.get(event as HostEvent<JsonValue>)
 	if (it) {

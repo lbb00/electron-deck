@@ -1,21 +1,22 @@
 import type { Disposable, MaybePromise, ResourceRegistry } from '../types.js'
 
 /**
- * I3: LIFO disposable registry。
+ * I3: LIFO disposable registry.
  *
- * 合同：
- * - `add(d)` 接受 `Disposable` 或 nullary cleanup function；返回 wrapper
- *   `Disposable`，dispose 自身会 (a) 调用 underlying dispose, (b) 从 registry
- *   除名，避免 disposeAll 再次调。
- * - `disposeAll()` 按**注册逆序**调 dispose（LIFO）；任一 dispose 抛错都不阻断
- *   后续，全部跑完再 throw `AggregateError`（仅当至少一个失败时）；调过一次后
- *   再次调是 no-op resolve。
- * - 在 disposeAll 已跑后，`add()` 仍然要立即 dispose 新资源（不泄漏）。
+ * Contract:
+ * - `add(d)` accepts a `Disposable` or a cleanup function taking no arguments. It returns
+ *   a wrapper `Disposable` whose dispose calls the underlying cleanup and removes the entry
+ *   from the registry, preventing a second call by disposeAll.
+ * - `disposeAll()` calls dispose in **reverse registration order** (LIFO). A failure does not
+ *   stop later cleanups; after all have run, it throws `AggregateError` if any failed.
+ *   Subsequent calls resolve without doing anything.
+ * - After disposeAll has run, `add()` immediately disposes new resources to prevent leaks.
  *
- * @deprecated 地基层的承重 disposable 原语已收敛到 `src/main/disposable.ts`
- *   的 `DisposableRegistry`（foundation.md §11 决策①：连接层选用 disposed-后-add-抛错
- *   语义 + reset=换实例）。本实现的 disposed-后-add-立即-dispose 语义与之互斥，
- *   仅 `deck-app.ts` 旧路径仍在用，不再用于新代码。后续期删除。
+ * @deprecated Use `DisposableRegistry` in `src/main/disposable.ts` for the foundational
+ *   disposal primitive (foundation.md §11, decision ①). The connection layer rejects add
+ *   after disposal and resets by creating a new instance. This implementation instead
+ *   immediately disposes resources added after disposal. Only the legacy `deck-app.ts`
+ *   path still uses it; do not use it in new code. It is slated for removal.
  * @internal
  */
 interface Entry {
@@ -33,7 +34,7 @@ export class ResourceRegistryImpl implements ResourceRegistry {
 			= typeof d === 'function' ? d : () => d.dispose()
 
 		if (this.allDisposed) {
-			// add() after disposeAll() → 立即 dispose，不进 registry（防泄漏）
+			// add() after disposeAll() → dispose immediately without registering the resource, preventing leaks.
 			void runQuietly(underlying)
 			return { dispose: () => {} }
 		}

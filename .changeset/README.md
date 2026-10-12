@@ -1,22 +1,31 @@
 # Changesets
 
-这个目录放的是「还没发布的改动说明」。每个 `.md` 文件描述一次改动：动了什么、算 patch 还是 minor / major。
+This directory contains release notes for changes that have not been published yet. Each Markdown file describes a change and identifies its patch, minor, or major version impact.
 
-## 要改的东西会影响使用者时
+## Changes that affect consumers
 
-在 PR 里跑一次：
+Run this command in your PR branch:
 
 ```bash
 pnpm changeset
 ```
 
-按提示选版本级别、写一句人话说明，它会生成一个 `.changeset/xxx.md`，跟代码一起提交。只改内部实现、测试或文档，使用者感知不到的，不用加。
+Choose the version impact and write a plain-English description when prompted. Commit the generated `.changeset/xxx.md` file with the code. Internal implementation changes, tests, or documentation changes that do not affect consumers do not need a Changeset.
 
-## 合并之后会发生什么
+Write Changesets and release notes in English, the project's primary language. The localized `README.zh-CN.md` remains in Chinese. Run `pnpm check:maintainer-language` to check default documentation and release notes; this check also runs in `pnpm test` and CI.
 
-1. 带 changeset 的 PR 合进 main 后，`changesets/action` 会自动开一个叫 **Version Packages** 的 PR：它把 `package.json` 的版本号抬上去、把这些说明汇总进 `CHANGELOG.md`、删掉已经消化的 `.changeset/*.md`。
-2. 合并那个 PR，发布流程才真正跑：构建、跑完整测试、发到 npm（带 provenance 签名）、打 tag、建 GitHub Release。
+## Language requirements
 
-也就是说发布需要合两次 PR，中间那次是给人看一眼版本号和更新日志对不对的。
+| Content                                                      | Requirement          | Check                            |
+| ------------------------------------------------------------ | -------------------- | -------------------------------- |
+| Changesets, changelog, and default maintenance documentation | English              | `pnpm check:maintainer-language` |
+| `README.zh-CN.md` and its language-switch label              | Chinese localization | Excluded from the English check  |
 
-发布用的是 npm trusted publishing（OIDC），仓库里没有长期有效的 npm token。具体发布逻辑在 `scripts/release.js`，工作流在 `.github/workflows/release.yml`。
+## What happens after merging
+
+1. When a PR with a Changeset merges into main, `changesets/action` opens a **Version Packages** PR. It updates `package.json`, collects the notes into `CHANGELOG.md`, and consumes the processed `.changeset/*.md` files.
+2. Merging that version PR runs the release workflow: build, full tests, publish to npm with provenance, create tags, and create a GitHub Release.
+
+A release therefore requires two PR merges. The version PR gives reviewers a chance to check the version and changelog before publishing.
+
+Publishing uses npm trusted publishing (OIDC), with no long-lived npm token in the repository. The release script is `scripts/release.js`, and the workflow is `.github/workflows/release.yml`.

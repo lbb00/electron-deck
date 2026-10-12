@@ -75,8 +75,8 @@ export interface DeckWindow {
 }
 
 /**
- * `defineEvent(name)` 创建的 HostEvent。pure factory，无 side effect —— 必须在
- * `DeckConfig.events` 中显式列出 framework 才会绑 transport。
+ * HostEvent created by `defineEvent(name)`, a pure factory with no side effects.
+ * The event must be explicitly listed in `DeckConfig.events` for the framework to bind its transport.
  *
  * `@experimental` No production consumer yet — only `examples/` uses
  * `defineEvent` / `DeckConfig.events`; the `backend` integration path never
@@ -88,16 +88,17 @@ export interface HostEvent<P extends JsonValue> {
 	on(listener: (payload: P) => void): Disposable
 }
 
-// ── DeckConfig 顶层 ─────────────────────────────────────────────────
+// ── DeckConfig top level ──────────────────────────────────────────────
 
 /**
- * Handler 形参故意宽松（`never[]`）—— host 写 `(p: { code: string }) => ...` 这种
- * narrower 签名必须能赋值给 `Record<string, Handler>`。rest 参数是逆变位置：
- * `never` 对任意具体参数类型都成立赋值（`unknown` 则不成立，会挡掉上面这种
- * narrower 签名）。framework 在 IPC 边界做 JSON 校验，narrower 类型在
- * webview-side `createDeckClient<HS, EV>()` 通过 `Parameters<HS[K]>` 推断。
- * 返回值 framework 不约束 TS 类型，但 runtime 强制要求 JSON-safe（非 JSON 值
- * 反序列化时报错）。
+ * Handler parameters deliberately use `never[]` so a narrower host signature such as
+ * `(p: { code: string }) => ...` remains assignable to `Record<string, Handler>`.
+ * Rest parameters are checked contravariantly: `never` is assignable to any concrete
+ * parameter type, whereas `unknown` would reject that narrower signature.
+ * The framework validates JSON at the IPC boundary. On the webview side,
+ * `createDeckClient<HS, EV>()` infers the narrower types through `Parameters<HS[K]>`.
+ * The framework does not constrain the TypeScript return type, but at runtime the
+ * result must be JSON-safe; non-JSON values fail during deserialization.
  *
  * `@experimental` No production consumer yet: only `examples/` sets
  * `DeckConfig.hostServices`; the `backend` integration path never touches it.
@@ -143,48 +144,48 @@ export interface AppConfig {
 export type WebviewSource = { readonly url: string } | { readonly file: string }
 
 /**
- * 顶层 `electronDeck(config, options?)` 的第二参数。
+ * The second parameter of the top-level `electronDeck(config, options?)` call.
  *
- * **生产路径**：缺省即可——framework lazy `await import('electron')` 取真
- * `ipcMain` / `BrowserWindow` / `WebContentsView`。host 在 Electron main 进程
- * 入口直接 `electronDeck(config)`，不需要手动注入。
+ * **Production:** omit it. The framework lazily uses `await import('electron')` to obtain
+ * real `ipcMain`, `BrowserWindow`, and `WebContentsView` dependencies. Hosts can call
+ * `electronDeck(config)` directly from the Electron main-process entry point without manual injection.
  *
- * **测试 / 非 Electron 环境**：完全显式注入 `{ electron, ipcMain }` 即可绕过
- * lazy import（vitest 跑 `await import('electron')` 会解析到 Electron 安装包
- * 的 entry stub —— 它导出可执行路径字符串而非 main-process module，所以
- * `ipcMain` / `BrowserWindow` 都是 undefined。framework 用 lazy import 时若
- * 取不到 `ipcMain` 会抛清晰错误，提示注入。
+ * **Tests / non-Electron environments:** explicitly supply both `{ electron, ipcMain }` to bypass
+ * the lazy import. Under Vitest, `await import('electron')` resolves to the package entry stub,
+ * which exports an executable-path string rather than the main-process module;
+ * `ipcMain` and `BrowserWindow` are therefore undefined. If the lazy import cannot provide
+ * `ipcMain`, the framework throws a clear error asking the caller to inject it.
  *
- * `trustedWebContents` / `senderPolicy` 是可选 override —— 缺省 framework 用
- * 内部维护的 trusted set + 默认 isTrusted 策略。
+ * `trustedWebContents` and `senderPolicy` are optional overrides. By default, the framework
+ * uses its internally maintained trusted set and the default isTrusted policy.
  *
- * 注意：`backend` 不在这里——它是「这个 deck 跑什么领域装配」的配置，属于
- * {@link DeckConfig}，不是测试注入旋钮。
+ * `backend` belongs to {@link DeckConfig}: it determines which domain-specific backend
+ * assembles this deck, rather than providing a test dependency override.
  */
 export interface DeckOptions {
-	/** 注入自定义 Electron（测试 fake 或 production override）。缺省时 framework lazy import 真 electron。 */
+	/** Inject custom Electron dependencies (test fakes or production overrides); defaults to a lazy import of real Electron. */
 	readonly electron?: MinimalElectron
-	/** 注入 ipcMain；缺省时 framework 用 lazy-imported electron.ipcMain。 */
+	/** Inject ipcMain; by default, the framework uses lazy-imported electron.ipcMain. */
 	readonly ipcMain?: MinimalIpcMain
-	/** 自定义 trustedWebContents 回调；默认走 framework 内部维护 set。 */
+	/** Override the trustedWebContents callback; defaults to the framework-maintained set. */
 	readonly trustedWebContents?: () => readonly MinimalWebContents[]
-	/** 自定义 senderPolicy；默认按 trusted 集判断。 */
+	/** Override senderPolicy; defaults to checking membership in the trusted set. */
 	readonly senderPolicy?: SenderPolicy
 }
 
 export interface DeckConfig {
 	readonly app?: AppConfig
 	/**
-	 * 领域 backend。提供后 framework 跑 `beforeReady`(pre-ready) + `assemble`
-	 * (setup)，并把 main-window 装配让给 backend（framework 不建自己的窗口）。
-	 * backend host 的主入口字段：`electronDeck({ backend })`——无需空 `{}` + options。
+	 * Domain-specific backend. When supplied, the framework runs `beforeReady` before readiness
+	 * and `assemble` during setup, leaving main-window assembly to the backend instead of creating its own window.
+	 * Backend hosts use `electronDeck({ backend })` directly, without an empty `{}` plus options.
 	 */
 	readonly backend?: RuntimeBackend
-	/** 暴露给 trusted webview 的 RPC
+	/** RPC exposed to trusted webviews.
 	 *  @experimental No production consumer yet — only `examples/` sets this;
 	 *  the `backend` integration path never touches it. */
 	readonly hostServices?: Record<string, HostServiceHandler>
-	/** main → webview 推送；必须显式列出，避免 module load order 隐式注册
+	/** Main → webview event pushes; explicitly list events to avoid registration depending on module load order.
 	 *  @experimental No production consumer yet — only `examples/` sets this;
 	 *  the `backend` integration path never touches it. */
 	readonly events?: readonly HostEvent<JsonValue>[]
@@ -210,7 +211,7 @@ export interface SettingsSnapshot {
 }
 
 export interface SenderPolicy {
-	/** trusted webContentsId set，框架内部维护；@internal */
+	/** Check the trusted webContentsId set maintained by the framework. @internal */
 	isTrusted(senderId: number): boolean
 }
 
@@ -223,7 +224,7 @@ export interface ResourceRegistry {
 export interface DeckContext {
 	readonly settings: SettingsSnapshot
 	readonly theme: 'light' | 'dark'
-	/** @internal unsupported escape；破坏 I1/I2/I3 服务承诺 */
+	/** @internal Unsupported escape hatch; bypasses the I1/I2/I3 service guarantees. */
 	readonly _registry: ResourceRegistry
 	/** @internal unsupported escape */
 	readonly _senderPolicy: SenderPolicy
@@ -232,7 +233,7 @@ export interface DeckContext {
 export interface FrameworkEvents {
 	'window-created': { window: BrowserWindow; role: 'main' | 'host' }
 	'window-closed': { window: BrowserWindow }
-	/** webContents.loadURL/loadFile 失败时 emit。framework 不 reject start()，host 可订阅做兜底/重试 */
+	/** Emitted when webContents.loadURL/loadFile fails. Loading failures do not reject start(); hosts can subscribe to provide fallback behavior or retry. */
 	'load-failed': { source: WebviewSource; error: unknown }
 }
 
@@ -245,7 +246,7 @@ export interface WindowCreateOptions {
 	readonly height?: number
 	readonly modal?: boolean
 	readonly parent?: BrowserWindow
-	/** 默认 true */
+	/** Default true */
 	readonly autoTrust?: boolean
 }
 

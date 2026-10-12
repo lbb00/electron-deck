@@ -1,17 +1,17 @@
 /**
- * WireTransport — main 端的真 Electron wire 桥接。
+ * WireTransport bridges real Electron IPC in the main process.
  *
- * 责任：
- * - 在 `ipcMain.handle('__electron-deck:invoke')` / `'__electron-deck:probe'` 上路由
- *   webview → main 的 RPC 请求，按 `senderPolicy` gating + kind 派发到 host
- *   handler，序列化成 `InvokeResponse` 帧。
- * - 订阅 framework `EventBus`，把 declared `HostEvent.publish(payload)` 通过
- *   `webContents.send('__electron-deck:event', envelope)` 推送给所有 trusted
- *   webContents。
+ * Responsibilities:
+ * - Route webview → main RPC requests on `ipcMain.handle('__electron-deck:invoke')`
+ *   and `'__electron-deck:probe'`. Apply `senderPolicy`, dispatch by kind to the
+ *   host handler, and serialize the result into an `InvokeResponse` frame.
+ * - Subscribe to the framework `EventBus` and push declared `HostEvent.publish(payload)`
+ *   events to all trusted webContents via `webContents.send('__electron-deck:event', envelope)`.
  *
- * 该类只持有 deps 引用，不直接 import 'electron'；测试用 plain DI 注入 fake。
- * 生命周期一次性：start → dispose 后不能再 start（避免 listener 泄露 / 句柄
- * 双重注册）；hot-restart 由 host 重新构造新实例。
+ * This class holds dependency references without importing 'electron' directly;
+ * tests inject fakes through plain dependency injection.
+ * Its lifecycle is single-use: after start → dispose, it cannot start again, preventing
+ * listener leaks and duplicate handler registration. The host must construct a new instance to restart.
  *
  * @internal
  */
@@ -32,8 +32,8 @@ import type { Disposable, JsonValue, SenderPolicy } from '../types.js'
 import type { EventBus } from './event-bus.js'
 
 /**
- * Framework-reserved invoke failure codes —— 全部带 `DECK_` 前缀，避免与
- * host 自定义 code 冲突。Client / host 都不应抛同前缀。
+ * Framework-reserved invoke failure codes all use the `DECK_` prefix to avoid
+ * collisions with host-defined codes. Neither clients nor hosts should throw codes with this prefix.
  */
 export const DECK_CODE = {
 	UntrustedSender: 'DECK_UNTRUSTED_SENDER',
@@ -90,17 +90,16 @@ export interface WireTransportDeps {
 	readonly ipcMain: MinimalIpcMain
 	readonly bus: EventBus
 	readonly senderPolicy: SenderPolicy
-	/** 取当前 trusted webContents 快照；用于 event push 广播。lazy：每次 publish 重调。 */
+	/** Return the current trusted webContents snapshot for event broadcasts; called anew on every publish. */
 	readonly trustedWebContents: () => readonly MinimalWebContents[]
-	/** 路由 host kind 调用；handler 抛错由 WireTransport 接住 → InvokeFailure。
-	 *  `ctx` 必填：携带已过 trust + main-frame gate 的 senderId（授权门读它）。 */
+	/** Route host-kind calls; WireTransport catches handler errors and converts them to InvokeFailure.
+	 *  `ctx` is required: its senderId has passed the trust and main-frame checks and is used for authorization. */
 	readonly invokeHost: (name: string, args: readonly JsonValue[], ctx: InvokeCtx) => Promise<JsonValue>
 	/**
-	 * 已声明的 event name 集合，作为 wire fanout 的 allowlist。**必填，
-	 * default-deny** —— 未在该集合内的 event name 不会跨进程下发（防止
-	 * framework 内部代码意外调 `bus.publish('foo')` 时 leak 给 webview）。
-	 * 调用方需保证每次返回的是当前 declared event 名字列表（lazy 快照，每次
-	 * publish 重读）。
+	 * Declared event names allowed in wire fanout. **Required; default-deny**:
+	 * undeclared names never cross process boundaries, preventing accidental
+	 * `bus.publish('foo')` calls inside the framework from leaking events to webviews.
+	 * Return the current declared event names on each call; this snapshot is reread on every publish.
 	 */
 	readonly declaredEvents: () => readonly string[]
 	/**
@@ -149,9 +148,9 @@ export class WireTransport {
 		}
 		this.state = 'started'
 
-		// 注册过程中任何一步抛错，必须回滚已成功的副作用（handler / subscription），
-		// 否则会留下半状态：dispose() 看到 state !== 'started' 走 no-op 分支，造成
-		// 已注册的 ipcMain handler 永远不被清除。
+		// Roll back every registered handler and subscription if any registration step throws.
+		// Otherwise, resetting the state leaves a partial registration that dispose() skips
+		// because state !== 'started', and the ipcMain handlers are never removed.
 		const cleanups: Array<() => void> = []
 		try {
 			this.deps.ipcMain.handle(DeckChannel.Probe, () => this.handleProbe())
@@ -187,8 +186,8 @@ export class WireTransport {
 			})
 		}
 		catch (err) {
-			// 反向回滚已成功的步骤；任何 cleanup 自身抛错都吞掉（仅 log），
-			// 保证主 rethrow 链路不被淹没。
+			// Undo successful steps in reverse order. Log and swallow cleanup errors
+			// so they do not replace the original error being rethrown.
 			for (let i = cleanups.length - 1; i >= 0; i -= 1) {
 				try {
 					cleanups[i]?.()
@@ -258,7 +257,7 @@ export class WireTransport {
 
 	dispose(): void {
 		if (this.state !== 'started') {
-			// idle → 标记为 disposed 但不动 ipcMain；disposed → idempotent no-op
+			// idle → mark disposed without touching ipcMain; disposed → idempotent no-op
 			this.state = 'disposed'
 			return
 		}
@@ -400,9 +399,9 @@ export class WireTransport {
 
 	private fanoutEvent(name: string, payload: JsonValue): void {
 		if (this.state !== 'started') return
-		// declaredEvents allowlist (default-deny)：框架内部任何代码调
-		// bus.publish(name) 而 name 未在 config.events 声明时，跨进程下发就是
-		// leak，drop + warn。
+		// The declaredEvents allowlist is default-deny: forwarding an internal
+		// bus.publish(name) across processes when config.events does not declare name
+		// would leak an event to webviews. Drop it and warn.
 		const declared = this.deps.declaredEvents()
 		if (!declared.includes(name)) {
 			console.warn(`[electron-deck] dropping undeclared event "${name}" from wire fanout`)
@@ -454,7 +453,7 @@ function validateRequest(raw: unknown): ValidationResult {
 	if (!Array.isArray(args)) {
 		return { ok: false, name, message: 'invoke request.args must be an array' }
 	}
-	// kind 字符串但值非 host 不在这里 reject —— handler 走 UNKNOWN_KIND 路径
+	// Do not reject a string kind other than host here; the handler returns UNKNOWN_KIND.
 	return {
 		ok: true,
 		req: {
@@ -470,11 +469,11 @@ function failure(remoteName: string, message: string, code?: string): InvokeFail
 }
 
 function serializeError(invokeName: string, err: unknown): InvokeFailure {
-	// host 抛 DeckRemoteError 时保留它自带的 remoteName + code（host 用同
-	// 一个 error 类做"再次远调"的封装/重抛时，源信息不被中间环节覆盖）。
+	// Preserve remoteName and code when the host throws DeckRemoteError. A host
+	// wrapping or rethrowing another remote call with this class must not overwrite its origin.
 	if (err instanceof DeckRemoteError) {
-		// `??` 而非 `||`：host 显式抛 `new DeckRemoteError('', ...)` 时（空
-		// 字符串表 "未知来源" 的意图）保留 ''，不被 invokeName 友好覆盖。
+		// Use `??`, not `||`: an explicit `new DeckRemoteError('', ...)` uses the
+		// empty string to mean "unknown origin". Preserve it rather than substituting invokeName.
 		return failure(err.remoteName ?? invokeName, err.message, err.code)
 	}
 	if (err instanceof Error) {

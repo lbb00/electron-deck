@@ -7,7 +7,7 @@
  * wired into the REAL DeckApp, with a per-window native-view substrate + A4
  * `detachAll` teardown.
  *
- * Source of truth: docs/contracts/view-handle.md「placeIn 与挂载」+「handle 直接驱动 bounds」, and
+ * Source of truth: docs/contracts/view-handle.md "placeIn and mounting" + "handle directly drives bounds", and
  * docs/layout-architecture-demo.md (the target `runtime.view(...).placeIn(...)`
  * call shape). The increment-1 unit (`src/main/view-handle.ts` +
  * `src/main/compositor.ts` detachAll) and the deck-app WIRING (`runtime.view`)
@@ -32,7 +32,7 @@
  *      error (mirrors runtime.windows.create's electronUnavailable path).
  *
  * (Item 7 — placeIn into a second window — is DEFERRED to moveTo
- *  (view-handle.md「moveTo 跨窗迁移」); see the `it.skip` note below.)
+ *  (view-handle.md "moveTo cross-window migration"); see the `it.skip` note below.)
  *
  * Fakes: copied (minimal) from deck-app.test.ts — `createFakeElectron` /
  * `createFakeIpcMain`. `FakeBrowserWindow.contentView` already exposes
@@ -426,12 +426,12 @@ describe('DeckApp host-view slice 1 — window close cascades view teardown (A4)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // placeIn into a second window — deferred to moveTo
-//    (view-handle.md「moveTo 跨窗迁移」). Documented as skipped so the goalpost is explicit.
+//    (view-handle.md "moveTo cross-window migration"). Documented as skipped so the goalpost is explicit.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('DeckApp host-view slice 1 — second placeIn (deferred to moveTo)', () => {
 	it.skip('placing the same handle into a second window is moveTo\'s job (moveTo cross-window) — not slice 1', () => {
 		// Intentionally unspecified here. A cross-window move is the moveTo
-		// state machine (view-handle.md「moveTo 跨窗迁移」: AT_SRC→DETACHED→AT_DEST|ROLLBACK with a
+		// state machine (view-handle.md "moveTo cross-window migration": AT_SRC→DETACHED→AT_DEST|ROLLBACK with a
 		// per-view migration lock). Pinning a behavior here would prejudge that
 		// contract, so this is deferred.
 	})

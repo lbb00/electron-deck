@@ -2,14 +2,14 @@ import { bindHostEvent, unbindHostEvent } from '../events.js'
 import type { Disposable, HostEvent, JsonValue } from '../types.js'
 
 /**
- * Framework-internal event bus。
+ * Framework-internal event bus.
  *
- * 责任：
- * - `bindDeclaredEvents(events)`：在 Bind 阶段调；对每个声明的 HostEvent，调用
- *   framework binder，让该 event 的 `publish()` 走 bus。
- * - `publish(name, payload)`：通知 `subscribe(name, ...)` 注册的所有 listener。
- * - `subscribe(name, listener)`：返回 `Disposable`，dispose 后停止通知。
- * - `unbindAll()`：解绑所有 declared event publisher + 清空 subscribers。
+ * Responsibilities:
+ * - `bindDeclaredEvents(events)`: during Bind, call the framework binder for each
+ *   declared HostEvent so its `publish()` routes through the bus.
+ * - `publish(name, payload)`: notify all listeners registered by `subscribe(name, ...)`.
+ * - `subscribe(name, listener)`: return a `Disposable` that stops notifications when disposed.
+ * - `unbindAll()`: unbind all declared event publishers and clear subscribers.
  *
  * @internal
  */
@@ -29,9 +29,9 @@ export class EventBus {
 	}
 
 	publish(name: string, payload: JsonValue): void {
-		// 重入守护：listener 内同步再 publish 同一 event 会无限递归。检测到后
-		// log + drop，不抛错（避免破坏 fire-and-forget 语义中已经在跑的
-		// listener 链）。
+		// A listener synchronously republishing the same event can recurse indefinitely.
+		// Log and drop reentrant publishes without throwing, so the active listener
+		// chain keeps its fire-and-forget behavior.
 		if (this.inFlight.has(name)) {
 			console.error(`[electron-deck] reentrant publish on "${name}" dropped (listener republished the same event synchronously)`)
 			return
@@ -40,7 +40,7 @@ export class EventBus {
 		try {
 			const subs = this.subscribers.get(name)
 			if (subs && subs.size > 0) {
-				// snapshot 防止 listener 中 dispose 影响迭代；使用缓存避免每次 publish 分配新数组
+				// Snapshot listeners so disposal during delivery does not affect iteration; cache it to avoid allocating an array on every publish.
 				let snapshot = this.subscribersCache.get(name)
 				if (snapshot === undefined) {
 					snapshot = Array.from(subs)
@@ -94,8 +94,8 @@ export class EventBus {
 	}
 
 	/**
-	 * 订阅所有 channel 的 publish —— framework wire-transport 把 declared
-	 * HostEvent.publish() 桥到 webContents.send 时用。
+	 * Subscribe to publishes on every channel. The framework wire transport uses this
+	 * to bridge declared HostEvent.publish() calls to webContents.send.
 	 */
 	subscribeAll(listener: (name: string, payload: JsonValue) => void): Disposable {
 		this.allSubscribers.add(listener)

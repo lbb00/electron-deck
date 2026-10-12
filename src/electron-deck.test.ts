@@ -51,8 +51,8 @@ describe('validateConfig', () => {
 	})
 
 	it('rejects array as hostServices (typeof [] === object)', () => {
-		// review-driven: `typeof [] === 'object'`，如果元素都是 function 会
-		// 静默通过，但产生数字键的 API 名 "0", "1"。validator 必须显式拒。
+		// `typeof [] === 'object'`: an array of functions would otherwise pass silently
+		// and expose numeric API names "0", "1". The validator must explicitly reject arrays.
 		expect(() =>
 			validateConfig({
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -112,9 +112,8 @@ describe('validateConfig', () => {
 	})
 
 	it('rejects a duck-typed event that is NOT from defineEvent()', () => {
-		// review-driven contract: 通过 shape duck typing 的伪事件如果不是
-		// defineEvent() 产出，runtime Bind 会拒；validateConfig 也要拒，避免
-		// "通过校验但 bind 失败" 的迟到错误。
+		// Bind rejects shape-compatible events not produced by defineEvent().
+		// validateConfig must reject them too, preventing a late bind failure after validation passes.
 		const fake = {
 			name: 'fake',
 			publish: () => {},

@@ -7,20 +7,19 @@ import type { DeckAppOptions } from './internal/deck-app.js'
 import type { DeckConfig, DeckOptions, HostEvent, JsonValue, Runtime } from './types.js'
 
 /**
- * `electronDeck(config, options?)` 是 framework 唯一入口（见 README §3）。
+ * `electronDeck(config, options?)` is the framework's only entry point (see README §3).
  *
- * - Invalid config → reject `TypeError`，phase 不前进
- * - Valid config → 装配 runtime + 调 `config.backend.assemble(runtime)` await 完成 →
- *   resolve。不接 Electron 时，resolve 后 framework 仍持有运行时；
- *   接 Electron app lifecycle 后，由 Electron event loop 撑住进程，
- *   `electronDeck()` 同样 resolve（host 的 main 文件不需 await 阻塞）。
+ * - Invalid config → reject `TypeError`; do not advance the phase.
+ * - Valid config → assemble the runtime, await `config.backend.assemble(runtime)`, then resolve.
+ *   Without Electron, the framework retains the runtime after resolving. With an Electron app
+ *   lifecycle, Electron's event loop keeps the process alive; the host main file need not await `electronDeck()`.
  *
- * backend host 走 `electronDeck({ backend })`——backend 是
- * {@link DeckConfig} 的字段，不再需要空 `{}` + options。
+ * A backend host calls `electronDeck({ backend })`: `backend` is a field of
+ * {@link DeckConfig}, so it no longer needs an empty `{}` plus options.
  *
- * `options` 是测试 / 非 Electron 环境用的注入点（见 {@link DeckOptions}）。
- * 生产路径不传 options：framework `await import('electron')` 取真 `ipcMain` /
- * `BrowserWindow` / `WebContentsView`。
+ * `options` is an injection point for tests and non-Electron environments (see {@link DeckOptions}).
+ * Production code omits it, so the framework uses `await import('electron')` to obtain real `ipcMain` /
+ * `BrowserWindow` / `WebContentsView`.
  */
 export async function electronDeck(config: DeckConfig, options?: DeckOptions): Promise<void> {
 	// Validate config BEFORE attempting electron resolution — invalid configs
@@ -110,16 +109,16 @@ export function startElectronDeck(
 }
 
 /**
- * 把公共 `DeckOptions` 解析成 internal {@link DeckAppOptions} —— 在
- * 显式注入不足时 lazy `import('electron')` 兜底。
+ * Resolves public `DeckOptions` into internal {@link DeckAppOptions}. A lazy
+ * `import('electron')` supplies any dependency that was not explicitly injected.
  *
- * 决策 matrix：
- * - `electron` + `ipcMain` 都显式注入 → 不 lazy import（测试 / production override）
- * - 任一缺失 → `await import('electron')`，用 imported module 兜底缺失字段
+ * Decision matrix:
+ * - `electron` + `ipcMain` are both explicitly injected → no lazy import (test/production override)
+ * - Either is missing → `await import('electron')` and fill it from the imported module.
  *
- * vitest 下 `await import('electron')` 解析到安装包 entry stub（导出可执行路径
- * 字符串），所以 `ipcMain` / `BrowserWindow` 都是 undefined。我们检测到关键
- * 字段缺失会显式 reject，提示注入 options。
+ * Under Vitest, `await import('electron')` resolves to the package entry stub, which exports an
+ * executable-path string; `ipcMain` and `BrowserWindow` are therefore undefined. Missing required
+ * fields cause an explicit rejection that tells the caller to inject options.
  */
 async function resolveAppOptions(opts?: DeckOptions): Promise<DeckAppOptions> {
 	if (opts?.electron && opts?.ipcMain) {
@@ -185,11 +184,11 @@ function buildAppOptions(
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
 
 /**
- * Pure validation：不依赖 Electron / IPC / 任何 framework state，可单独 unit
- * test。每一条检查对应 doc §3.3 字段约束。
+ * Pure validation: it depends on neither Electron, IPC, nor framework state, and can be unit-tested
+ * independently. Each check corresponds to a field constraint in doc §3.3.
  *
- * 验证语义保证：通过 validateConfig 的 config 不会在 framework Bind 阶段被拒。
- * 含 HostEvent 来源、source 互斥、map vs array 等所有"shape 就绪"检查。
+ * A config that passes validateConfig will not be rejected during framework Bind. This includes all
+ * shape checks: HostEvent provenance, mutually exclusive sources, and map-versus-array forms.
  *
  * @internal exported for tests
  */
@@ -241,7 +240,7 @@ function validateEventsField(events: unknown): void {
 	assertUniqueEventNames(events as readonly HostEvent<JsonValue>[])
 }
 
-/** duck-typed 事件形状会被拒绝——只接受 `defineEvent()` 产出的真实 HostEvent，避免 bind-time 才炸。 */
+/** Reject duck-typed event shapes; accept only HostEvents produced by `defineEvent()` to avoid bind-time failures. */
 function assertAllHostEvents(events: readonly unknown[]): void {
 	for (const ev of events) {
 		if (!isHostEvent(ev)) {
@@ -264,8 +263,8 @@ function assertUniqueEventNames(events: readonly HostEvent<JsonValue>[]): void {
 }
 
 /**
- * publish-time guard：HostEvent 未在 `config.events` 中显式列出时阻止 publish。
- * 避免 module-load-order 隐式注册。
+ * Publish-time guard: prevents publishing a HostEvent not explicitly listed in `config.events`,
+ * avoiding implicit registration based on module load order.
  *
  * @internal exported for tests
  */

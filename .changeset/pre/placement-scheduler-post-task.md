@@ -2,10 +2,10 @@
 'electron-deck': minor
 ---
 
-placement 的默认发布时机从「下一个动画帧」改成「当前渲染步之后的下一个宏任务」
+Publish placements by default in the next macrotask after the current render step rather than the next animation frame
 
-渲染进程测量到槽位矩形变化后，要把新的 placement 发给主进程。之前这一步排在 `requestAnimationFrame` 里等下一帧，实测平均多等约 17ms；现在用 MessageChannel 投一个宏任务，实测约 1ms。拖动分屏把手或拖拽面板时，原生视图跟手的延迟主要就来自这一段。
+When the renderer measures a changed slot rectangle, it must send the new placement to the main process. Previously this waited for the next `requestAnimationFrame`, adding about 17 ms on average in measurements. A MessageChannel macrotask now takes about 1 ms. This delay was the main contributor to native-view lag during splitter or panel dragging.
 
-这条只改默认值。`createDeckLayoutClient` / `createPlacementPublisher` 注入了 `schedulePublish` 的调用方不受影响，仍然按注入的调度器走。
+Only the default changes. Consumers injecting `schedulePublish` into `createDeckLayoutClient` or `createPlacementPublisher` continue to use their injected scheduler.
 
-**下游可能观察到的变化**：placement 现在可能在同一帧内就到达主进程，而不是必然落到下一帧。如果你的代码依赖「发布一定发生在下一次绘制之前/之后」这个隐含时序（例如在同一个 tick 里先改 DOM 再读主进程侧的状态），需要重新确认。发布频率没有变——驱动测量的仍然是 view-anchor 自己的 rAF 跟随循环和 ResizeObserver，窗口隐藏时一起被浏览器节流。
+**Observable timing change**: a placement can now reach the main process within the same frame rather than necessarily in the next one. Recheck code depending on an implicit ordering relative to the next paint, such as changing the DOM and reading main-process state in the same tick. The measurement frequency is unchanged: view-anchor's own rAF follow loop and ResizeObserver still drive measurements, and the browser throttles both when the window is hidden.

@@ -25,17 +25,17 @@ export type {
 } from './placement-publisher.js'
 
 export interface CreateDeckClientOptions {
-	/** 默认 `__electronDeckBridge`；必须与 host preload 对齐 */
+	/** Defaults to `__electronDeckBridge`; must match the host preload. */
 	readonly globalName?: string
 }
 
-// HS / EV 使用 `never[]` 而非 `JsonValue[]` 约束：
-// (1) host 侧 HostServiceHandler 同样是 `(...args: never[]) => unknown`，两侧对称；
-// (2) JsonValue 索引签名挡掉常见 host 写法（`(p: { code: string }) => ...`），
-//     强迫 rest-only 签名时 `Parameters<HS[K]>` 推不出真实参数类型；
-// (3) Electron IPC 实际走 structured clone（非 JSON），原约束的"前提"本就错；
-// (4) 真要 runtime 校验，在 transport 边界用 `runtime.ipc.handle({ validator })`
-//     与 protocol envelope（`InvokeRequest.args: readonly JsonValue[]`）已经够。
+// HS / EV use `never[]`, not `JsonValue[]`, because:
+// (1) the host-side HostServiceHandler is also `(...args: never[]) => unknown`;
+// (2) JsonValue's index signature rejects common host handlers such as `(p: { code: string }) => ...`,
+//     while rest-only signatures cannot infer the real parameter type through `Parameters<HS[K]>`;
+// (3) Electron IPC uses structured cloning rather than JSON, so the original premise was false; and
+// (4) runtime validation at the transport boundary through `runtime.ipc.handle({ validator })`
+//     and the protocol envelope (`InvokeRequest.args: readonly JsonValue[]`) is already sufficient.
 // `never[]` (not `unknown[]`) because rest-parameter position is checked
 // contravariantly: a handler like `(p: { code: string }) => ...` is only
 // assignable into `(...args: T[]) => unknown` when T is assignable INTO its

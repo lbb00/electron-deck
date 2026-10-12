@@ -113,7 +113,7 @@ function decodeMappings(mappings) {
 }
 
 // Binary search: the mapping with the largest genColumn <= column on that line
-// (spec: "同一行找不到精确列就取该行中列号不大于目标的最近一条映射").
+// (spec: "when no exact column exists on the same line, use the nearest mapping whose column does not exceed the target").
 function lookupOriginal(sourceMap, line, column) {
 	if (!sourceMap) return null
 	const segs = sourceMap.mappingsByLine[line]
