@@ -1,4 +1,6 @@
-# view-anchor following contract: geometry for split, nested, and tab layouts
+# view-anchor following contract (historical design reference)
+
+> **Historical design reference.** This document describes the prerelease design of `view-anchor`. Refer to the upstream documentation for the stable API. See [Dock layout epoch and view-anchor](./dock-layout-epoch.md) for the current electron-deck integration, `useDockLayoutEpoch()` timing, and client-side splitter following.
 
 > This page defines the observation and timing contracts that let the forward `view-anchor` APIs (`createViewAnchor` / `useViewAnchor`) make a native `WebContentsView` **follow any DOM slot**: which movement signals must be observed, how to observe them, who owns visibility, and how to guarantee first-frame and termination behavior. Implementation belongs in `view-anchor/src/{view-anchor,react,types}.ts`.
 >

@@ -23,9 +23,8 @@
  *    literal) must never reach a main-process-only bundle regardless of
  *    which root symbol is imported.
  *
- * Kept separate from check-bundle-size.js (which measures the STANDARD
- * "import everything" shape for the size ratchet) because this gate asserts
- * string-level absence, a different kind of check with its own failure mode.
+ * This gate asserts string-level absence in a single-symbol build, so it
+ * protects an import boundary rather than tracking artifact size.
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
