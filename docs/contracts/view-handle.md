@@ -1,79 +1,83 @@
-# ViewHandle 契约
+# ViewHandle contract
 
-ViewHandle 把三个底层原语（Scope / Layout·Placement / Compositor）装配成「一块 view」的 per-view 编排单元；不持有 ControlBus——grant 闸是独立工具，想用它的 host 在自己的 `backend.assemble` 里另行装配。配套阅读：`architecture.md`（原语与 host-facing API）、`compositor-and-teardown.md`（compositor 与 teardown 契约）、`capability-and-lifecycle.md`（capability 与 lifecycle 契约）。
+ViewHandle combines three primitives (Scope, Layout/Placement, and Compositor) into a per-view orchestration unit. It does not own ControlBus: grant gating is a separate tool that hosts can assemble in their own `backend.assemble`. Read this alongside `architecture.md` (primitives and host-facing API), `compositor-and-teardown.md` (compositor and teardown contracts), and `capability-and-lifecycle.md` (authorization and lifecycle contracts).
 
-## ViewHandle 类型与硬边界
+## ViewHandle types and boundaries
 
-持有恰好三样：native ref（`NativeViewRef` + `WebContentsView`）、scope-lease（某 windowScope/wcScope 下的 viewScope，own native view + anchor sink + slot-token 条目）、compositor token（当前所在窗口的 `(compositor, host, windowScope)`）。
+A handle owns exactly three things: a native reference (`NativeViewRef` and `WebContentsView`), a scope lease (a viewScope under a windowScope/wcScope, owning the native view, anchor sink, and slot-token entry), and a compositor token (the current window's `(compositor, host, windowScope)`).
 
-**公共面分两层，签名不同——`anchor` 只在高层存在**：
+**The public API has two layers with different signatures. Only the higher layer accepts `anchor`:**
 
 ```ts
-// 底层 ViewHandle（src/main/view-handle.ts）—— 无 anchor，target 是裸 { compositor, windowScope }
+// Lower-level ViewHandle (src/main/view-handle.ts): no anchor; target is { compositor, windowScope }
 interface ViewHandle {
-  placeIn(target: PlaceTarget, opts: { zone?: number }): ViewHandle
-  applyPlacement(p: Placement): void
-  moveTo(dest: PlaceTarget, opts: { zone?: number; rehome?: boolean }): Promise<void>
-  dispose(): Promise<void>
-  readonly webContents: unknown
-  bounds(): Bounds | null
-  capturePage(): Promise<unknown>
+	placeIn(target: PlaceTarget, opts: { zone?: number }): ViewHandle
+	applyPlacement(p: Placement): void
+	moveTo(dest: PlaceTarget, opts: { zone?: number; rehome?: boolean }): Promise<void>
+	dispose(): Promise<void>
+	readonly webContents: unknown
+	bounds(): Bounds | null
+	capturePage(): Promise<unknown>
 }
 
-// 高层 DeckViewHandle（src/types.ts，`runtime.view(...)` 的返回类型）—— 带 anchor
+// Higher-level DeckViewHandle (src/types.ts, returned by `runtime.view(...)`): accepts anchor
 interface DeckViewHandle {
-  placeIn(window: BrowserWindow, opts: { zone?: number; anchor?: string }): DeckViewHandle
-  applyPlacement(placement: ViewPlacement): DeckViewHandle
-  moveTo(win: BrowserWindow, opts: { zone?: number; anchor?: string; rehome?: boolean }): Promise<void>
-  dispose(): Promise<void>
-  readonly webContents: WebContents
-  bounds(): ViewBounds | null
-  capturePage(): Promise<NativeImage>
+	placeIn(window: BrowserWindow, opts: { zone?: number; anchor?: string }): DeckViewHandle
+	applyPlacement(placement: ViewPlacement): DeckViewHandle
+	moveTo(
+		win: BrowserWindow,
+		opts: { zone?: number; anchor?: string; rehome?: boolean },
+	): Promise<void>
+	dispose(): Promise<void>
+	readonly webContents: WebContents
+	bounds(): ViewBounds | null
+	capturePage(): Promise<NativeImage>
 }
 ```
 
-两层都**没有** `anchorRect` 这个字段——它不是本包的 API；一次性坐标放置走 `applyPlacement({visible, bounds})`。两层的 `applyPlacement` / `webContents` / `bounds()` / `capturePage()` 形态一致，差别只在 `placeIn`/`moveTo` 是否接受 `anchor`。
+Neither layer has an `anchorRect` field; that is not an API of this package. Use `applyPlacement({visible, bounds})` for a one-time coordinate placement. Both layers expose `applyPlacement`, `webContents`, `bounds()`, and `capturePage()`; the anchor-related difference is whether `placeIn` and `moveTo` accept `anchor`.
 
-**硬边界（正确性约束，非风格）**：
-- 不算布局——几何来自 view-anchor publish，handle 只转发 `Placement`→`setBounds`/detach。
-- 不持全局树——slot-token 私表 / LRU 组归 runtime。
-- 不决定淘汰策略——keepAlive LRU 是 runtime helper 调 `handle.dispose`（见『keepAlive 保活』）。
-- 不直碰 contentView——`addChildView` 经 Compositor 挂载/卸载；per-view `setBounds` 不算——Compositor 不持 `setBounds`，是 ViewHandle 直接持 `WebContentsView` 自调 `.setBounds`，Compositor 纯 z-order、不摸 per-view bounds。
+**Correctness boundaries:**
 
-## 组成
+- No layout calculation: geometry comes from view-anchor publication. The handle only forwards `Placement` to `setBounds` or detach.
+- No global tree: the private slot-token table and LRU groups belong to the runtime.
+- No eviction-policy decisions: the runtime's keepAlive LRU helper calls `handle.dispose` (see “Keeping views alive”).
+- No direct contentView manipulation: Compositor performs `addChildView` mounting and unmounting. Per-view `setBounds` is different: ViewHandle owns the `WebContentsView` and calls `.setBounds` directly. Compositor controls only z-order, not per-view bounds.
 
-### placeIn 与挂载
+## Composition
 
-handle + 工厂 + `placeIn` 接 Compositor（mount→commit）+ Scope（viewScope under windowScope）+ view-anchor（placement→bounds via 注入 publish）。每个窗口各持一个 `createCompositor(win.contentView)`，ViewHandle 是其消费者。`Compositor.detachAll()` 把 intent 折叠到空 + commit（removals-only 静默）。
+### placeIn and mounting
 
-### dispose（viewScope LIFO 序）
+The handle, factory, and `placeIn` connect Compositor (mount → commit), Scope (viewScope under windowScope), and view-anchor (placement → bounds through the injected `publish`). Each window owns a `createCompositor(win.contentView)`, consumed by ViewHandle. `Compositor.detachAll()` reduces intent to an empty target and commits it, with removals-only teardown remaining silent.
 
-`dispose()` = close viewScope（单 view LIFO 序）。viewScope.own 顺序 = own(detach via unmount+commit) 先注册（跑最后）、own(anchorSink.dispose) 后注册（跑最先 = 停 publish）。sink 必须对 disposed handle 丢迟到的 in-flight bounds（view-anchor 只守自己的 emit，不守跨进程 sink 的幂等）。
+### dispose and viewScope LIFO order
 
-### per-window teardown 协调
+`dispose()` closes viewScope in per-view LIFO order. Register `own(detach via unmount+commit)` first so it runs last, and register `own(anchorSink.dispose)` later so it runs first and stops publication. The sink must discard late in-flight bounds for a disposed handle. view-anchor guards its own emit, not the idempotency of a cross-process sink.
 
-`closeWindow` ≡ windowScope.close 跑 teardown 序（LIFO）。windowScope 最先 own `win.destroy`（跑最后）；其后追加 own：detachAll、wire dispose（deck-app 是单 app 级 wire，由 rootScope own、非 per-window，收敛进 app 级「窗口先于 registry」先例，不造 per-window wire）、其余；子 viewScope 的 own 由 children-first LIFO 处理，先于这些窗口级 own 跑。
+### Per-window teardown coordination
 
-### moveTo 跨窗迁移
+`closeWindow` closes windowScope and runs its LIFO teardown. Register `win.destroy` first so it runs last; append detachAll, wire disposal, and other resources afterward. deck-app has one app-level wire owned by rootScope, not one wire per window; it follows the app-level “windows before registry” order. Child viewScope resources run before these window-level resources through children-first LIFO traversal.
 
-状态机 + migrationLock + `Scope.adopt`：per-view 异步互斥锁（`Map<viewId,Promise>` 链）；状态机 `AT_SRC→DETACHED→AT_DEST|ROLLBACK→AT_SRC|CLOSED` 消费 `CommitError`，回滚动作恒为「src 重挂」（与 dest 失败种类解耦）；`rehome:true` 以 viewScope 当前实际的 lifetime owner 为 donor，调用 `adopt(viewScope, destWindowScope)` 移寿命（默认仅移显示）。每个临界区只持一把 per-view 锁、不取第二把，故无死锁。
+### moveTo across windows
 
-**迁的是显示，不是授权。** grant 按 control-wc 的 `senderId` 键（`Grant.senderId`，`src/host/capability.ts:22-34`），存在 capability registry 自己的表里，与 scope 的所有权图无关；`Scope.adopt` 只移 viewScope 的资源所有权，不碰 grant。`electron-deck/host` 的 capability registry 是独立工具，框架本身不再自动接线或在窗口关闭时撤销 grant——需要这层的宿主自己在 `backend.assemble` 里接、自己在 src 窗关闭时调 `capability.revokeBySenderId(srcControlWc.id)`。dest 窗有自己的 control shell、发自己的 grant（popout 建新窗自带 control），所以 `moveTo` 不需要搬 grant。若 `adopt` 失败，`moveTo` 会撤销 dest 挂载并把 native view 恢复到 src；只有 src 恢复也失败时才进入 `CLOSED`。
+Migration combines a state machine, migrationLock, and `Scope.adopt`. A per-view asynchronous mutex chains `Map<viewId,Promise>` entries. The state machine `AT_SRC→DETACHED→AT_DEST|ROLLBACK→AT_SRC|CLOSED` consumes `CommitError`; rollback always remounts at src, independently of the destination failure type. With `rehome:true`, the donor is viewScope's actual current lifetime owner, and `adopt(viewScope, destWindowScope)` transfers lifetime. By default only placement moves. Each critical section holds one per-view lock and never acquires a second, preventing deadlock.
 
-### slot-token 握手
+**Placement moves; authorization does not.** Grants are keyed by the control wc's `senderId` (`Grant.senderId`, `src/host/capability.ts:22-34`) in the capability registry's own table, independently of the scope ownership graph. `Scope.adopt` transfers viewScope resource ownership without touching grants. The capability registry exported by `electron-deck/host` is a separate tool: the framework no longer wires it automatically or revokes grants on window closure. Hosts needing it must wire it in `backend.assemble` and call `capability.revokeBySenderId(srcControlWc.id)` when the source window closes. The destination has its own control shell and issues its own grants (a popout window includes its own control layer), so `moveTo` need not transfer grants. If `adopt` fails, `moveTo` removes the destination attachment and restores the native view at src; it enters `CLOSED` only if restoring src also fails.
 
-`placeIn` 生成 crypto nonce token，私表 `token→{viewId,authorizedWcId}`，`controlWc.send('__deck:slot-grant')`；per-control-wc replay buffer（首订阅 drain）；inbound place handler 在 wire 的 trust + main-frame 闸上再加 token 查表 + `sender.id===authorizedWcId` 否则 drop + bounds 形状校验（`visible:false`→detach / `visible:true`→w/h≥0，x/y 可负不拒）；token 寿命 = viewScope own 删表。
+### Slot-token handshake
 
-### keepAlive 保活
+`placeIn` creates a cryptographically random nonce token and a private entry `token→{viewId,authorizedWcId}`, then sends it with `controlWc.send('__deck:slot-grant')`. A per-control-wc replay buffer drains on first subscription. The inbound placement handler adds token lookup and `sender.id===authorizedWcId` checks to the wire's trust and main-frame gates; failed checks drop the report. It validates bounds: `visible:false` detaches, while `visible:true` requires nonnegative width/height and permits negative x/y. A viewScope-owned disposer removes the token entry.
 
-寿命正确性由『placeIn 与挂载』/『dispose（viewScope LIFO 序）』的 viewScope own WebContents 兜底；opt-in LRU helper（只 `lru`+`max`，省略 = 不淘汰）在 runtime 级，超 max 时对最久未显示的 hidden handle 调 `dispose`。保持薄，不扩成策略框架。
+### Keeping views alive
 
-## 关键文件
+viewScope ownership of WebContents, described under “placeIn and mounting” and “dispose and viewScope LIFO order”, guarantees lifetime correctness. The opt-in runtime LRU helper supports only `lru` and `max`; omission means no framework eviction. When hidden views exceed max, it calls `dispose` on the hidden handle that has gone longest without being shown. Keep this helper small rather than extending it into a policy framework.
 
-- `src/main/view-handle.ts` —— handle + 工厂 + moveTo 状态机、slot-token 注册表、keepAlive-LRU。
-- `src/types.ts` —— 高层 `DeckViewHandle` 类型（`runtime.view(...)` 返回）。
-- `src/main/compositor.ts` —— `detachAll` + `CommitError`。
-- `src/main/scope.ts` —— viewScope lease、`adopt`、完成栅栏。
-- `view-anchor/src/view-anchor.ts` —— `createViewAnchor` 几何源。
-- `src/host/control-bus.ts` + `src/host/capability.ts` —— grant 闸，`electron-deck/host` 下的独立工具；deck-app 不自动接线，想用它的 host 在自己的 `backend.assemble` 里装配。
-- `src/internal/deck-app.ts` —— runtime 工厂、per-window scope/compositor、wire 分叉、同步撤销。
+## Key files
+
+- `src/main/view-handle.ts`: handle, factory, moveTo state machine, slot-token registry, and keepAlive LRU.
+- `src/types.ts`: higher-level `DeckViewHandle` returned by `runtime.view(...)`.
+- `src/main/compositor.ts`: `detachAll` and `CommitError`.
+- `src/main/scope.ts`: viewScope leases, `adopt`, and completion fences.
+- `view-anchor/src/view-anchor.ts`: `createViewAnchor` geometry source.
+- `src/host/control-bus.ts` and `src/host/capability.ts`: grant gating, exported as independent tools under `electron-deck/host`. deck-app does not wire them automatically; hosts assemble them in `backend.assemble`.
+- `src/internal/deck-app.ts`: runtime factory, per-window scope/compositor, wire routing, and synchronous revocation.

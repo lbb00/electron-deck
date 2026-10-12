@@ -294,7 +294,7 @@ function bwOf(created: unknown): FakeBrowserWindow {
 
 /**
  * Resolve the MAIN window's `DeckWindow` handle so a per-window `onClose` can be
- * registered on it. The LOCKED facade ("create/adopt/main 统一返回形态") exposes
+ * registered on it. The LOCKED facade ("unified return shape for create/adopt/main") exposes
  * the main window through this surface; the accessor name is not pinned, so probe
  * the plausible shapes. If none exposes a callable `onClose`, throw — the
  * runtime failure we want (the per-window facade is missing on the main window).

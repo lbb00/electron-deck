@@ -1,438 +1,305 @@
-# 正确性契约：Compositor 事务化 commit + per-window teardown 顺序
+# Correctness contract: transactional Compositor commits and per-window teardown order
 
-> 范围：`electron-deck` 主进程视图编排层的两个正确性契约。本文定义
-> commit 失败语义、`moveTo` 跨窗迁移事务状态机、`migrationLock` 无死锁论证、单窗口
-> teardown 的确切顺序及其用 `Scope.own()` LIFO 的编码方式。
+> Scope: two correctness contracts for the `electron-deck` main-process view orchestration layer. This document defines commit failure semantics, the `moveTo` cross-window migration state machine, the deadlock-free argument for `migrationLock`, the exact per-window teardown order, and its LIFO encoding with `Scope.own()`.
 >
-> 关键文件：
-> - `src/main/compositor.ts` — `mount/unmount/reorder/commit/detachAll` + 前缀保序 diff + `CommitError`
-> - `src/main/view-handle.ts` — `moveTo` 状态机 + `migrationLock`
-> - `src/main/scope.ts` — `own/close/adopt` + 完成栅栏（completion fence）+ LIFO
-> - `src/main/disposable.ts` — `DisposableRegistry.disposeAll()` LIFO + AggregateError
-> - `src/internal/deck-app.ts` — **app 级** teardown：「窗口先于 registry」
+> Key files:
 >
-> 基线：
-> - `commit()` 是**单同步 pass**：先 `removeChildView`（removals），再按 target index
->   升序 `addChildView`（additions）。host 已毁且**有待应用工作**时抛 `CommitError`；
->   **no-op commit 不抛、不碰 host**（`compositor.ts`，pin 见 `compositor.test.ts`）。
-> - app 级 teardown 的顺序先例：**先 `win.destroy()` 全部窗口，再
->   `registry.disposeAll()`**，理由是 WireTransport 在 registry 里，若窗口还活着
->   时 registry 先拆，renderer 端 teardown handler 会对已移除的 `ipcMain` handler
->   发 `__electron-deck:*`。per-window teardown 顺序是这条先例在**单窗口粒度**上的细化。
+> - `src/main/compositor.ts` — `mount/unmount/reorder/commit/detachAll`, prefix-preserving diff, and `CommitError`
+> - `src/main/view-handle.ts` — `moveTo` state machine and `migrationLock`
+> - `src/main/scope.ts` — `own/close/adopt`, completion fence, and LIFO
+> - `src/main/disposable.ts` — LIFO `DisposableRegistry.disposeAll()` and AggregateError
+> - `src/internal/deck-app.ts` — **app-level** teardown: windows before the registry
+>
+> Baseline:
+>
+> - `commit()` is a **single synchronous pass**: first `removeChildView` for removals, then `addChildView` for additions in ascending target-index order. A destroyed host with **pending work** causes `CommitError`; a **no-op commit neither throws nor touches the host** (`compositor.ts`; pinned by `compositor.test.ts`).
+> - The app-level teardown precedent is to **call `win.destroy()` on every window before `registry.disposeAll()`**. WireTransport belongs to the registry; disposing the registry while windows remain alive lets renderer teardown handlers send `__electron-deck:*` to removed `ipcMain` handlers. The per-window order refines this precedent at **single-window granularity**.
 
 ---
 
-## 0. 术语与不变量
+## 0. Terms and invariants
 
-- **host**：一个窗口的原生 `contentView`（`ContentViewHost`）。`addChildView` /
-  `removeChildView` / `isDestroyed` / `children()`（LAST = 最顶）。
-- **commit pass**：一次 `commit()` 调用内对 host 的那串同步 add/remove。
-- **native 顺序**：`host.children()` 的真实顺序，**唯一的物理真相**。Compositor
-  的 `views: Map` 只是 **intent（target）**，commit 把 intent 投影到 native。
-- **view 实例 identity**：`unmount(id)` 后 `mount(id)` 是**新实例**（新 mountSeq，
-  落在 zone 顶）——不是同一个 view 续命（`compositor.ts`）。
-- **window-scope**：每窗口一个 `Scope`（见 §5），`own()` 它的 anchor sink /
-  wire / session / native-view-detach；`close()` 时 LIFO 释放。
+- **host**: a window's native `contentView` (`ContentViewHost`), with `addChildView`, `removeChildView`, `isDestroyed`, and `children()` (LAST = topmost).
+- **commit pass**: the synchronous sequence of host add/remove calls within one `commit()` call.
+- **native order**: the actual order in `host.children()`, the **only physical source of truth**. The Compositor's `views: Map` records **intent (the target)**; commit projects intent onto native state.
+- **view instance identity**: `mount(id)` after `unmount(id)` creates a **new instance** (a new `mountSeq`, placed at the top of its zone), rather than extending the old instance's lifetime (`compositor.ts`).
+- **window-scope**: one `Scope` per window (see §5), owning its anchor sink, wire, session, and native-view detach operation through `own()`. `close()` releases them in LIFO order.
 
-不变量（贯穿全文，违反即 bug）：
+Invariants (violations anywhere in this document are bugs):
 
-- **I1（native 真相）**：任何 commit 路径结束后，`host.children()` 必须等于
-  「某个一致的 target」——要么完整 new target，要么完整回滚到 pre-commit
-  snapshot，**绝不停在半改状态**。
-- **I2（view 单宿主）**：一个 view 实例在任一时刻只挂在 0 或 1 个 host 上，
-  **绝不同时挂两个、也绝不悬空**（migration 期间是受 `migrationLock` 保护的瞬态）。
-- **I3（teardown 无 use-after-free）**：window-scope 拆解期间，任何还在跑的
-  publisher / observer / sink 都不得对**已开始销毁**的 host 或 win 发起调用。
+- **I1 (native truth)**: after any commit path, `host.children()` must equal a consistent target: either the complete new target or the complete pre-commit snapshot after rollback. It must **never remain partially changed**.
+- **I2 (single host per view)**: a view instance is attached to zero or one host at any time, **never to two hosts and never left dangling**. Migration permits a transient detached state protected by `migrationLock`.
+- **I3 (no use-after-free during teardown)**: while a window-scope is being torn down, no still-running publisher, observer, or sink may call a host or window **whose destruction has started**.
 
 ---
 
-# Compositor commit 事务化
+# Transactional Compositor commits
 
-## 问题
+## Problem
 
-`commit()` 在**一个同步 pass** 里逐个 `removeChildView` / `addChildView`。
-Electron **没有 contentView 事务 API**——只能逐个调。若 pass 中途某个
-`addChildView` 抛（典型：目标窗口在 pass 中途被毁、或被并发 teardown 摘空），
-host 的 `contentView` 已被改了一半：removals 全做了、additions 做了一部分，
-**原生顺序无法靠「再抛一次」恢复**。上层拿到异常，但 native 已经是非法中间态
-（违反 I1）。
+`commit()` calls `removeChildView` and `addChildView` one at a time in **one synchronous pass**. Electron **has no contentView transaction API**. If an `addChildView` throws midway through the pass—for example, because the target window is destroyed or concurrent teardown empties it—the host's `contentView` is only partly changed: all removals and some additions have run. **Throwing another exception cannot restore native order**. The caller receives an exception while native state is already an illegal intermediate state (violating I1).
 
-现实约束：在**单个同步 pass 内**，host 调用之间没有 await。commit
-内部只处理「逐个 host 调用抛」，不存在「await 期间被并发改」的窗口。这把问题收窄成：
-**怎样让一串可能逐个抛的同步原生调用，对外表现为 all-or-nothing（或可干净回滚的
-best-effort）**。
+Within **one synchronous pass**, there is no `await` between host calls. Commit only handles individual host calls throwing; it has no interval for concurrent changes during an `await`. The question is therefore: **how can a sequence of synchronous native calls, each of which may throw, provide all-or-nothing behavior or best-effort behavior with a clean rollback?**
 
-## commit 失败语义
+## Commit failure semantics
 
-实现先 plan removals/additions，再检查 `host.isDestroyed`。已销毁 host 上的纯 removal
-静默完成；存在 addition 时，在触碰 host 前抛 `CommitError{kind:'host-destroyed',
-applied:false}`。活 host 的 apply 前保存 `children()` 快照；任何 host 调用抛错时尝试
-恢复快照，并用 `CommitError{kind:'apply-failed', applied:'partial', recovered}` 报告结果。
+The implementation first plans removals/additions, then checks `host.isDestroyed`. Removal-only work on a destroyed host completes silently; if there are additions, it throws `CommitError{kind:'host-destroyed', applied:false}` before touching the host. Before applying changes to a live host, it saves a `children()` snapshot. If any host call throws, it attempts to restore that snapshot and reports the result with `CommitError{kind:'apply-failed', applied:'partial', recovered}`.
 
-### commit 精确失败语义
+### Exact commit failure semantics
 
-`commit()` 的失败语义：
+The failure semantics of `commit()` are:
 
-1. **Plan 阶段**（纯计算，不碰 host）：fold intent → target，diff 出
-   `removals` / `additions`（`compositor.ts`）。
-2. **空检查**：`removals` 与 `additions` 都空 → **直接 return**（no-op 不抛、不碰
-   host）。**teardown 期的 no-op commit 必须静默**（与『与 commit-to-destroyed-host 防护的配合』配合）。
-3. **Preflight 阶段**：有工作但 `host.isDestroyed` → **在动任何 host 之前**抛
-   `CommitError{ kind:'host-destroyed', applied:false }`。`applied:false` 是**强
-   保证**：native 顺序 = pre-commit snapshot（一字未动）。
-4. **Apply 阶段**：先 `removeChildView` 全部 removals，再按 target index 升序
-   `addChildView`。**进入此阶段前先存 `snapshot = host.children()`**。
-5. **兜底回滚**（仅当 Apply 阶段某原生调用**非预期**抛——host 在 plan 后、apply 中
-   被毁的窄窗口）：捕获异常 → 尝试用 snapshot 反向重排恢复 → 无论回滚成败，抛
-   `CommitError{ kind:'apply-failed', applied:'partial', recovered:boolean }`。
-   `recovered:true` ⇒ native = snapshot；`recovered:false` ⇒ native 半改态
-   **且不可信，上层必须视该 host 为已死**（见『「源也毁」与 view 销毁归属』moveTo 状态机的「源也毁」分支）。
+1. **Plan** (pure computation, without touching the host): fold intent into the target, then compute the `removals` / `additions` diff (`compositor.ts`).
+2. **Empty check**: if both `removals` and `additions` are empty, **return immediately**. A no-op neither throws nor touches the host. **No-op commits during teardown must be silent** (see “Interaction with destroyed-host commit protection”).
+3. **Preflight**: if there is work but `host.isDestroyed`, throw `CommitError{ kind:'host-destroyed', applied:false }` **before touching any host**. `applied:false` is a **strong guarantee**: native order equals the pre-commit snapshot, completely unchanged.
+4. **Apply**: call `removeChildView` for every removal, then `addChildView` in ascending target-index order. **Save `snapshot = host.children()` before entering this phase**.
+5. **Fallback rollback** (only when a native call unexpectedly throws during Apply—the narrow interval where the host is destroyed after planning, during apply): catch the exception, attempt to restore order from the snapshot, and, regardless of rollback success, throw `CommitError{ kind:'apply-failed', applied:'partial', recovered:boolean }`. `recovered:true` means native state equals the snapshot; `recovered:false` means native state is partially changed **and untrustworthy, so the caller must treat the host as dead** (see the source-also-destroyed branch under “Source destruction and ownership of view cleanup”).
 
 ```
 CommitError =
-  | { kind: 'host-destroyed'; applied: false }                         // preflight 拦截，native 未动
-  | { kind: 'apply-failed'; applied: 'partial'; recovered: true }      // 兜底回滚成功，native = snapshot
-  | { kind: 'apply-failed'; applied: 'partial'; recovered: false }     // 回滚也失败，native 不可信 → host 视为死
+  | { kind: 'host-destroyed'; applied: false }                         // preflight rejects; native state untouched
+  | { kind: 'apply-failed'; applied: 'partial'; recovered: true }      // fallback rollback succeeded; native = snapshot
+  | { kind: 'apply-failed'; applied: 'partial'; recovered: false }     // rollback also failed; native state untrustworthy → treat host as dead
 ```
 
-> 设计取舍：**不**引入返回值 `{applied, failed}`（选项 c）。commit 成功 ⇒ `void`
-> 且 native = new target；commit 失败 ⇒ **抛** `CommitError`，且异常自带「native
-> 处于哪个一致态」。这让调用点（`moveTo`）只需 try/catch，不必逐调用核对 partial。
+> Design trade-off: **do not** introduce a return value `{applied, failed}` (option c). A successful commit returns `void` and leaves native state at the new target. A failed commit **throws** `CommitError`, whose fields describe the resulting native state. The call site (`moveTo`) can use try/catch without checking partial application after each call.
 
-## moveTo 跨窗迁移
+## Cross-window migration with moveTo
 
-`moveTo` 把一个 view 从 `src` 窗口迁到 `dest` 窗口。物理上必然是**两个独立
-Compositor 上的两段 commit**（每窗口一个 host）：
+`moveTo` moves a view from the `src` window to the `dest` window. Physically, this requires **two commits on independent Compositors** (one host per window):
 
 ```
-src.unmount(viewId);  src.commit();      // 从源摘下
-dest.mount(viewRef);  dest.commit();     // 挂到目标
+src.unmount(viewId);  src.commit();      // detach from source
+dest.mount(viewRef);  dest.commit();     // attach to destination
 ```
 
-危险点：**`dest.commit()` 抛**（dest 窗口在两段之间被毁）。此时 view 已从 src
-摘下、又没挂上 dest——**悬空**（违反 I2）。必须能**干净回滚：重挂源**。
+The danger is **`dest.commit()` throwing** because the destination window is destroyed between the two commits. The view has already been detached from src but has not attached to dest: it is **dangling** (violating I2). A **clean rollback must reattach it to the source**.
 
-### commit 的可回滚保证
+### Commit guarantees needed for rollback
 
-moveTo 的回滚依赖 commit 的失败语义（『commit 精确失败语义』）兑现两点：
+moveTo rollback depends on the commit failure semantics above providing these guarantees:
 
-- `dest.commit()` 抛 `host-destroyed`（`applied:false`）：dest **native 一字未动**
-  ——回滚只需在 src 上重挂，无需清理 dest。这是 preflight (b) 的直接红利：**dest
-  毁 ⇒ 在动 dest host 前就抛 ⇒ dest 干净**。
-- `dest.commit()` 抛 `apply-failed; recovered:true`：dest native 已回到它自己的
-  pre-commit snapshot（不含本次迁入的 view）——同样**等价于 dest 干净**，回滚照常
-  在 src 重挂。
-- `dest.commit()` 抛 `apply-failed; recovered:false`：dest native 不可信 → 视
-  dest host 已死 → 回滚时**不能也不必管 dest**（它要么会被 teardown 收走，要么本就
-  在销毁）；仍在 src 重挂。
+- If `dest.commit()` throws `host-destroyed` (`applied:false`), dest's **native state is completely untouched**. Rollback only needs to reattach at src; dest needs no cleanup. This follows directly from preflight (b): **dest destroyed → throw before touching dest's host → dest remains clean**.
+- If `dest.commit()` throws `apply-failed; recovered:true`, dest's native state is back at its own pre-commit snapshot, which excludes the migrating view. This is also **equivalent to a clean dest**, so rollback reattaches at src as usual.
+- If `dest.commit()` throws `apply-failed; recovered:false`, dest's native state is untrustworthy, so treat its host as dead. Rollback **must not and need not manage dest**: teardown will collect it, or destruction is already underway. Reattach at src as before.
 
-> 关键：三种 dest 失败，**对 src 回滚的动作完全一致——「在 src 重挂」**。差异只在
-> 「dest 那边要不要清理」，而 preflight + snapshot 兜底已保证「dest 那边无需
-> moveTo 清理」。这就是选 (b) 而非 (c) 的回报：moveTo 的回滚逻辑**与 dest 的具体
-> 失败种类解耦**。
+> The key point is that **all three dest failures require exactly the same src rollback: reattach at src**. The only distinction is whether dest needs cleanup, and preflight plus snapshot rollback ensure that **moveTo need not clean up dest**. This is the benefit of (b) over (c): moveTo rollback is **independent of the specific dest failure kind**.
 
-### moveTo 事务状态机
+### moveTo transaction state machine
 
-view 实例在迁移全程的**物理位置**只可能落在三者之一：**`AT_SRC` / `AT_DEST` /
-`CLOSED`**（I2 的具象）。状态机：
+The view instance's final **physical location** must be one of **`AT_SRC` / `AT_DEST` / `CLOSED`** (the concrete form of I2). The state machine is:
 
 ```
                           moveTo(viewId, src → dest)
                                     │
-                           [state: AT_SRC]   ← 起点：view 挂在 src
+                           [state: AT_SRC]   ← initially attached to src
                                     │
-                  acquire migrationLock(viewId)         (见 migrationLock 节)
+                  acquire migrationLock(viewId)         (see migrationLock section)
                                     │
             ┌───────────────────────┴───────────────────────┐
             │ STEP 1: src.unmount(viewId); src.commit()      │
             └───────────────────────┬───────────────────────┘
-              src.commit() 抛?                  src.commit() ok
+              src.commit() throws?              src.commit() ok
               ──────────────                    ──────────────
                     │                                  │
-         [state: AT_SRC]  ← 源都没摘下来        [state: DETACHED]  ← 受锁保护的瞬态
-         release lock; rethrow                  view 不在任何 host 上（I2 瞬态豁免）
-         （迁移整体失败，幂等无副作用）                 │
-                                          ┌────────────┴────────────┐
+         [state: AT_SRC]  ← source detach failed [state: DETACHED] ← lock-protected transient
+         release lock; rethrow                  view has no host (I2 transient exception)
+         (migration fails idempotently,                │
+          without side effects)           ┌────────────┴────────────┐
                                           │ STEP 2: dest.mount(ref); │
                                           │         dest.commit()    │
                                           └────────────┬────────────┘
-                                  dest.commit() 抛?            dest.commit() ok
+                                  dest.commit() throws?       dest.commit() ok
                                   ──────────────              ──────────────
                                         │                            │
                             ┌───────────┴──────────┐          [state: AT_DEST]
-                            │ ROLLBACK: 重挂源       │          release lock
-                            │ src.mount(ref)         │          ✔ 迁移成功
-                            │ src.commit()           │
+                            │ ROLLBACK: reattach   │          release lock
+                            │ src.mount(ref)       │          ✔ migration succeeds
+                            │ src.commit()         │
                             └───────────┬──────────┘
-                          src 重挂 ok?            src 重挂也抛?
+                          src reattach ok?      src reattach throws too?
                           ──────────            ──────────────
                                 │                      │
                         [state: AT_SRC]        [state: CLOSED]
-                        release lock           src 也毁了 → close view
-                        rethrow dest 的错       （dispose view 实例 + 释放其资源）
-                        （干净回滚成功）          release lock; rethrow
-                                               （view 无家可归，按销毁处理）
+                        release lock           src also destroyed → close view
+                        rethrow dest error     (dispose view instance and resources)
+                        (clean rollback)       release lock; rethrow
+                                               (no surviving home: destroy the view)
 ```
 
-文字版（确切步骤）：
+Exact steps in prose:
 
-1. **acquire** `migrationLock(viewId)`（见『per-view migrationLock：串行化迁移 vs close』）。进入即处于 `AT_SRC`。
-2. **STEP 1** `src.unmount(viewId); src.commit()`。
-   - 抛 → 仍 `AT_SRC`（unmount 只改 intent，commit 没动 host 或被 preflight 拦在
-     动 host 前；view 还在 src native 上）。**release lock，rethrow**。迁移整体
-     无副作用失败（幂等）。
-   - ok → 进入 `DETACHED`（view 不在任何 host；I2 的受锁瞬态）。
-3. **STEP 2** `dest.mount(viewRef); dest.commit()`。
-   - ok → `AT_DEST`。**release lock**，成功返回。
-   - 抛 → 进入 **ROLLBACK**。
-4. **ROLLBACK** `src.mount(viewRef); src.commit()`（把同一 ref 重挂回源；按
-   `compositor.ts` 语义这是 src 上的**新实例**，落在 src 该 zone 顶——可接受，因为
-   迁移失败本就不保证恢复原 z 序，只保证 view 不悬空/不丢）。
-   - ok → `AT_SRC`。**release lock**，rethrow dest 的 `CommitError`（调用者知道
-     迁移失败但 view 安全回家）。
-   - 抛（src 此刻也毁了）→ 进入 `CLOSED`：**close 该 view 实例**（dispose 其 view
-     handle / 释放它在任一 window-scope 里 own 的资源）。**release lock**，rethrow。
-     view 无家可归，按销毁处理——这是物理上唯一诚实的终态。
+1. **Acquire** `migrationLock(viewId)` (see “Per-view migrationLock: serializing migration and close”). Entry state is `AT_SRC`.
+2. **STEP 1**: `src.unmount(viewId); src.commit()`.
+   - If it throws, remain `AT_SRC`: unmount only changes intent, and commit either leaves the host unchanged or preflight rejects before touching it. The view remains on src's native host. **Release the lock and rethrow**. Migration fails without side effects (idempotently).
+   - If it succeeds, enter `DETACHED`: the view has no host, the lock-protected transient allowed by I2.
+3. **STEP 2**: `dest.mount(viewRef); dest.commit()`.
+   - If it succeeds, enter `AT_DEST`. **Release the lock** and return successfully.
+   - If it throws, enter **ROLLBACK**.
+4. **ROLLBACK**: `src.mount(viewRef); src.commit()`. Reattach the same ref at the source. Under `compositor.ts` semantics, this is a **new instance** at the top of src's zone. That is acceptable: failed migration does not promise to restore the old z-order, only to avoid a dangling or lost view.
+   - If it succeeds, enter `AT_SRC`. **Release the lock** and rethrow dest's `CommitError`, telling the caller migration failed but the view is safely back at src.
+   - If it throws because src is now also destroyed, enter `CLOSED`: **close the view instance**, disposing its view handle and releasing resources it owns in any window-scope. **Release the lock** and rethrow. The view has no surviving home, so destroy it; this is the only physically honest final state.
 
-**终态完备性**：任何路径结束时，view 物理上恰在 `AT_SRC` / `AT_DEST` / `CLOSED`
-**三者之一**，绝不悬空、绝不双挂（I2）。`migrationLock` 保证全程串行，
-`DETACHED` 这个「不在任何 host」的瞬态**只在持锁期间存在**，外部观察不到。
+**Complete final-state coverage**: every path ends with the view physically in **exactly one** of `AT_SRC` / `AT_DEST` / `CLOSED`, never dangling or attached twice (I2). `migrationLock` serializes the entire operation. The hostless `DETACHED` transient **exists only while the lock is held** and is not observable externally.
 
-## 「源也毁」与 view 销毁归属
+## Source destruction and ownership of view cleanup
 
-`CLOSED` 终态要 close view 实例。本契约规定：**view 实例的资源所有权挂在它当前
-所在窗口的 window-scope 上**（见 per-window teardown 顺序 + window-scope 术语）。迁移期间，view 的 own()ed 资源（它的
-anchor sink、wire、native ref 持有）随 `AT_SRC→AT_DEST` 用 `Scope.adopt()`
-**从 src window-scope 改宿到 dest window-scope**（`scope.ts`：adopt 不
-reset/close child、资源不动、只换 cascade 归属）。这样：
+The `CLOSED` final state requires closing the view instance. This contract assigns **ownership of the view instance's resources to the window-scope of its current window** (see the per-window teardown order and the window-scope definition). During migration, the view's owned resources—its anchor sink, wire, and native-ref retention—move **from the src window-scope to the dest window-scope** with `AT_SRC→AT_DEST` through `Scope.adopt()`. In `scope.ts`, adopt does not reset or close the child or change its resources; it only changes cascade ownership. Thus:
 
-- 迁移成功（`AT_DEST`）：view 的资源已 adopt 到 dest window-scope，dest 关窗时
-  随之 LIFO 释放。
-- 迁移失败回滚到 `AT_SRC`：view 资源仍属 src window-scope（adopt 未发生或已
-  adopt-back）。
-- `CLOSED`：直接 close view 子 scope，LIFO 释放其资源。
+- Successful migration (`AT_DEST`): resources are adopted into the dest window-scope and released in LIFO order when dest closes.
+- Failed migration rolled back to `AT_SRC`: resources still belong to the src window-scope, because adoption has not happened or has been reversed.
+- `CLOSED`: close the view's child scope directly and release its resources in LIFO order.
 
-> adopt 的「等栅栏不抛」语义（`scope.ts`）天然兼容：若 src 或 dest
-> window-scope 此刻正在 teardown（in-flight 栅栏），adopt 会**等栅栏完成再重校验**，
-> 失败则 reject——moveTo 把该 reject 当作「目标窗口正在消失」，并入上面的 dest 抛
-> 分支处理。
+> Adopt's “wait for the fence without propagating its error” semantics (`scope.ts`) fit this model. If the src or dest window-scope is currently tearing down (an in-flight fence), adopt **waits for completion, then revalidates**. Failed revalidation rejects; moveTo treats that rejection as the destination disappearing and handles it in the dest-failure branch above.
 
-## per-view migrationLock：串行化迁移 vs close
+## Per-view migrationLock: serializing migration and close
 
-### 为何需要锁
+### Why a lock is needed
 
-并发危险对：
+Dangerous concurrent pairs:
 
-- `moveTo(v, A→B)` 与 `moveTo(v, B→A)` 同时跑：两段式 unmount/mount 交错 ⇒
-  view 可能双挂（B 的 mount 和 A 的 mount 都生效）或双摘悬空——违反 I2。
-- `moveTo(v, A→B)` 与 `closeWindow(A)`（per-window teardown）同时跑：teardown 在摘 view
-  时 moveTo 正在 STEP 1，native 顺序竞争。
-- `moveTo(v, A→B)` 与 `closeWindow(B)` 并发：STEP 2 `dest.commit()` 与 dest
-  teardown 的 detach 竞争 host。
+- `moveTo(v, A→B)` and `moveTo(v, B→A)`: the two unmount/mount sequences may interleave, attaching the view twice (both B's and A's mounts take effect) or detaching it twice and leaving it dangling, violating I2.
+- `moveTo(v, A→B)` and `closeWindow(A)` (per-window teardown): teardown detaches the view while moveTo is in STEP 1, racing over native order.
+- `moveTo(v, A→B)` and `closeWindow(B)`: STEP 2's `dest.commit()` and dest teardown's detach race over the host.
 
-锁粒度：**per-view（按 `viewId`）**。一个 view 同一时刻只能有一个迁移在途；
-该 view 所涉的 close 路径也要尝试取同一把锁（见『无死锁论证』）。
+Lock granularity is **per view (`viewId`)**. Only one migration may be in flight for a view at a time; close paths involving that view must acquire the same lock (see the deadlock argument).
 
-### 锁的语义
+### Lock semantics
 
-`migrationLock(viewId)` 是一把 **per-view 异步互斥**（async mutex）：
+`migrationLock(viewId)` is a **per-view async mutex**:
 
-- `acquire(viewId): Promise<release>`——FIFO 排队，拿到才进临界区。
-- 临界区内做整段 moveTo（或整段 close 对该 view 的处理）。
-- `release()` 后队列下一个进入。
+- `acquire(viewId): Promise<release>` queues in FIFO order; enter the critical section only after acquisition.
+- The critical section contains the entire moveTo, or the entire close operation's handling of that view.
+- `release()` lets the next queued operation enter.
 
-实现复用 `Scope` 的单飞栅栏思路（`scope.ts` `inFlight` 串行）或一个极小的
-`Map<viewId, Promise>` 链式排队。**不需要可重入**（moveTo 不会自递归取同 view 锁）。
+The implementation can reuse `Scope`'s single-flight fence approach (`scope.ts` serializes `inFlight`) or a minimal `Map<viewId, Promise>` chain. **Reentrancy is unnecessary**: moveTo never recursively acquires its own view's lock.
 
-### 无死锁论证
+### Deadlock-free argument
 
-死锁需要**环形等待**：线程 T1 持锁 L1 等 L2，T2 持锁 L2 等 L1。论证本设计无环：
+Deadlock requires **circular waiting**: T1 holds L1 while waiting for L2, and T2 holds L2 while waiting for L1. This design prevents such cycles:
 
-**关键设计约束（无环的根因）**：**moveTo 与 close 的临界区内，只持有「自己那一把
-per-view 锁」，期间不再去 acquire 第二把 per-view 锁。** 即：
+**Critical design constraint (the reason cycles cannot form)**: **each moveTo or close critical section holds only its own per-view lock and never acquires a second per-view lock while holding it**. Specifically:
 
-- `moveTo(v, …)` 的整个状态机（STEP1/STEP2/ROLLBACK）只操作 **view `v`** ——
-  src/dest commit 动的是 host 的 z 序，不需要也不去取**别的 view 的** migrationLock。
-- `closeWindow(W)` 的 teardown（见 per-window teardown 顺序）对窗口内每个 view `vᵢ` **逐个**取
-  `migrationLock(vᵢ)`、处理完**立即 release**，**绝不同时持有两把**。即 close
-  对一窗口多 view 是「取-放-取-放」的**串行**，不是「全取齐再处理」。
+- The complete `moveTo(v, …)` state machine (STEP1/STEP2/ROLLBACK) operates only on **view `v`**. Src/dest commits change host z-order but neither need nor acquire **another view's** migrationLock.
+- `closeWindow(W)` teardown acquires `migrationLock(vᵢ)` for each window view **one at a time**, handles that view, and **immediately releases** it. It **never holds two locks simultaneously**. Closing a multi-view window is a **serial acquire-release-acquire-release** sequence, not “acquire all, then process.”
 
-由此：
+Therefore:
 
-1. **任一时刻，任一执行流最多持有一把 per-view 锁**（持锁期间不取第二把）。
-   ⇒ 不存在「持 L1 等 L2」的前提 ⇒ **等待图无边** ⇒ **不可能成环** ⇒ 无死锁。
-   （这是「一次最多一把锁」的标准无死锁结论，根因是**每个临界区单锁**。）
-2. `A→B` 与 `B→A` 同 view 并发的具体化：二者 acquire **同一把** `migrationLock(v)`
-   （锁键是 viewId，与方向无关），FIFO 串行——一个跑完（落到 `AT_SRC`/`AT_DEST`/
-   `CLOSED` 之一并 release），另一个才从**当时的实际物理位置**重新开始。不会交错，
-   不会双挂。
+1. **At any time, each execution flow holds at most one per-view lock**, acquiring no second lock while holding the first. There is no “hold L1 while waiting for L2” situation, so **the lock wait graph has no edges**, cannot contain a cycle, and cannot deadlock. This is the standard at-most-one-lock argument: **one lock per critical section**.
+2. For concurrent `A→B` and `B→A` on the same view, both acquire **the same** `migrationLock(v)`: its key is viewId, independent of direction. FIFO serializes them. One finishes in `AT_SRC`, `AT_DEST`, or `CLOSED` and releases; only then does the other restart from **the actual physical location at that time**. They cannot interleave or attach the view twice.
 
 ---
 
-# per-window teardown 顺序
+# Per-window teardown order
 
-## 单窗口关闭的三件事 + 与生产相反的风险
+## Three operations for closing one window, and risks from reversing production order
 
-关闭**单个**窗口要做三件事：
+Closing **one** window requires three operations:
 
-1. **Compositor detach**：把该窗口所有原生 view 从其 `host.contentView` 摘下
-   （`removeChildView`）。
-2. **scope.close()**：LIFO 释放该 window-scope `own()` 的 view-scope / session /
-   anchor sink / wire（`scope.ts` + `disposable.ts` LIFO）。
-3. **`win.destroy()`**：销毁 Electron 窗口。
+1. **Compositor detach**: remove all its native views from `host.contentView` with `removeChildView`.
+2. **scope.close()**: release the window-scope's owned view-scopes, sessions, anchor sinks, and wires in LIFO order (`scope.ts` and `disposable.ts`).
+3. **`win.destroy()`**: destroy the Electron window.
 
-三个约束：
+Three constraints:
 
-- **(a) anchor use-after-free**：renderer 端 anchor（`view-anchor.ts`）持续
-  `publish(bounds)` 到正被拆的 view 的 sink。若 sink（主进程侧，对某 native view
-  调 `setBounds`）在 view 已摘 / 已毁后仍被调用 ⇒ use-after-free / 抛。anchor 是
-  同步 publish，主进程 sink 必须在 native view 还活着时才接受 bounds。
-- **(b) scope.own 的 anchor/wire 是否需 `win` 还活着才能优雅 unsubscribe**：分两类。
-  - **wire / ipcMain handler**：unsubscribe = `ipcMain.removeHandler` / 解绑
-    listener，是**主进程侧操作，不依赖 win 存活**（app 级先例正是因为反过来——
-    win 还活着时 registry 先拆才出问题，见 `deck-app.ts`）。所以 wire 的优雅解绑
-    **不要求 win 活**，反而要求**在 win 死之前**完成（否则 renderer 还会发消息给
-    已移除的 handler）。
-  - **anchor sink**：sink 的「优雅」= **停止接受 publish**（dispose sink），这也
-    是主进程侧操作，**不需要 win 活**；但**需要 native view 尚未被 detach/毁**
-    若 sink 实现里还会去读/写该 view。结论：sink 必须**先于** native view detach
-    被 dispose（停 publish），见『无 use-after-free 顺序』序。
-- **(c) Compositor unmount 操作 `win.contentView`，win 毁了就抛**：
-  `removeChildView` 进已毁 contentView 抛（与 commit 同源）。所以 **Compositor
-  detach 必须在 `win.destroy()` 之前**。
+- **(a) Anchor use-after-free**: the renderer anchor (`view-anchor.ts`) continually calls `publish(bounds)` on the sink of a view being torn down. If that main-process sink calls `setBounds` on a detached or destroyed native view, it causes use-after-free or throws. Anchor publishing is synchronous; the main-process sink must only accept bounds while the native view is alive.
+- **(b) Whether owned anchors/wires need a live `win` for graceful unsubscribe** has two cases:
+  - **Wire / ipcMain handler**: unsubscribe means `ipcMain.removeHandler` or removing a listener. It is **main-process work, independent of window liveness**. The app-level precedent exists because the reverse order—disposing the registry while windows remain alive—causes problems (see `deck-app.ts`). Graceful wire unbinding therefore **does not require a live window**, but must finish **before the window dies**, otherwise the renderer may send to removed handlers.
+  - **Anchor sink**: graceful cleanup means **stop accepting publish calls** by disposing the sink. This is also main-process work and **does not require a live window**. However, **the native view must still be attached and alive** if sink cleanup reads or writes it. Dispose the sink **before** native-view detach to stop publishing (see the use-after-free-safe order below).
+- **(c) Compositor unmount uses `win.contentView` and throws once win is destroyed**: `removeChildView` on a destroyed contentView throws, just like commit. **Compositor detach must therefore precede `win.destroy()`**.
 
-## 无 use-after-free 顺序
+## Use-after-free-safe order
 
 ```
-closeWindow(W):                              依据
+closeWindow(W):                              Rationale
 ─────────────────────────────────────────   ─────────────────────────────────
-STEP 0  停 anchor publish（dispose sinks）   约束(a)+(b-anchor)：先掐 publish 源头，
-        — 让正被拆的 view 不再被写 bounds        之后任何 RO/resize tick 同步 bail
-                                                 (view-anchor.ts `if(disposed) return`)
-                                              ── 注：renderer 端 anchor 同步检查
-                                                 disposed/present，无排队帧，掐 sink
-                                                 后主进程不再收到新 bounds（I3）
+STEP 0  Stop anchor publish (dispose sinks)   Constraints (a)+(b-anchor): stop publishing first;
+        — prevent bounds writes to views        subsequent RO/resize ticks bail synchronously
+          being torn down                       (view-anchor.ts: `if(disposed) return`)
+                                              ── Renderer anchors synchronously check
+                                                 disposed/present, with no queued frames;
+                                                 stopping the sink prevents new bounds
+                                                 reaching the main process (I3)
 ─────────────────────────────────────────
-STEP 1  Compositor detach 所有原生 view       约束(c)：必须在 win.destroy 之前——
-        （逐个 removeChildView；win 还活着）       win 死后 contentView 操作抛
-                                              ── 用 commit 的 host-destroyed preflight：
-                                                 若 host 已毁则 commit 静默 no-op
-                                                 （见防护配合节），不抛
+STEP 1  Compositor detaches all native views  Constraint (c): precede win.destroy,
+        (removeChildView one at a time,          because contentView operations throw after death
+         while win is still alive)            ── Use commit's host-destroyed preflight:
+                                                 an already-destroyed host makes commit
+                                                 a silent no-op, without throwing
+                                                 (see protection interaction below)
 ─────────────────────────────────────────
-STEP 2  解绑 wire / ipcMain handler           约束(b-wire)：必须在 win.destroy 之前，
-        （registry/scope 内的 wire 资源）          否则 renderer teardown handler 打到
-                                                 已移除的 handler（deck-app.ts
-                                                 app 级先例，此处单窗口细化）
+STEP 2  Unbind wire / ipcMain handlers        Constraint (b-wire): precede win.destroy,
+        (wire resources in registry/scope)      otherwise renderer teardown handlers call
+                                                 removed handlers (deck-app.ts app-level
+                                                 precedent refined for one window)
 ─────────────────────────────────────────
-STEP 3  释放该 view 在 scope 里的其余资源       LIFO，承 scope.close 语义
-        （session / 子 view-scope / 其他）
+STEP 3  Release the view's remaining          LIFO, following scope.close semantics
+        scoped resources
+        (session / child view-scope / others)
 ─────────────────────────────────────────
-STEP 4  win.destroy()                         最后——前面所有「需要 win 活 / 需要
-                                                 native view 在」的操作都已完成
+STEP 4  win.destroy()                        Last: every operation needing a live window
+                                                 or attached native view has finished
 ─────────────────────────────────────────
 ```
 
-**合并表述**：`停 anchor publish → Compositor detach 所有原生 view → 解绑 wire →
-scope LIFO 释放其余 → 最后 win.destroy()`。
+**Combined order**: `stop anchor publish → Compositor detach all native views → unbind wire → scope releases remaining resources in LIFO order → win.destroy() last`.
 
-要点：
+Key points:
 
-- **STEP 0–3 全部在 `win` 仍存活时做**，`win.destroy()` 是**最后一步**。这与 app
-  级「窗口先于 registry」**并不矛盾**：app 级先例的本质是「**wire/registry 必须在
-  renderer 还能发消息的窗口存在期内、但要在窗口被销毁前解绑好**」。app 级因为是
-  一把梭销毁所有窗口，写成「先 destroy 窗口再 disposeAll registry」——但那条之所以
-  安全，是因为 `win.destroy()` 让 renderer 先消失、**之后**才拆 registry。单窗口
-  粒度下我们做得更细：**先停 publish（STEP0）→ 摘 native（STEP1）→ 解绑 wire
-  （STEP2）→ 最后才 destroy（STEP4）**。等价的安全性来源相同：**renderer 不会对
-  已移除的 wire handler 发消息**——因为 STEP4 destroy 让 renderer 消失，发生在
-  STEP2 解绑 wire 之后；而 anchor 已在 STEP0 掐死，不会在 STEP1 摘 native 后还写
-  bounds。
-- **为什么 STEP1 detach 先于 STEP2 解绑 wire**：detach 需要 `win.contentView`
-  活（约束 c），与 wire 解绑互不依赖；把 detach 排在 wire 之前还是之后都安全，
-  本契约选 detach→wire，使「需要 native view 在场」的操作集中在最前、尽早完成。
+- **STEP 0–3 all run while `win` is alive**; `win.destroy()` is **last**. This does **not contradict** the app-level “windows before registry” precedent. That precedent requires **wire/registry unbinding during the period when renderer windows can still send messages, before those windows are destroyed**. App-level teardown destroys all windows at once, expressed as “destroy windows, then disposeAll registry.” Its safety comes from `win.destroy()` removing renderers **before** registry disposal. Per-window teardown is more granular: **stop publish (STEP0) → detach native views (STEP1) → unbind wire (STEP2) → destroy (STEP4)**. The claimed safety is the same: **renderers do not send to removed wire handlers**, because STEP4 removes the renderer after STEP2 unbinds the wire; anchors have already stopped in STEP0 and cannot write bounds after STEP1 detaches native views.
+- **Why STEP1 detach precedes STEP2 wire unbinding**: detach requires a live `win.contentView` (constraint c) and is independent of wire unbinding. Either relative order is safe; this contract chooses detach→wire to complete operations requiring attached native views as early as possible.
 
-## 与 commit-to-destroyed-host 防护的配合
+## Interaction with destroyed-host commit protection
 
-teardown 路径里调的 Compositor commit/detach（STEP1）**绝不能抛**，否则 teardown
-半途崩、win 漏销毁、scope 漏释放。契约约束：
+Compositor commit/detach in the teardown path (STEP1) **must never throw**. Otherwise teardown fails midway, leaving the window undestroyed and scope resources unreleased. The contract requires:
 
-- **STEP1 的 detach 走 commit 的 preflight 语义**：teardown 时若 host 已毁
-  （`host.isDestroyed`）且本来要 removeChildView ⇒ 『commit 精确失败语义』第 2 步「**no-op commit
-  不抛、不碰 host**」覆盖此情形——但前提是 detach 后的 target 为空时 diff 算出
-  「无 add、有 remove」。这里要**特别处理**：host 已毁时，removals 也无意义
-  （view 随 contentView 一起没了），应**在 preflight 把「host 已毁 + 仅 removals」
-  判为 no-op 静默返回**，而非抛 `host-destroyed`。
+- **STEP1 detach uses commit preflight semantics**. If teardown finds an already-destroyed host (`host.isDestroyed`) and would otherwise call removeChildView, step 2 under “Exact commit failure semantics”—**no-op commits neither throw nor touch the host**—must cover it. An empty post-detach target produces a diff with no additions but some removals, so this needs **special handling**: removals on a destroyed host are meaningless (views disappeared with contentView). **Preflight must classify “destroyed host + removals only” as a silent no-op**, rather than throwing `host-destroyed`.
 
-  > 即：『commit 精确失败语义』第 3 步「有工作 + host 已毁 → 抛 host-destroyed」要**例外**：当
-  > 工作**只有 removals 且 host 已毁**时，物理上 view 已不存在，**视为已 detach 完成
-  > → 静默 return**，不抛。仅当工作含 additions（要往已毁 host 加 view）时才抛。
-  > 这条例外**专为 teardown 设计**：teardown 只 detach（remove），永不 add，所以
-  > teardown 路径的 commit 在 host 先毁的竞态下**保证不抛**。
+  > This is an **exception** to step 3's “pending work + destroyed host → throw host-destroyed.” If **the work contains only removals and the host is destroyed**, the views physically no longer exist; **treat detach as complete and return silently**, without throwing. Throw only if work contains additions (attempts to add views to the destroyed host). This exception is **specifically for teardown**: teardown only detaches (removes), never adds, so its commit **is guaranteed not to throw** when the host is destroyed first.
 
-- **STEP4 `win.destroy()` 在 STEP1 之后**：正常路径 host 在 STEP1 时仍活，detach
-  正常成功、不触发上面的例外。例外只兜底「win 在 closeWindow 启动前已被外力
-  （崩溃 / OS）销毁」的竞态。
+- **STEP4 `win.destroy()` follows STEP1**. On the normal path, the host is alive at STEP1 and detach succeeds without the exception. The exception only covers the race where an external cause (crash / OS) destroys win before closeWindow starts.
 
-## 用 Scope.own() LIFO 编码语义序
+## Encoding semantic order with Scope.own() LIFO
 
-`Scope` 的释放是 **LIFO**：`own()` **最先注册的最后跑**（`disposable.ts`
-`entries.slice().reverse()`；`scope.ts` children 先于 resources，均 LIFO）。
-要让运行序为 `STEP0 → STEP1 → STEP2 → STEP3`，**注册序必须反过来**：
+`Scope` releases resources in **LIFO** order: **the first `own()` registration runs last** (`disposable.ts` uses `entries.slice().reverse()`; `scope.ts` releases children before resources, both in LIFO order). For execution order `STEP0 → STEP1 → STEP2 → STEP3`, **registration order must be reversed**:
 
 ```
-创建 window-scope（每窗口一个 Scope）后，按此顺序 own()（= 释放时逆序跑）：
+After creating window-scope (one Scope per window), register own() in this order
+(release runs in reverse):
 
-  ws.own(() => win.destroy())                    // 最先 own ⇒ 最后跑 = STEP4 ✔
+  ws.own(() => win.destroy())                    // own first ⇒ run last = STEP4 ✔
   ws.own(disposeOtherResources)                  //                    STEP3
   ws.own(() => wire.dispose())                   //                    STEP2
   ws.own(() => compositor.detachAll(W))          //                    STEP1
-  ws.own(() => anchorSink.dispose())             // 最后 own ⇒ 最先跑 = STEP0 ✔
+  ws.own(() => anchorSink.dispose())             // own last ⇒ run first = STEP0 ✔
 ```
 
-即**注册顺序 = 目标运行序的逆序**。最先 `own()` 的 `win.destroy()` 因 LIFO 最后
-执行；最后 `own()` 的 anchor sink dispose 最先执行。`closeWindow(W)` ≡
-`ws.close()`——一次 `close()` 就按上面**确切序**跑完 STEP0→STEP4，并通过
-`scope.ts` 的完成栅栏保证「`close()` 的 Promise resolve 时 teardown 真已跑完」
-（`scope.ts`）。
+Thus **registration order is the reverse of execution order**. The first owned resource, `win.destroy()`, runs last; the last owned operation, anchor sink disposal, runs first. `closeWindow(W)` ≡ `ws.close()`: a single `close()` executes STEP0→STEP4 in the **exact order** above. The `scope.ts` completion fence guarantees that **teardown has finished when the `close()` Promise resolves** (`scope.ts`).
 
-要点与校验：
+Key points and checks:
 
-- **`win.destroy()` 必须最先 own()**，确保它最后跑。若漏了/顺序错，会在 native
-  view 还没 detach（STEP1 未跑）时就 destroy，触发约束 (c) 的抛——所以这条注册
-  顺序是**正确性关键**，不是风格。
-- **anchor sink dispose 必须最后 own()**，确保最先跑（STEP0），先掐 publish。
-- view 子作用域用 `ws.child()`：跨层 LIFO 保证「子 view-scope 整个 teardown 先于
-  父 ws 直接 own 的资源」（`scope.ts`）——若 view 实例自己 own 了
-  native ref / 它自己的 anchor，会在父 ws 跑到 `win.destroy()` 前先被释放，
-  天然满足「STEP4 最后」。
-- **与 app 级 teardown 的关系**：app 级（`deck-app.ts`）是「遍历所有窗口
-  `win.destroy()` → 再 `registry.disposeAll()`」。契约规定：**per-window teardown 用上面的
-  own() LIFO 编码，且 app 级 shutdown 调它**——使「窗口先于 app-registry」这条
-  生产先例在该结构下自动成立（每个 ws.close() 内部 STEP2 已解绑该窗口的 wire，
-  app registry 里只剩 app 级共享资源）。
+- **Register `win.destroy()` with own() first**, so it runs last. Omitting it or using the wrong order can destroy the window before native views are detached (before STEP1), triggering constraint (c). This registration order is **essential to correctness**, not a style preference.
+- **Register anchor sink disposal with own() last**, so it runs first (STEP0), stopping publish immediately.
+- Use `ws.child()` for view child scopes. Cross-level LIFO ensures **the child's entire teardown precedes resources directly owned by the parent ws** (`scope.ts`). A view instance owning its native ref or anchor releases them before the parent reaches `win.destroy()`, naturally satisfying “STEP4 last.”
+- **Relationship to app-level teardown**: app-level teardown (`deck-app.ts`) iterates all windows with `win.destroy()`, then calls `registry.disposeAll()`. This contract requires **per-window teardown to use the own() LIFO encoding above, and app-level shutdown to call it**. “Windows before app-registry” then follows automatically: STEP2 within each ws.close() already unbinds that window's wire, leaving only app-level shared resources in the app registry.
 
 ---
 
-## 附录：契约速查
+## Appendix: contract quick reference
 
-**commit 失败语义**
-- no-op（无 add/无 remove）→ 静默 return，不碰 host。
-- 有工作 + host 已毁 → preflight 抛 `host-destroyed{applied:false}`（native 未动）；
-  **例外**：工作仅 removals 时静默 return（teardown 友好，见防护配合节）。
-- apply 中途非预期抛 → snapshot 兜底回滚 → 抛 `apply-failed{recovered:bool}`。
-- commit 成功 ⇒ `void` 且 native = new target。
+**Commit failure semantics**
 
-**moveTo 状态机**：物理终态 ∈ `{AT_SRC, AT_DEST, CLOSED}`；
-`DETACHED` 仅持锁瞬态；回滚动作与 dest 失败种类解耦（恒为「src 重挂」）。
+- No-op (no additions or removals): return silently without touching the host.
+- Pending work + destroyed host: preflight throws `host-destroyed{applied:false}` (native state untouched). **Exception**: removals-only work returns silently (for teardown; see the protection interaction section).
+- Unexpected throw during apply: attempt snapshot rollback, then throw `apply-failed{recovered:bool}`.
+- Successful commit: return `void`, with native state at the new target.
 
-**migrationLock 无死锁**：per-view 锁；每临界区**只持一把、不取
-第二把** ⇒ 等待图无边 ⇒ 无环 ⇒ 无死锁。`A→B`/`B→A` 同 view 共用一把锁 FIFO 串行。
+**moveTo state machine**: final physical state ∈ `{AT_SRC, AT_DEST, CLOSED}`. `DETACHED` is only a transient while the lock is held. Rollback is independent of dest failure kind and always reattaches at src.
 
-**teardown 确切序**：`停 anchor publish → Compositor detach 原生
-view → 解绑 wire → scope LIFO 释放其余 → win.destroy()`。
+**Deadlock-free migrationLock**: per-view locks; each critical section **holds only one lock and acquires no second lock** → no edges in the lock wait graph → no cycles → no deadlock. `A→B` / `B→A` on the same view share one FIFO-serialized lock.
 
-**own() 编码**：注册序 = 运行序逆序；`win.destroy()` **最先 own**
-（最后跑），anchor sink dispose **最后 own**（最先跑）。
+**Exact teardown order**: `stop anchor publish → Compositor detach native views → unbind wire → scope releases remaining resources in LIFO order → win.destroy()`.
 
-**use-after-free 防护**：STEP0 先掐 publish；detach 在
-destroy 前；teardown 路径 commit 对「host 已毁 + 仅 removals」静默不抛。
+**own() encoding**: registration order reverses execution order. Register `win.destroy()` **first** (runs last), anchor sink disposal **last** (runs first).
+
+**Use-after-free protection**: STEP0 stops publish; detach precedes destroy; teardown commits for “destroyed host + removals only” return silently without throwing.

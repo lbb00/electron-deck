@@ -1,6 +1,6 @@
 /**
- * `defineEvent()` 创建的事件未在 `DeckConfig.events` 中显式列出时，
- * `publish()` 会抛此错。避免 module-load-order 隐式注册。
+ * Thrown when `publish()` is called on an event created by `defineEvent()` that is not
+ * explicitly listed in `DeckConfig.events`. This prevents implicit registration based on module load order.
  */
 export class UndeclaredHostEventError extends Error {
 	readonly eventName: string
@@ -15,8 +15,8 @@ export class UndeclaredHostEventError extends Error {
 }
 
 /**
- * 在 Init / Bind 阶段调用 `HostEvent.publish()` 时抛 —— transport 尚未就绪。
- * Setup / Ready 之后调用是安全的（fire-and-forget，无 replay）。
+ * Thrown when `HostEvent.publish()` is called during Init or Bind, before the transport is ready.
+ * Calls from Setup onward are safe (fire-and-forget, with no replay).
  */
 export class EventNotBoundError extends Error {
 	readonly eventName: string
@@ -31,8 +31,8 @@ export class EventNotBoundError extends Error {
 }
 
 /**
- * webview 调 `client.ready()` 时 framework bridge 不在 `window` 上（host preload
- * 漏装 `exposeDeckBridge()`）。
+ * Thrown when a webview calls `client.ready()` without a framework bridge on `window`
+ * because the host preload did not install `exposeDeckBridge()`.
  */
 export class DeckClientNotReadyError extends Error {
 	constructor(message = 'Deck framework bridge is missing on window — did the host preload call exposeDeckBridge()?') {
@@ -42,8 +42,8 @@ export class DeckClientNotReadyError extends Error {
 }
 
 /**
- * `client.invoke(name, ...)` 时远端 hostServices handler 抛错的封装。
- * 保留原 error message，附带 remoteName / 可选 code 让 webview 侧便于分类。
+ * Wraps an error thrown by a remote hostServices handler during `client.invoke(name, ...)`.
+ * Preserves the original message and includes remoteName and an optional code for webview-side classification.
  */
 export class DeckRemoteError extends Error {
 	readonly remoteName: string

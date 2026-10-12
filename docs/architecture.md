@@ -1,382 +1,276 @@
-# electron-deck 架构总览：布局 / 多窗口
+# electron-deck architecture: layout and multiple windows
 
-> 本文面向第一次接触本包的工程师，解释这套布局与多窗口原语、每个原语的职责边界、host 怎么用。配套阅读：
+> For engineers new to this package: this document explains the layout and multi-window primitives, their responsibility boundaries, and host usage. Read alongside:
 >
-> - `docs/foundation.md` —— 连接层 / Disposable / Scope 的地基。
-> - `docs/layout-architecture-demo.md` —— 「最简 host」host-facing 调用形态（与本文第 4 节互为正反面）。
-> - `view-anchor/README.md` —— Layout/Placement 原语的独立包文档。
+> - `docs/foundation.md`: the Connection, Disposable, and Scope foundation.
+> - `docs/layout-architecture-demo.md`: minimal host-facing usage, complementing section 4.
+> - `view-anchor/README.md`: the independent Layout/Placement package documentation.
 
 ---
 
-## 0. 一句话定位 + 与 dockview 的关系
+## 0. Purpose and relationship to dockview
 
-**electron-deck 是一个领域中立的 Electron「host shell」框架**：它不替你做窗口内的 DOM 分栏，
-而是把**嵌套寿命、DOM rect ↔ native bounds 的几何跟随、per-window 的原生 z 叠放、IPC 与
-trust 边界**抽成四个正交原语（一个个见 §2），让业务（预览面板 / 任意 Electron 多窗口工具）
-用极少的 host 代码拼出「窗口 + 原生 view + 浮层 + popout」。
+**electron-deck is a domain-neutral Electron host-shell framework.** Its host-shell layer does not implement DOM splits inside windows. Instead, it provides four orthogonal primitives for nested lifetimes, DOM-rectangle/native-bounds following, per-window native z-order, and IPC/trust boundaries (section 2). Hosts, from preview tools to arbitrary multi-window Electron applications, combine windows, native views, overlays, and popouts with little host code.
 
-**与 dockview 不是替代关系，是分工关系。** dockview（或任意 CSS / React 分栏库）是
-**窗口内 DOM 布局**的权威：split / grid / tab 的真相源在 renderer 控制层。dockview 内部有个
-`OverlayRenderContainer`，做的正是 `getBoundingClientRect → RAF → reposition` 把一个 follower
-贴到面板上——但它的 follower 是 **DOM 节点**。electron-deck 的 `view-anchor` 是同一个机制的
-**跨进程版本**：follower 是主进程的原生 `WebContentsView`（见 `view-anchor/src/types.ts`
-的注释——「dockview 故意不提供的那道跨进程桥」）。
+**dockview and electron-deck have complementary responsibilities.** dockview, or any CSS/React split library, is authoritative for in-window DOM layout: split/grid/tab state belongs to the renderer control layer. Its `OverlayRenderContainer` uses `getBoundingClientRect → RAF → reposition` to attach a DOM follower to a panel. view-anchor applies the same mechanism across processes, where the follower is a main-process native `WebContentsView`; see `view-anchor/src/types.ts` for the cross-process bridge dockview deliberately does not provide.
 
-> 一句话：**dockview 管 DOM 怎么分；electron-deck 管原生 view 怎么跟着 DOM 走、跨窗口怎么搬、寿命归谁。**
+> dockview divides the DOM; electron-deck makes native views follow that DOM, moves them across windows, and assigns their lifetimes.
 
-> **关于「窗口内 DOM 怎么分」**：上面说 electron-deck「不替你做窗口内的 DOM 分栏」是指
-> §1–§5 的 host-shell 原语（Scope / Compositor / ControlBus / ViewHandle / Window facade）。
-> 但本包现在另外提供一个**独立的、领域中立的窗口内布局面**——layout-as-data 引擎
-> （`/layout`）+ `<DockView>`（`/dock-react`），见下面 §0.5。它和 host-shell 原语是
-> **两个正交的 surface**：host-shell 不依赖布局引擎，布局引擎也不 import electron。宿主可以
-> 只取其一；两者一起用时走 `ownsWindows:true` 旁路集成，**不**采纳 §4 的高层 host-shell API。
+> The host-shell primitives in sections 1–5 (Scope, Compositor, ControlBus, ViewHandle, and the Window API) do not split the DOM. The package also provides an independent, domain-neutral in-window layout interface: the layout-as-data engine (`/layout`) and `<DockView>` (`/dock-react`), described in section 0.5. These interfaces are orthogonal: host-shell does not depend on the layout engine, and the layout engine does not import Electron. Hosts may use either alone. Using both together follows the `ownsWindows:true` integration path rather than the higher-level host-shell API in section 4.
 
 ---
 
-## 0.5. layout-as-data 引擎 + DockView（窗口内 docking 布局）
+## 0.5. Layout-as-data engine and DockView
 
-这是与 §1–§5 host-shell 原语**正交**的第二个公开面：一套**领域中立**的「窗口内 docking 布局」
-能力，供任何 Electron 工具把面板拼成可拖拽 re-dock / tab / 分屏 / 序列化恢复的 IDE 式布局。
+The second public interface is orthogonal to the host-shell primitives in sections 1–5. It gives Electron tools domain-neutral in-window docking: draggable re-docking, tabs, splits, and serialized layout restoration for IDE-style interfaces.
 
-### 0.5.1 layout-as-data 引擎（`electron-deck/layout`）
+### 0.5.1 Layout-as-data engine (`electron-deck/layout`)
 
-**纯 TS**——`src/layout/` 下严禁 import `electron` / `react`（`boundary.test.ts` 钉死这条边界）。
-原生面板只引用一个 electron-free 的不透明句柄 `NativeHandleRef`，由 host 自己映射回真 view。
+**Pure TypeScript:** `src/layout/` must not import `electron` or `react`; `boundary.test.ts` enforces this boundary. Native panels reference an Electron-free opaque `NativeHandleRef`, which the host maps to a real view.
 
-- **数据模型**：布局是一棵不可变树 `LayoutTree`，节点是 `SplitNode`（`row`/`column` 容器，带
-  每子一份 `sizes` 权重 + 可选 `constraints`：`{fixedPx}` 锁死 / `{minPx}` 柔性下限）或 `TabGroupNode`
-  （一组 panelId + 当前 `active`）。
-- **面板登记**：`PanelDescriptor` 分 `dom`（renderer 内 React 内容）/ `native`（带
-  `NativeHandleRef` 的主进程 view）两类；`createPanelRegistry()` 维护 panelId → descriptor。
-- **mutation（纯函数，树→树）**：`movePanel` / `splitPanel` / `closePanel` / `setActive` /
-  `setSizes` / `setConstraint` / `extractPanel` / `insertPanel`。
-- **序列化 / 校验**：`serializeLayout` / `parseLayout`（不透明字符串往返持久化）+ `collectTreeProblems`
-  （结构合法性 + panelId 是否都在已知集合内，给 fallback-safe 恢复用）。
-- **可观察模型**：`createLayoutModel(tree)` 是一个**单写者**的 `LayoutModel`（`get` /
-  `apply(mut)` / `subscribe(snap)`），把树变更广播给渲染层。
+- **Data model:** an immutable `LayoutTree`, with `SplitNode` row/column containers holding one `sizes` weight per child and optional `constraints` (`{fixedPx}` fixes size; `{minPx}` sets a flexible minimum), or `TabGroupNode` containing panel IDs and the current `active` panel.
+- **Panel registration:** `PanelDescriptor` distinguishes `dom` React content in the renderer from `native` main-process views carrying `NativeHandleRef`. `createPanelRegistry()` maps panel IDs to descriptors.
+- **Pure tree-to-tree mutations:** `movePanel`, `splitPanel`, `closePanel`, `setActive`, `setSizes`, `setConstraint`, `extractPanel`, and `insertPanel`.
+- **Serialization and validation:** `serializeLayout` and `parseLayout` round-trip an opaque persisted string. `collectTreeProblems` checks structural validity and whether all panel IDs are known, supporting restoration with a safe fallback.
+- **Observable model:** `createLayoutModel(tree)` creates a single-writer `LayoutModel` with `get`, `apply(mut)`, and `subscribe(snap)` to broadcast tree changes to renderers.
 
-### 0.5.2 `<DockView>`（`electron-deck/dock-react`）
+### 0.5.2 `<DockView>` (`electron-deck/dock-react`)
 
-`<DockView model registry renderDomPanel bindNativeSlot>` 是把 `LayoutModel` 渲染成 docking UI
-的 React 渲染器：
+`<DockView model registry renderDomPanel bindNativeSlot>` renders a `LayoutModel` as React docking UI:
 
-- DOM 面板经 `renderDomPanel(panelId, { active })` 渲染 React 内容；原生面板经
-  `bindNativeSlot(panelId, el)` 把一个**空 DOM 槽**交给 host——host 用 `view-anchor` 把主进程
-  view 贴到该槽（与 §2.2 同一跨进程桥）。
-- **DOM 面板 keepalive**：同一 tab group 内的 DOM 面板**全部常驻挂载**，非 active 的用
-  `display:none` 隐藏（不卸载），切 tab 来回不 remount——滚动位置 / 展开态得以保留。`active`
-  标志让面板能在 false→true 边沿跑「激活时副作用」（如数据 refresh）而无需依赖挂载。
-  **原生面板例外**：仍 active-only 挂载（隐藏一个已 bind 的 WebContentsView 槽会塌缩其 rect），
-  失活即卸载并触发 `bindNativeSlot(panelId, null)` 清理。
-- 交互：用户**拖拽 tab → drop 区**做 split / tab re-dock（HTML5 DnD），拖分隔条 resize，切 tab，
-  **关闭面板**（tab 上的 close 控件 → `closePanel`，守卫整树最后一个面板）；
-  纯几何的 drop-zone 计算与 descriptor 层（`computeDropZone` / `dropZoneToMutation` /
-  `isNoopRedock`）也从本 entry 导出，host 不必深 import。
-- `constraints` 让某个 leaf 受像素约束：`{fixedPx}` 锁死，`{minPx}` 柔性下限（如预览列可拖宽但不小于设备宽）。
-- **model 是可视分屏的事实源（双向同步）**：react-resizable-panels（rrp）的 `defaultSize` 只在挂载时读取，
-  所以 `SplitView` 持有 rrp `Group` 的命令式 handle，两个方向各走一条路：model→view 时，程序化 `setSizes`
-  经 `setLayout` 推动**已挂载的分隔条**真正移动（不必 remount）；view→model 时，用户拖分隔条 / 键盘 resize
-  经 `onLayoutChanged` 写回 model。
-  写回前要去重，判据是**flexible 比例比较**——把 rrp 报的容器百分比和 model 里的权重，各自只按可伸缩
-  （非 fixed-px）的子项归一化后再比，差异超过 0.1 个百分点才写回。这单一判据就能区分「真用户 resize（写回）」
-  与「自身 `setLayout` 造成的回声 / 比例守恒下的自发重测（跳过）」，不需要额外的指针门控或回声 token。
-  fixed-px 子项的权重在写回时保持不变（其尺寸由约束而非权重决定）。
+- `renderDomPanel(panelId, { active })` renders DOM content. `bindNativeSlot(panelId, el)` gives the host an empty DOM slot for a native panel. The host uses view-anchor to attach the main-process view to that slot through the same cross-process bridge as section 2.2.
+- **DOM panel retention:** all DOM panels in a tab group remain mounted. Inactive panels use `display:none`, preserving scroll position and expansion state without remounting. The `active` flag lets panels run activation effects (such as refresh) on false → true without relying on mount. **Native panels differ:** only active panels mount, because hiding a bound WebContentsView slot collapses its rectangle. Deactivation unmounts it and calls `bindNativeSlot(panelId, null)` for cleanup.
+- Users drag tabs into drop zones for split/tab re-docking through HTML5 DnD, resize separators, switch tabs, and close panels. Tab close controls call `closePanel`, protecting the last panel in the whole tree. The entry also exports pure drop geometry and descriptors (`computeDropZone`, `dropZoneToMutation`, `isNoopRedock`), avoiding deep imports.
+- Leaf constraints can fix a pixel size with `{fixedPx}` or set a flexible minimum with `{minPx}`, such as a preview column that can grow but never become narrower than a device.
+- **The model is authoritative for visible splits, with two-way synchronization.** react-resizable-panels (rrp) reads `defaultSize` only at mount. `SplitView` therefore holds its imperative `Group` handle: model → view uses `setLayout` for programmatic `setSizes`, moving mounted separators without remounting; view → model uses `onLayoutChanged` for pointer or keyboard resize.
+- Write-back deduplicates by **flexible proportions**. Normalize the rrp container percentages and model weights over flexible (non-fixed-pixel) children only; write back only when the difference exceeds 0.1 percentage points. This distinguishes real user resizing from `setLayout` echoes or proportional remeasurement without pointer gating or echo tokens. Fixed-pixel weights stay unchanged because their constraints, not weights, determine size.
 
-### 0.5.3 与 §1–§5 的关系
+### 0.5.3 Relationship to sections 1–5
 
-布局引擎**不碰** Scope / Compositor / ControlBus / Window facade，也不要求 host 采纳它们；
-host-shell 原语同样不依赖布局引擎。两者可以同时被一个 host 使用，但走的是**不同的 seam**：
-窗口内的分栏用 `/layout` + `/dock-react`，而窗口装配 / 原生 view 寿命仍走 `ownsWindows:true` 旁路。
+The layout engine does not use Scope, Compositor, ControlBus, or the Window API and does not require hosts to adopt them. The host-shell primitives likewise do not depend on the engine. A host may use both through different integration points: `/layout` and `/dock-react` divide the DOM, while `ownsWindows:true` handles host-owned window assembly and native-view lifetime.
 
 ---
 
-## 1. 为什么（三个真实需求 + 一个物理约束）
+## 1. Three requirements and one physical constraint
 
-这套架构不是凭空设计的，是被三个具体需求 + Electron 的一条硬约束逼出来的。
+These primitives follow from three concrete requirements and an Electron constraint.
 
-### 需求 A：点 close 退回 main，而不是关掉窗口
+### Requirement A: closing a project returns to main without closing the window
 
-宿主里「关闭当前项目」应当**销毁项目相关的全部资源（预览 view、CDP、调试 view……）
-但留住窗口**，退回项目列表。这要求一种**嵌套寿命**：窗口寿命 ⊃ 会话寿命；关项目 = `reset`
-会话寿命，窗口活着。→ **Scope**。
+Closing the current project must destroy all project resources (preview views, CDP, debugging views, and so on), keep the window, and return to the project list. This requires nested lifetime: window lifetime contains session lifetime. Project close resets the session while preserving the window. This is **Scope**'s responsibility.
 
-### 需求 B：业务（renderer）经 IPC 自助控制布局
+### Requirement B: the renderer controls layout through IPC
 
-分栏比例、把面板拽出去、弹下拉……这些是业务交互，不该写死在主进程。renderer 控制层需要一条
-受信的 IPC 通道把布局意图（resize / reorder / popout）发回主进程，主进程据此驱动原生 view，
-且必须有**权限边界**（一个窗口的控制层不能动别的窗口）。→ **ControlBus** + capability。
+Split proportions, panel popouts, and dropdowns are application interactions rather than fixed main-process behavior. The renderer control layer needs trusted IPC to send resize/reorder/popout intent to main, which drives native views. A permission boundary must prevent one window's control layer from manipulating another window. This uses **ControlBus** and capabilities.
 
-### 需求 C：浮层要浮在原生 view 之上
+### Requirement C: overlays appear above native views
 
-「设置」面板、被调试面板盖住的下拉菜单……这些要浮在**原生面板 view 之上**。
+Settings panels and dropdowns must appear above native panel views.
 
-### 物理约束（决定了整套架构形态）
+### Physical constraint
 
-**Electron 的原生 `WebContentsView` 永远合成在 DOM 之上，且原生 view 之间不能与 DOM 在 z 轴上
-穿插。** 这意味着：
+**Electron's native WebContentsView composition is always above the DOM. Native views and DOM elements cannot interleave along the z-axis.** Therefore:
 
-- 需求 C 的「浮在原生面板之上的下拉」**本身必须是一块原生 view**（放进更高的 z 层），
-  不可能是一个 DOM 元素——DOM 永远在原生 view 之下。
-- 同一窗口里多块原生 view 的前后关系，需要一个**主进程侧的原生 z 层规划器**来管。dockview 这类
-  纯 DOM 库给不了这个。→ **Compositor**。
+- A dropdown above a native panel must itself be a native view in a higher z zone. A DOM element remains below native views.
+- A main-process native z-order planner must control multiple native views in one window. A DOM library such as dockview cannot manage that layer. This is **Compositor**'s responsibility.
 
-而「窗口被 splitter 拖动时原生 view 跟着 DOM 占位走」这件事，是 → **Layout/Placement（view-anchor）**。
+Making a native view follow its DOM slot during splitter dragging is **Layout/Placement (view-anchor)**'s responsibility.
 
 ---
 
-## 2. 四个正交原语 + 薄 ViewHandle
+## 2. Four orthogonal primitives and a small ViewHandle
 
-整套架构 = **4 个正交 primitive** + 一层**薄 ViewHandle** 编排壳。正交 = 互不依赖、可独立测试、
-各自只管一件事。
+The architecture combines four independently testable primitives with a small ViewHandle orchestration layer. Each primitive has one responsibility and does not depend on the others.
 
 ```
-                       ┌─────────────────────────────────────────┐
-   host backend  ──►   │            ViewHandle (薄编排壳)          │
-   runtime.view()      │  持: native view + scope-lease + compositor token │
-                       └───┬───────────┬──────────────┬──────────┘
-                           │           │              │
-                  ┌────────▼──┐  ┌─────▼──────┐  ┌────▼─────────┐   ┌──────────────┐
-                  │   Scope   │  │ Compositor │  │Layout/Placement│  │  ControlBus  │
-                  │ 嵌套寿命  │  │ per-window │  │  view-anchor  │  │ IPC+trust 薄  │
-                  │ own/child │  │  z 叠放    │  │ DOM rect ↔   │  │ command/event│
-                  │reset/close│  │mount/commit│  │ native bounds │  │ /trust       │
-                  │ +栅栏+adopt│  │ +LIS diff  │  │ Placement{vis}│  │ →WireTransport│
-                  └───────────┘  └────────────┘  └──────────────┘   └──────────────┘
+                      ┌──────────────────────────────────────────────────────┐
+   host backend ──►   │                 ViewHandle                           │
+   runtime.view()     │ native view + scope lease + compositor token         │
+                      └───┬──────────────┬──────────────────┬─────────────────┘
+                          │              │                  │
+                  ┌───────▼──────┐ ┌─────▼─────────┐ ┌──────▼──────────┐ ┌─────────────────┐
+                  │ Scope        │ │ Compositor    │ │ Layout/Placement│ │ ControlBus      │
+                  │ nested life  │ │ per-window z  │ │ view-anchor     │ │ IPC + trust     │
+                  │ own/child    │ │ mount/commit  │ │ DOM rect ↔      │ │ command/event   │
+                  │ reset/close  │ │ + LIS diff    │ │ native bounds   │ │ /trust          │
+                  │ fence/adopt  │ │               │ │ Placement{vis}  │ │ → WireTransport │
+                  └──────────────┘ └───────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
-### 2.1 Scope —— 嵌套寿命
+### 2.1 Scope: nested lifetime
 
-**职责**：一段「寿命片段」。`own()` 绑资源、`child()` 开子寿命；`reset()`（软复用：拆掉当前片段、
-开新片段、自己活着）和 `close()`（终结：全拆、死掉）统一释放，LIFO，跨层（孙→子→父）。
+Scope represents a lifetime segment: `own()` registers resources and `child()` creates a child lifetime. `reset()` tears down the current segment and opens another while keeping Scope alive; `close()` terminates it and all resources. Cleanup is LIFO across generations: grandchildren, children, then parents.
 
-**关键性质（与 `connection.ts` 的差别）**：`reset()/close()` 是**完成栅栏（completion fence）**——
-它的 Promise 只在底层 async `disposeAll` **真正跑完**之后才 resolve、才 fire 监听器；不是
-「触发即忘」。这让父的 `await child.close()` 是一次真等待（单飞 in-flight，重入合流）。
+**Unlike `connection.ts`, reset/close are completion fences.** Their Promises resolve and listeners fire only after underlying asynchronous `disposeAll` finishes. A parent's `await child.close()` is a real wait; in-flight teardown is shared and reentrant calls join it.
 
-**adopt**：把一个 child 从当前父的片段**重挂**到另一个父的片段上，**不 reset / 不 close**——
-child 的 `own()` 资源原封不动，只换「从此谁负责拆它」。若任一端有 teardown 在飞，adopt **等栅栏**
-（不抛），等完后对新鲜片段重新校验。这是 popout「迁寿命」的底层。
+**adopt** moves a child from one parent's segment to another without resetting or closing it. Its owned resources remain intact; only responsibility for future teardown changes. If either side has teardown in flight, adopt waits for the fence rather than throwing, then revalidates against fresh segments. This underlies popout lifetime transfer.
 
-- 文件：`src/main/scope.ts`（接口 `Scope`；`adopt`；完成栅栏的单飞状态机均在此）。
+- File: `src/main/scope.ts` contains the interface, adopt, and the shared in-flight completion-fence state machine.
 
-### 2.2 Layout/Placement —— DOM rect ↔ native bounds（独立包 `view-anchor`）
+### 2.2 Layout/Placement: DOM rectangle ↔ native bounds (`view-anchor`)
 
-**职责**：让一块主进程原生 view 始终贴住某个 DOM 元素的屏幕矩形。测 `getBoundingClientRect()`，
-把矩形交给注入的 `publish`（host 接 IPC → `setBounds`），并在 `ResizeObserver` / window `resize`
-时**同步**重发（不走 RAF——原生 setBounds 本就慢一帧，再叠一帧会在拖 splitter 时拖尾，见
-`view-anchor/src/view-anchor.ts` 的长注释）。
+This independent package keeps a main-process native view aligned with a DOM element's screen rectangle. It measures `getBoundingClientRect()` and passes the rectangle to an injected `publish` sink (host IPC → `setBounds`). ResizeObserver and window resize synchronously republish rather than adding a RAF delay; native setBounds already lags a frame, and another frame causes visible splitter-drag lag. See the detailed comments in `view-anchor/src/view-anchor.ts`.
 
-**显式 `Placement{visible}`**：可见性是**判别式（discriminant）**，绝不从几何推断。一个
-真正 0×0 但在屏（有几何盒、被排版成 0 面积）的 view 是 `{ visible:true, bounds:{...width:0} }`，
-一个隐藏 / **无几何盒**（`display:none`、未 mount）的是 `{ visible:false }`（**不带 bounds**）。
-这替换了旧的 magic-`{0,0,0,0}` = 隐藏 的约定（旧约定下两者无法区分）。
+**Explicit `Placement{visible}`:** visibility is a discriminant, never inferred from geometry. A present geometric box laid out at 0×0 can be `{ visible:true, bounds:{...width:0} }`; a hidden or absent box (`display:none`, unmounted) is `{ visible:false }`, without bounds. This replaces the old ambiguous convention where `{0,0,0,0}` meant hidden.
 
-> `display:none` / 无几何盒 一律发 `{ visible:false }`（detach），**不是** 0 尺寸的
-> `visible:true`；`{ visible:true, bounds:0×0 }` 只保留给「有盒但被排成
-> 0×0」的合法罕见情形。`visible:false` = 「不显示这个 view」，由**调用方意图 hide** **OR**
-> **锚测出无几何盒**两路得出（锚报客观事实，不篡改意图）。判别口诀：**有盒但 0 面积 →
-> visible:true+0×0；无盒 → visible:false**。详见 `contracts/view-anchor-following.md` §3。
+> `display:none` or no geometric box must publish `{ visible:false }` to detach, not a zero-sized visible placement. `{ visible:true, bounds:0×0 }` is reserved for a box genuinely laid out at zero area. `visible:false` comes from either caller hide intent or the anchor's observation of an absent box; measurement reports facts without rewriting intent. Box with zero area → visible with 0×0; no box → hidden. See `contracts/view-anchor-following.md` section 3.
 
-**反向（size-anchor）**：正向让原生 view 跟 DOM；反向让 DOM 占位跟内容尺寸（在下游 view
-自己的渲染进程里量 border-box 回流给宿主）。单轴所有权（block=高 / inline=宽），保证跨进程环是
-单向 DAG。
+**Reverse size anchor:** forward anchoring makes the native view follow DOM; reverse anchoring makes a DOM slot follow content size measured as border-box in the downstream view's renderer. Single-axis ownership (block = height, inline = width) keeps cross-process feedback as a one-way DAG.
 
-- 文件：`view-anchor/src/`（`Placement` 类型 `types.ts`；正向核心 + 显式 Placement 核心
-  `view-anchor.ts`；反向 `size-anchor.ts`）。
+- Files: `view-anchor/src/types.ts` for Placement, `view-anchor.ts` for forward and explicit-placement logic, and `size-anchor.ts` for reverse sizing.
 
-### 2.3 Compositor —— per-window 原生 z 叠放
+### 2.3 Compositor: per-window native z-order
 
-**职责**：规划一个窗口内原生子 view 的 z 顺序。把**意图**（`mount` / `unmount` / `reorder` 到某
-zone 的某相对位置）与**应用**（`commit()` 算出把 host 当前子序变成目标序的**最小** add/remove
-序列）分开。
+Compositor plans native child-view ordering inside one window. It separates **intent** (mount/unmount/reorder at a zone-relative position) from **application** (`commit()` computes a minimum add/remove sequence from current host children to the target).
 
-**全序 `(zone, orderKey, viewId)`**：低 zone 渲染在下、高 zone 在上（zone 之间堆叠）；zone 内按
-`orderKey` 排；`viewId` 纯兜底保证确定性。`orderKey` 用 **fractional indexing**：reorder-before(X)
-取 X 与其前驱的中点，O(1) 且不扰动其他 view 的 key；中点精度耗尽时**整 zone 重编号**（rebalance，
-对可见顺序无感）。
+The total order is **`(zone, orderKey, viewId)`**. Lower zones render beneath higher zones; orderKey orders views within a zone, and viewId makes ties deterministic. orderKey uses fractional indexing: reorder-before(X) chooses the midpoint between X and its predecessor, in O(1) without changing other keys. If midpoint precision runs out, rebalance the whole zone without changing visible order.
 
-**前缀保序 commit**：把一批意图折叠成**最终目标态**（last-state，不是写日志回放），再 diff host
-当前子序与目标。host 只能 `addChildView` 到顶（append/raise），所以保留「目标顺序里位置已递增的
-最长前缀」，其余共享 view + 全部新 view 在一个同步 pass 里 remove+add 重排——**零 renderer
-reload**。
+**Prefix-preserving commit** reduces a batch of intents to its final target state rather than replaying a log, then diffs host children against that target. Since the host can only append/raise with addChildView, preserve the longest target prefix whose current indices increase. Remove and add the remaining shared views and new views in one synchronous pass, with **no renderer reload**.
 
-> 前缀不等于 LIS，因此**不保证最小 host churn**：`computeKeepIds` 遇到第一个乱序元素即 `break`
-> （`src/main/compositor.ts`）。反例——当前 `[A,B,C]` 目标 `[C,A,B]`：前缀只保住 `{C}` 要 2 次
-> add，真 LIS 保住 `{A,B}` 只要 1 次。这是刻意的简化（append-to-top 原语下实现更短），不是缺陷；
-> churn 的代价上限是「共享 view 数」，且 addChildView 已挂载子 view 只提顶不 reload。
+> A prefix is not an LIS, so this does not guarantee minimum host churn. `computeKeepIds` stops at the first out-of-order element in `src/main/compositor.ts`. For current `[A,B,C]` and target `[C,A,B]`, the prefix keeps `{C}` and requires two additions; an LIS keeps `{A,B}` and needs one. This is a deliberate simplification for append-to-top primitives. Churn is bounded by the number of shared views; addChildView raises an already-mounted child without reloading it.
 
-> 为什么需要它而 dockview 没有：原生 view 的 z 是 Electron 物理约束下主进程独有的一层，
-> DOM 库管不到。
+This main-process native z layer follows from Electron's composition constraint and is outside dockview's DOM responsibilities.
 
-- 文件：`src/main/compositor.ts`（接口 `Compositor`；reorder/fractional key（含 `keyBefore`）；
-  前缀保序 commit 均在此）。host 调用序列由 `compositor.test.ts` 覆盖。
+- File: `src/main/compositor.ts` defines Compositor, reorder/fractional keys (including `keyBefore`), and prefix-preserving commit. `compositor.test.ts` verifies host call sequences.
 
-### 2.4 ControlBus —— IPC + trust 薄 facade
+### 2.4 ControlBus: a small IPC/trust interface
 
-**职责**：三个动词的薄门面，**自己不加任何新 gating**：
+ControlBus exposes three operations without adding new admission checks itself:
 
-- `command(name, handler)`：webview → main 的 RPC。门面持唯一命令表，`dispatch(name, args)` 被真
-  `WireTransport` 的 `invokeHost` seam 调到（在 wire 的 sender + main-frame
-  gate 之后）。trust / main-frame 校验**全在 wire**，不是 facade。
-- `event(name)`：main → webview 推送，**默认拒绝**。`name` 加进 wire 读的 declared-event allowlist；
-  未声明的 name 被 wire 丢弃。
-- `trust(wc)`：委托给可注入的 refcount `TrustSet`。
+- `command(name, handler)`: webview → main RPC. ControlBus owns the command table, and the real WireTransport's `invokeHost` calls `dispatch(name, args)` after sender and main-frame gates. All trust/main-frame validation belongs to the wire.
+- `event(name)`: main → webview push, denied by default. Register name in the declared-event allowlist read by the wire; the wire drops undeclared names.
+- `trust(wc)`: delegate to an injectable reference-counted TrustSet.
 
-**关键**：命令表是 ControlBus 自己的**唯一命令权威**——想用这层的 host 在自己的 `backend.assemble`
-里用 `invokeHost = (n,a) => controlBus.dispatch(n,a)` 建 `WireTransport`，这样真 IPC invoke 才经
-wire 落到 handler，而不是测试专用私缝。deck-app 不自动接线 ControlBus：它自己 config 声明的
-`hostServices` 走独立的、不带 grant 闸的 ipc 注册表，与 ControlBus 的命令表是两张不同的表。
+ControlBus's command table is its sole command authority. Hosts using it assemble WireTransport in `backend.assemble` with `invokeHost = (n,a) => controlBus.dispatch(n,a)`, so real IPC reaches handlers through the wire. deck-app does not wire ControlBus automatically. Its declarative `hostServices` use a separate IPC registry without a grant gate, not the ControlBus command table.
 
-> 🔒 **硬约束 —— 布局/特权 command 必须唯一经 ControlBus**：
-> grant 闸（capability default-deny）的**唯一插点**是 `ControlBus.dispatch`。因此任何**布局 / 特权
-> command**（`layout.resize` / `layout.reorder` / `layout.popout` / `layout.overlay` 等会驱动
-> 原生 view / 寿命 / 跨窗的动作）**必须**经 ControlBus 注册并 dispatch，**禁止**落进普通 `hostServices` /
-> `InMemoryTypedIpcRegistry` 路由（那条路由只做 trust 闸、没有 grant 闸，特权名误入即等于授权闸被绕过）。
-> 这条边界由 capability 层强制守住，两条 invoke 路由如何分流、在哪写死的细节见
-> `contracts/capability-and-lifecycle.md`。
+> 🔒 **Layout/privileged commands must go through ControlBus.** `ControlBus.dispatch` is the only grant-gating point. Actions such as `layout.resize`, `layout.reorder`, `layout.popout`, and `layout.overlay`, which drive native views, lifetime, or migration, must register and dispatch through ControlBus, never ordinary hostServices or InMemoryTypedIpcRegistry. Those routes check trust but not grants, so a misplaced privileged name bypasses authorization. See `contracts/capability-and-lifecycle.md` for routing and enforcement details.
 
-- 文件：`src/host/control-bus.ts`（接口 `ControlBus`；`dispatch` 真接 wire）。真 wire 桥接
-  `src/internal/wire-transport.ts`（trust + main-frame gate）。trust 原语 `src/internal/trust-set.ts`
-  （读写分离：只读 `TrustIndex{isTrusted/snapshot}`；`TrustSet extends TrustIndex` 加唯一写入门
-  `admit(wc, owner)`，refcount-- 的 Disposable 由 `owner` Scope 托管）。
+- Files: `src/host/control-bus.ts` defines ControlBus and dispatch wiring; `src/internal/wire-transport.ts` provides the real trust/main-frame wire; `src/internal/trust-set.ts` separates read-only `TrustIndex{isTrusted/snapshot}` from `TrustSet`'s sole writer, `admit(wc, owner)`, whose reference-count decrement Disposable belongs to the owner Scope.
 
-### 2.5 ViewHandle —— 薄 per-view 编排
+### 2.5 ViewHandle: per-view orchestration
 
-**职责**：把上面四个原语缝成「一块 view」的最小编排单元。它**持有**：原生 view 句柄、一个
-scope-lease（绑哪个寿命）、一个 compositor token（在哪个窗口的 z 栈里）。
+ViewHandle combines the primitives for one view. It holds the native view, a scope lease identifying lifetime ownership, and a compositor token identifying its window's z stack.
 
-**硬边界（ViewHandle 不做什么）**：
+- It does not calculate layout; Layout/Placement supplies geometry.
+- It does not choose release policy; Scope owns lifetime and the handle holds a lease.
+- It does not hold a global tree; cross-window/global orchestration belongs to runtime.
+- It does not manipulate contentView directly; addChildView/removeChildView go through Compositor.
 
-- **不算布局**——几何来自 Layout/Placement（view-anchor），ViewHandle 只转发。
-- **不定释放策略**——寿命归 Scope，ViewHandle 只持一个 lease。
-- **不持全局树**——它只知道自己这一块，跨窗口/全局编排在 runtime。
-- **不直碰 contentView**——所有 `addChildView`/`removeChildView` 经 Compositor。
-
-API 形态（见第 4 节）：`runtime.view(...)` → `DeckViewHandle`，带 `placeIn(window, {zone, anchor})`
-/ `applyPlacement({visible, bounds})` / `moveTo(window, {rehome})` / `dispose()`，并暴露只读访问器
-`webContents` / `bounds()` / `capturePage()`（host 取原生 view 无需 diff `contentView.children`）。
-`placeIn`/`moveTo` 的 window 参数接受 `DeckWindow` 或裸 `BrowserWindow`。
+`runtime.view(...)` returns `DeckViewHandle` with `placeIn(window, {zone, anchor})`, `applyPlacement({visible, bounds})`, `moveTo(window, {rehome})`, and `dispose()`, plus read-only `webContents`, `bounds()`, and `capturePage()`. Hosts need not diff contentView.children to find the native view. placeIn/moveTo accept either DeckWindow or a raw BrowserWindow.
 
 ---
 
-## 3. 六个关键架构决定
+## 3. Six architectural decisions
 
-| #   | 决定                                              | 理由                                                                                                                                                                                                                                                                                                                                                                                          |
-| --- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **混合合成需要一个主进程原生 z 层（Compositor）** | 原生 `WebContentsView` 与 renderer DOM 不在同一棵布局树里；同一区域多个 native view 的 child order 只能由主进程控制。Compositor 负责这层顺序，调用序列由 `compositor.test.ts` 覆盖。                                                                                                                                                                                                          |
-| 2   | **权威分层**                                      | **窗口内 DOM 布局**（split/grid/tab）真相源在 **renderer 控制层**（可以直接用真 dockview / CSS）；**跨窗口 + 原生 view 编排 + 生命周期** 真相源在**主进程**。两边各自是各自领域的唯一权威，不互相镜像状态。                                                                                                                                                                                   |
-| 3   | **split 分工裁决：host 主进程零布局原语**         | DOM 分栏整套交给 renderer。框架只做两件事：① 原生 view 经 view-anchor 跟随任意 slot 的几何；② Compositor 管同区多原生 view 的 z。所以「支持 split」对框架而言**就等于**「拖 splitter 时原生 view 跟随」——这正是 view-anchor 的本职，框架不需要任何 split/grid 原语。与 dockview **分工不替代**（view-anchor = dockview `OverlayRenderContainer` 的跨进程版，见 `view-anchor/src/types.ts`）。 |
-| 4   | **placement ≠ lifetime**                          | 「view 显示在哪个窗口」（placement）与「归哪个 scope 管寿命」（lifetime）**正交**。`moveTo` 默认只移**显示**（Compositor 跨窗 mount），寿命不动；要让 view 比原 session 活得久，必须显式调用 `moveTo(dest, { rehome: true })` 才走 `Scope.adopt` 迁寿命。混淆这两者会导致「搬个面板顺手改了它的释放归属」之类的 bug。                                                                         |
-| 5   | **popout = live-migrate**                         | `moveTo` 在两个 Compositor 之间迁移现有 view 的 token 和同一个 native view 引用，不创建新的 `WebContentsView`；`rehome:true` 再用 `Scope.adopt` 迁寿命。迁移状态机确保 native view 任一时刻只挂在一个窗口上，dest 挂载失败时回滚到 src。                                                                                                                                                      |
-| 6   | **host-facing 干净 API**                          | 对 host 暴露的是领域中立的少量动词：`runtime.windows.create → Window`、`runtime.view().placeIn / moveTo`、`window.onClose`、以及受限的 `window.compositor`（reorder/commit/batch）。目标是「最简 host ~30 行」（见 `docs/layout-architecture-demo.md`）。                                                                                                                                     |
+| #   | Decision                                                               | Reason                                                                                                                                                                                                                                                                                                                       |
+| --- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Mixed composition needs a main-process native z layer (Compositor)** | WebContentsView and renderer DOM do not share a layout tree. Main alone controls native child order in overlapping regions. compositor.test.ts verifies these calls.                                                                                                                                                         |
+| 2   | **Separate authorities**                                               | Renderer control owns DOM split/grid/tab layout (dockview or CSS); main owns cross-window native views and lifecycle. Each is authoritative for its domain without mirroring the other's state.                                                                                                                              |
+| 3   | **No split primitive in the host-shell main process**                  | Renderer owns DOM splits. The framework makes native views follow arbitrary slots through view-anchor and orders them through Compositor. Supporting splits here means following splitter movement, complementing dockview rather than replacing it. view-anchor is the cross-process counterpart of OverlayRenderContainer. |
+| 4   | **Placement differs from lifetime**                                    | A view's displayed window and lifetime scope are independent. moveTo changes placement by default. Explicit `moveTo(dest, { rehome: true })` uses Scope.adopt when lifetime must outlive the old session; moving a panel must not accidentally change release ownership.                                                     |
+| 5   | **Popout is live migration**                                           | moveTo transfers the token and same native reference between Compositors without creating a new WebContentsView. rehome transfers lifetime through adopt. The state machine attaches to only one window at a time and rolls back to src on destination failure.                                                              |
+| 6   | **Small, domain-neutral host API**                                     | Hosts use `runtime.windows.create → Window`, `runtime.view().placeIn / moveTo`, `window.onClose`, and restricted `window.compositor` reorder/commit/batch. The goal is a minimal host of roughly 30 lines; see docs/layout-architecture-demo.md.                                                                             |
 
 ---
 
-## 4. host-facing API + 最简 host 调用示例（Window facade）
+## 4. Host-facing API and minimal host example
 
-> 完整可跑版见 `examples/layout-demo/`（真机离屏自证）。这里给精炼骨架，呼应第 2/3 节的原语与决定。
-> `runtime.windows.create()` / `runtime.windows.main` 返回 **`DeckWindow`** 句柄
-> `{ window, controlWc, newSession(), onClose() }`——把寿命树/compositor/trust 接线吸收进框架，
-> host 不碰裸 primitive。`newSession()` 铸 **window-rooted** `DeckSession`（窗口寿命 > session 寿命），
-> `runtime.view({ scope })` 只接受它（provenance 校验，裸 Scope 被拒）。
+> `examples/layout-demo/` provides a runnable version with real-device offscreen verification. This sketch connects the primitives and decisions in sections 2–3. `runtime.windows.create()` and `runtime.windows.main` return DeckWindow `{ window, controlWc, newSession(), onClose() }`, letting the framework own lifetime-tree/compositor/trust wiring. `newSession()` creates a window-rooted DeckSession, shorter-lived than the window. `runtime.view({ scope })` accepts only these sessions, validates provenance, and rejects raw Scope instances.
 
 ```ts
 import { electronDeck } from 'electron-deck'
 
-const Z = { CONTENT: 0, PANEL: 10, OVERLAY: 100 } // Compositor z 分层
+const Z = { CONTENT: 0, PANEL: 10, OVERLAY: 100 } // Compositor z zones
 
 electronDeck({
-	app: { source: { url: 'app://project-shell' } }, // 框架建 + 自动加载主窗口
+	app: { source: { url: 'app://project-shell' } }, // The framework creates and automatically loads the main window.
 	backend: {
 		async assemble(runtime) {
-			const main = runtime.windows.main // DeckWindow（框架建的主窗口）
+			const main = runtime.windows.main // DeckWindow for the framework-created main window
 
 			let session = null
 			function openProject(path) {
-				session = main.newSession() // window-rooted session：关项目只 reset 它，窗口活着
+				session = main.newSession() // Window-rooted session: project close resets it while keeping the window alive.
 
 				runtime
 					.view({ source: previewSource(path), scope: session })
-					.placeIn(main, { zone: Z.CONTENT, anchor: '#preview' }) // view-anchor 缝几何（接受 DeckWindow）
+					.placeIn(main, { zone: Z.CONTENT, anchor: '#preview' }) // view-anchor connects geometry; accepts DeckWindow.
 				runtime
 					.view({ source: { panelFor: '#preview' }, scope: session })
 					.placeIn(main, { zone: Z.PANEL, anchor: '#panel' })
 			}
 
 			main.onClose(async () => {
-				// 需求 A：close 退回 main（per-window 可取消决策）
+				// Requirement A: close returns to main through a cancellable per-window decision.
 				if (session) {
-					await session.reset() // 完成栅栏：资源真拆完才继续
+					await session.reset() // Completion fence: continue only after resource cleanup finishes.
 					session = null
-					return 'keep' // 留住窗口（host 自己发 navigate 事件回 project-list）
+					return 'keep' // Keep the window; the host emits navigation back to the project list.
 				}
 				return 'close'
 			})
 
 			function showOverlay(src, rect) {
-				// 需求 C：浮在原生之上 = 顶层 zone
+				// Requirement C: overlay above native views = highest zone.
 				return runtime
 					.view({ source: src, scope: main.newSession() })
 					.placeIn(main, { zone: Z.OVERLAY })
 					.applyPlacement({ visible: true, bounds: rect })
 			}
 
-			// 需求 B：control 层自助布局的特权命令授权——`runtime.grants` 这层门面便捷入口已下线。
-			// host 若要保留「按 window/session 边界授权 layout.* 命令」的语义，自己用
-			// `electron-deck/host` 的 createCapabilityRegistry()（+ ControlBus）接线；
-			// runtime 门面本身不再内置这一步。
+			// Requirement B: privileged control-layer layout authorization; `runtime.grants` was removed.
+			// To authorize layout.* commands by window/session boundaries, hosts must wire
+			// createCapabilityRegistry() and ControlBus from `electron-deck/host` themselves;
+			// the runtime no longer provides this convenience wiring.
 		},
 	},
 })
 ```
 
-> **安全**：控制 wc 做主帧跨文档导航时，框架**同步撤销**它的 slot token
-> （`did-start-navigation` → 撤销该 wc 名下的所有 slot token），新文档不会继承旧页面已下发的
-> anchor 授权；trust 保留（仍是控制面）。`autoTrust:false` 后经 `windows.trust()` 晚信任的窗口
-> 同样受保护。
+> **Security:** when a control wc begins main-frame cross-document navigation, the framework synchronously revokes all its slot tokens (`did-start-navigation`). The new document cannot inherit the old page's anchor authorization, while control-layer trust remains. Windows trusted later with windows.trust after `autoTrust:false` receive the same protection.
 
-控制层 renderer 只画 DOM 分栏 + 原生 view 的占位「洞」，经 IPC client 发布局意图：
+The control renderer draws DOM splits and empty slots for native views, then publishes layout intent through the IPC client:
 
 ```tsx
 const deck = createDeckLayoutClient({ bridge: window.__electronDeckLayoutBridge })
-// <div id="preview"/> / <div id="panel"/> 是占位洞，原生 view 由主进程盖上来
-// view-anchor 在 client 内 ResizeObserver 重测 → 原生块跟随，host 写 0 行 resize 代码
+// <div id="preview"/> and <div id="panel"/> are slots covered by native views from main.
+// The client remeasures through view-anchor/ResizeObserver; native views follow without host resize code.
 ```
 
 ---
 
-## 5. 原语速查
+## 5. Primitive reference
 
-| 原语 / 壳                       | 职责                                                                                                                      | 文件                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **Scope**                       | 嵌套寿命 + 完成栅栏 + adopt                                                                                               | `src/main/scope.ts`                                                                        |
-| **Layout/Placement**            | DOM rect ↔ native bounds，显式 `Placement{visible}` 判别式                                                                | `view-anchor/src/`                                                                         |
-| **Compositor**                  | per-window 原生 z 叠放，fractional indexing + 前缀保序 commit                                                             | `src/main/compositor.ts`                                                                   |
-| **ControlBus**                  | IPC + trust 薄 facade，真接 WireTransport                                                                                 | `src/host/control-bus.ts` + `src/internal/wire-transport.ts` + `src/internal/trust-set.ts` |
-| **ViewHandle / `runtime.view`** | 薄 per-view 编排：`placeIn/applyPlacement/moveTo` + `bounds()/capturePage()/webContents`                                  | `src/main/view-handle.ts` + `src/internal/deck-app.ts`                                     |
-| **capability / grants**         | 授权层：grant 闸 + senderId 横切 + per-wc Scope + 导航撤权                                                                | `src/host/capability.ts` + `src/internal/deck-app.ts`                                      |
-| **layout client**               | `createDeckLayoutClient({bridge})` — 中央 publisher 合并成窗口级 snapshot/subscribe（slot-token 授权 + 主进程 reconcile） | `src/client/layout-client.ts` + `src/layout/snapshot-reconcile.ts` + `src/preload/`        |
-| **Window facade**               | `runtime.windows.create()/.main` → `DeckWindow{window,controlWc,newSession(),onClose()}`                                  | `src/internal/deck-app.ts`                                                                 |
+| Primitive/API                 | Responsibility                                                                                                                                      | Files                                                                                    |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **Scope**                     | Nested lifetime, completion fences, adopt                                                                                                           | `src/main/scope.ts`                                                                      |
+| **Layout/Placement**          | DOM rect ↔ native bounds; explicit `Placement{visible}` discriminant                                                                                | `view-anchor/src/`                                                                       |
+| **Compositor**                | Per-window native z-order, fractional indexing, prefix-preserving commit                                                                            | `src/main/compositor.ts`                                                                 |
+| **ControlBus**                | Small IPC/trust API connected to real WireTransport                                                                                                 | `src/host/control-bus.ts`, `src/internal/wire-transport.ts`, `src/internal/trust-set.ts` |
+| **ViewHandle / runtime.view** | Per-view placeIn/applyPlacement/moveTo and bounds/capturePage/webContents                                                                           | `src/main/view-handle.ts`, `src/internal/deck-app.ts`                                    |
+| **Capability/grants**         | Grant gating, senderId propagation, per-wc Scope, navigation revocation                                                                             | `src/host/capability.ts`, `src/internal/deck-app.ts`                                     |
+| **Layout client**             | `createDeckLayoutClient({bridge})`; central publisher coalesces window snapshots/subscription with slot-token authorization and main reconciliation | `src/client/layout-client.ts`, `src/layout/snapshot-reconcile.ts`, `src/preload/`        |
+| **Window API**                | `runtime.windows.create()/.main` → `DeckWindow{window,controlWc,newSession(),onClose()}`                                                            | `src/internal/deck-app.ts`                                                               |
 
-横切契约的细化规范见 `contracts/`：view-anchor 跟随硬化（`view-anchor-following.md`）、Compositor 事务化 commit 与 teardown 顺序（`compositor-and-teardown.md`）、capability 与生命周期（`capability-and-lifecycle.md`）、统一寿命（`unified-lifetime.md`）。
+Detailed cross-cutting contracts live in `contracts/`: anchor following in `view-anchor-following.md`, transactional commit/teardown in `compositor-and-teardown.md`, capability/lifecycle in `capability-and-lifecycle.md`, and unified lifetime in `unified-lifetime.md`.
 
 ---
 
-## 6. 关键文件索引
+## 6. Key file index
 
-| 路径                                 | 内容                                                                                                                                                                                                                 |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/layout/`                        | layout-as-data 引擎（纯 TS）：`types.ts` 树/节点/registry/model 类型、`mutations.ts` 树→树纯函数、`serialize.ts` 往返+`collectTreeProblems`、`model.ts` 单写者可观察模型、`registry.ts` panel registry；公开面在 `index.ts` |
-| `src/dock-react/`                    | `<DockView>` React 渲染器（`dock-view.tsx`）+ 纯几何 drag-to-redock（`drag-redock.ts`）；公开面在 `index.ts`                                                                                                         |
-| `src/main/scope.ts`                  | Scope 嵌套寿命原语：`own/child/reset/close/on/adopt`，完成栅栏单飞状态机                                                                                                                                             |
-| `src/main/compositor.ts`             | Compositor：`(zone,orderKey,viewId)` 全序、fractional indexing、前缀保序 commit                                                                                                                                      |
-| `src/host/control-bus.ts`            | ControlBus 薄 facade：`command/event/trust/dispatch/declaredEvents`                                                                                                                                                  |
-| `src/internal/wire-transport.ts`     | 真 Electron wire：`ipcMain.handle` 路由 + trust/main-frame gate + event fanout                                                                                                                                       |
-| `src/internal/trust-set.ts`          | TrustSet：读写分离，`TrustIndex{isTrusted/snapshot}` 只读 + 唯一写入门 `admit(wc, owner)`                                                                                                                            |
-| `src/internal/deck-app.ts`           | `electronDeck()` 顶层 app：whenReady gating、窗口装配、close 决策机、shutdown 顺序                                                                                                                                   |
-| `view-anchor/src/types.ts`           | `Bounds` / `Placement` / 正反向 anchor 的类型契约                                                                                                                                                                    |
-| `view-anchor/src/view-anchor.ts`     | view-anchor 正向核心 + 显式 Placement 核心                                                                                                                                                                           |
-| `view-anchor/src/size-anchor.ts` | 反向尺寸回流（下游内容尺寸 → 宿主占位）                                                                                                                                                                              |
-| `docs/layout-architecture-demo.md`   | 最简 host host-facing 调用形态（第 4 节完整版）                                                                                                                                                                      |
-| `docs/foundation.md`                 | 连接层 / Disposable / Scope 地基                                                                                                                                                                                     |
-| `docs/contracts/`                    | 跟随硬化 / commit·teardown 顺序 / capability / 统一寿命的细化契约                                                                                                                                                    |
+| Path                               | Contents                                                                                                                                                                                                                                     |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/layout/`                      | Pure TypeScript layout-as-data: types.ts trees/nodes/registry/model; mutations.ts pure tree transformations; serialize.ts round trips and collectTreeProblems; model.ts single-writer observable model; registry.ts panels; index.ts exports |
+| `src/dock-react/`                  | dock-view.tsx React DockView renderer and drag-redock.ts pure drag geometry; index.ts exports                                                                                                                                                |
+| `src/main/scope.ts`                | own/child/reset/close/on/adopt and shared in-flight completion-fence state machine                                                                                                                                                           |
+| `src/main/compositor.ts`           | Total (zone,orderKey,viewId) order, fractional indexing, prefix-preserving commit                                                                                                                                                            |
+| `src/host/control-bus.ts`          | command/event/trust/dispatch/declaredEvents                                                                                                                                                                                                  |
+| `src/internal/wire-transport.ts`   | Real Electron ipcMain.handle routing, trust/main-frame gates, event fanout                                                                                                                                                                   |
+| `src/internal/trust-set.ts`        | Read-only TrustIndex isTrusted/snapshot and sole admission writer admit(wc, owner)                                                                                                                                                           |
+| `src/internal/deck-app.ts`         | electronDeck app, whenReady gating, window assembly, close decisions, shutdown order                                                                                                                                                         |
+| `view-anchor/src/types.ts`         | Bounds, Placement, and forward/reverse anchor type contracts                                                                                                                                                                                 |
+| `view-anchor/src/view-anchor.ts`   | Forward anchor and explicit Placement logic                                                                                                                                                                                                  |
+| `view-anchor/src/size-anchor.ts`   | Reverse size flow from downstream content to host slots                                                                                                                                                                                      |
+| `docs/layout-architecture-demo.md` | Full minimal host example from section 4                                                                                                                                                                                                     |
+| `docs/foundation.md`               | Connection, Disposable, and Scope foundation                                                                                                                                                                                                 |
+| `docs/contracts/`                  | Following, commit/teardown, capability, and unified-lifetime contracts                                                                                                                                                                       |

@@ -2,7 +2,7 @@
  * Behavior tests for `ViewHandle` — the per-view orchestrator (keystone) —
  * the `createViewHandle()` contract implemented in `./view-handle.js`.
  *
- * For THIS unit increment (view-handle.md「placeIn 与挂载」/「dispose（viewScope LIFO 序）」), a `ViewHandle` composes three
+ * For THIS unit increment (view-handle.md "placeIn and mounting" / "dispose (viewScope LIFO order)"), a `ViewHandle` composes three
  * INJECTED primitives and nothing else (no deck-app, no Electron):
  *   - a `NativeView` (its `ref` + a `setBounds` sink) — the native surface;
  *   - a `Scope` — the handle's own lifetime, a CHILD of the target window scope;
@@ -22,7 +22,7 @@
  *      keep the native view alive); a later visible:true re-mounts + setBounds.
  *   5. dispose() = viewScope.close in A4 order: sink-disable (STEP0) runs BEFORE
  *      the native detach (STEP1) — handle owns detach FIRST so LIFO runs the
- *      sink-disable first, then detach (view-handle.md「dispose（viewScope LIFO 序）」).
+ *      sink-disable first, then detach (view-handle.md "dispose (viewScope LIFO order)").
  *   6. a late applyPlacement AFTER dispose is a NO-OP (idempotent late IPC: the
  *      sink must drop a place frame that arrives post-teardown).
  *   7. detach during dispose is silent on a destroyed host (the removals-only
@@ -57,11 +57,11 @@ interface PlaceTarget {
 interface ViewHandle {
 	placeIn(target: PlaceTarget, opts: { zone?: number }): ViewHandle
 	applyPlacement(p: Placement): boolean
-	// view-handle.md「moveTo 跨窗迁移」/ compositor-and-teardown.md「moveTo 事务状态机」:
+	// view-handle.md "moveTo cross-window migration" / compositor-and-teardown.md "moveTo transaction state machine":
 	// cross-window move, two independent Compositor
 	// commits guarded by a per-view migrationLock. Terminal (Promise<void>, not
 	// chainable). `rehome:true` re-parents the viewScope via Scope.adopt.
-	// moveTo 迁移显示而非寿命 RESOLUTION (pinned in the tests below): moveTo moves DISPLAY (and,
+	// Contract pinned below: moveTo moves DISPLAY (and,
 	// only with rehome:true, LIFETIME) — it does NOT carry capability grants.
   moveTo(
     dest: PlaceTarget,
@@ -575,29 +575,29 @@ describe('KA-5 [NEW PIN] — a throwing detach skips destroy (combined disposer)
 })
 
 // ═════════════════════════════════════════════════════════════════════════════
-// createViewHandle — moveTo (cross-window, view-handle.md「moveTo 跨窗迁移」)
+// createViewHandle — moveTo (cross-window, view-handle.md "moveTo cross-window migration")
 //
 // `moveTo(dest, { zone, rehome? }): Promise<void>` moves a view that is
 // currently placed in `src` to `dest` (another { compositor, windowScope }
 // target) as TWO independent Compositor commits guarded by a per-view async
-// mutex (migrationLock), driving the「moveTo 事务状态机」state machine:
+// mutex (migrationLock), driving the "moveTo transaction state machine":
 //
 //     AT_SRC → DETACHED → AT_DEST                 (happy path)
 //            └→ (src.commit throws) → AT_SRC       (idempotent failure, rethrow)
 //     DETACHED → (dest.commit throws) → ROLLBACK → AT_SRC   (rethrow dest error)
 //                                                └→ CLOSED   (src re-mount ALSO throws)
 //
-// moveTo 迁移显示而非寿命 RESOLUTION (DECISION pinned here as a contract comment, asserted
+// Contract: moveTo migrates display and only optionally lifetime (asserted
 // indirectly by test 6): moveTo moves DISPLAY (the compositor token) and, only
 // when `rehome:true`, LIFETIME (via `srcWindowScope.adopt(viewScope,
 // destWindowScope)`). It does NOT carry capability grants — the dest window's
 // own control layer issues its own grant. No test here mounts/asserts a grant
 // transfer, BECAUSE moveTo must not touch grants (the decision is "out of
-// scope" by construction). See view-handle.md「moveTo 迁移显示而非寿命」.
+// scope" by construction). See view-handle.md "moveTo migrates display rather than lifetime".
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Flaky compositor wrapper (mirrors compositor.test.ts's makeFlakyHost / the
-//    compositor-and-teardown.md「commit 精确失败语义」pattern): wrap a REAL compositor so a chosen commit() call throws a
+//    compositor-and-teardown.md "precise commit failure semantics" pattern): wrap a REAL compositor so a chosen commit() call throws a
 //    CommitError, letting us drive each state-machine edge. `failCommitOn(nth)`
 //    makes the Nth commit() invocation throw; subsequent commits succeed (so a
 //    ROLLBACK re-mount on the same compositor can still land). `failCommitAll`
@@ -622,7 +622,7 @@ function makeFlakyCompositor(
 			count++
 			if (armedAll || count === armedNth) {
 				// A typed CommitError, exactly what the real commit throws and what the
-				// moveTo state machine consumes (compositor-and-teardown.md「commit 的可回滚保证」).
+				// moveTo state machine consumes (compositor-and-teardown.md "commit rollback guarantee").
 				throw new CommitError({
 					kind: 'apply-failed',
 					applied: 'partial',
@@ -692,7 +692,7 @@ describe('createViewHandle — moveTo (cross-window, moveTo cross-window migrati
 
 		await expect(handle.moveTo(dest, { zone: 0 })).resolves.toBeUndefined()
 
-		// View left src, landed in dest (two independent commits, moveTo 事务状态机).
+		// View left src, landed in dest (two independent commits, moveTo transaction state machine).
 		expect(srcHost.ids()).not.toContain('v1')
 		expect(destHost.ids()).toContain('v1')
 

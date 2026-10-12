@@ -1,5 +1,5 @@
 /**
- * Contract spec — pure index换算 from a tab strip's visible-tab drop index to a
+ * Contract spec — pure index conversion from a tab strip's visible-tab drop index to a
  * `movePanel` insertion index.
  *
  * `computeReorderIndex` reports the count of VISIBLE-tab midpoints the pointer

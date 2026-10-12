@@ -1,5 +1,5 @@
 /**
- * `ViewHandle` — the per-view orchestrator (view-handle.md「placeIn 与挂载」/「dispose（viewScope LIFO 序）」/「moveTo 跨窗迁移」). One handle
+ * `ViewHandle` — the per-view orchestrator (view-handle.md "placeIn and mounting" / "dispose (viewScope LIFO order)"/"moveTo cross-window migration"). One handle
  * owns ONE native view and threads it through a window's z-planner. It composes
  * three INJECTED primitives and nothing else (no deck-app, no Electron):
  *   - a {@link NativeView} (its `ref` + a `setBounds` sink) — the native surface;
@@ -12,16 +12,16 @@
  * (scope.ts cross-layer LIFO): the native view is detached and the placement
  * sink goes inert.
  *
- * handle 直接驱动 bounds. The handle drives `setBounds` DIRECTLY on its native view; the
+ * The handle drives `setBounds` DIRECTLY on its native view; the
  * Compositor stays a pure z-order planner (mount/unmount/commit only) and never
  * sees geometry.
  *
- * per-window teardown 顺序 (view-handle.md「dispose（viewScope LIFO 序）」). The viewScope owns the native detach
+ * Per-window teardown order (view-handle.md "dispose (viewScope LIFO order)"). The viewScope owns the native detach
  * FIRST and the sink-disable LAST, so LIFO teardown runs the sink-disable
  * (STEP0) BEFORE the detach (STEP1): a late `place` frame can never drive a
  * native effect on a half-torn-down view.
  *
- * Cross-window move (view-handle.md「moveTo 跨窗迁移」/ compositor-and-teardown.md「moveTo 事务状态机」). {@link ViewHandle.moveTo}
+ * Cross-window move (view-handle.md "moveTo cross-window migration" / compositor-and-teardown.md "moveTo transaction state machine"). {@link ViewHandle.moveTo}
  * migrates the view to another `{ compositor, windowScope }` as TWO independent
  * Compositor commits, guarded by a per-view async mutex (THE migrationLock —
  * each handle is one view). The current placement is a MUTABLE token so the
@@ -49,9 +49,9 @@ export interface Bounds {
 export type Placement = { visible: true; bounds: Bounds } | { visible: false }
 
 /** The native surface a handle drives: its z-order identity (`ref`) plus the
- *  `setBounds` sink the handle calls directly (handle 直接驱动 bounds). `destroy` (optional)
+ *  `setBounds` sink the handle calls directly. `destroy` (optional)
  *  destroys the backing native view (its WebContents) — owned by the viewScope so
- *  it runs on teardown AFTER the detach (keepAlive「保活寿命归 Scope、淘汰策略归 host」lifetime/leak fix).
+ *  it runs on teardown AFTER detach. Scope owns keep-alive lifetime; the host owns eviction policy.
  *  Optional so fakes that don't model a native WebContents stay valid.
  *
  *  `webContents` / `capturePage` (optional) expose the backing native view's
@@ -85,7 +85,7 @@ export interface ViewHandle {
    *  native view alive. */
   applyPlacement(p: Placement): boolean
   /**
-   * Cross-window move (view-handle.md「moveTo 跨窗迁移」/ compositor-and-teardown.md「moveTo 事务状态机」). Migrate the view from its
+   * Cross-window move (view-handle.md "moveTo cross-window migration" / compositor-and-teardown.md "moveTo transaction state machine"). Migrate the view from its
    * current placement (`src`) to `dest` as TWO independent Compositor commits,
    * serialized by a per-view async mutex (migrationLock):
    *
@@ -306,7 +306,7 @@ export function createViewHandle(deps: ViewHandleDeps): ViewHandle {
       // Adopt landed: the viewScope's lifetime now lives under dest's windowScope.
       owningWindowScope = dest.windowScope
     }
-    // moveTo 迁移显示而非寿命: moveTo does NOT touch capability grants — the dest window's control
+    // moveTo migrates display; lifetime moves only with rehome:true. It does NOT touch capability grants — the dest window's control
     // layer issues its own. Out of scope by construction.
   }
 
@@ -385,7 +385,7 @@ export function createViewHandle(deps: ViewHandleDeps): ViewHandle {
         // geometry (avoids the attach-then-resize flicker the reconciler's op order
         // is built to prevent). setBounds on a not-yet-attached native view is
         // valid; when already mounted it's a plain resize and the mount is a no-op.
-        // handle 直接驱动 bounds — bounds go straight to the native view, not the compositor.
+        // handle drives bounds directly — bounds go straight to the native view, not the compositor.
         nativeView.setBounds(p.bounds)
         ensureMounted()
         // Track the live on-screen rect for bounds(). Copy so a later caller

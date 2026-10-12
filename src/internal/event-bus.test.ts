@@ -121,7 +121,7 @@ describe('EventBus', () => {
 		expect(listenerB).not.toHaveBeenCalled()
 	})
 
-	// 重入守护。listener 内同步再 publish 同一 event 不能死循环。
+	// Reentrancy guard: synchronously republishing the same event inside a listener must not loop forever.
 	it('reentrant publish on same channel within a listener is dropped + logged', () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 		try {
@@ -132,7 +132,7 @@ describe('EventBus', () => {
 				if (count < 5) bus.publish('looper', { round: count })
 			})
 			bus.publish('looper', { round: 0 })
-			// 第一次 publish 跑 listener (count=1)，listener 内 publish 被 drop。
+			// The first publish calls the listener once (count=1); its nested publish is dropped.
 			expect(count).toBe(1)
 			expect(errorSpy).toHaveBeenCalled()
 		}

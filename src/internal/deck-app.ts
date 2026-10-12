@@ -62,42 +62,41 @@ const DEFAULT_MAIN_WIDTH = 1024
 const DEFAULT_MAIN_HEIGHT = 768
 
 /**
- * Optional dependencies for {@link DeckApp} —— 用于注入真 (或
- * mock) Electron `ipcMain` + trusted webContents 集合，让 framework 接通跨进程
- * wire transport。不注入则保持 main-internal-only 行为。
+ * Optional dependencies for {@link DeckApp}. Inject real (or mocked) Electron
+ * `ipcMain` and trusted webContents so the framework can use cross-process wire transport.
+ * Without them, it remains main-process-internal only.
  *
  * @internal
  */
 export interface DeckAppOptions {
 	readonly wireTransport?: {
 		readonly ipcMain: MinimalIpcMain
-		/** 默认返回 framework 内部维护的 trusted set（由 windows.trust 填）。 */
+		/** Defaults to the framework-maintained trusted set, populated by windows.trust. */
 		readonly trustedWebContents?: () => readonly MinimalWebContents[]
-		/** 自定义 senderPolicy（默认按 trusted set 判断）。 */
+		/** Override senderPolicy; defaults to checking membership in the trusted set. */
 		readonly senderPolicy?: SenderPolicy
 	}
 	/**
-	 * 注入真 (或 fake) Electron `BrowserWindow` / `WebContentsView`
-	 * 构造器；提供后 framework 会装配 mainWindow，否则保持 electron-unavailable 行为。
+	 * Inject real (or fake) Electron `BrowserWindow` / `WebContentsView` constructors.
+	 * When supplied, the framework assembles mainWindow; otherwise Electron remains unavailable.
 	 */
 	readonly electron?: MinimalElectron
 	/**
-	 * 领域 backend。提供后 framework 在 whenReady 前跑 `beforeReady`，
-	 * 在 setup 阶段跑 `assemble(runtime)`。不提供则退化为纯框架（桩 context，
-	 * 仅测试/演示用）。
+	 * Domain-specific backend. When supplied, the framework runs `beforeReady` before whenReady
+	 * and `assemble(runtime)` during setup. Without it, the framework uses a stub context for tests and demos.
 	 */
 	readonly backend?: RuntimeBackend
 }
 
 /**
  * Internal record for replaying window-created events into setup-time listeners:
- * bind 期间 ctor 已经完成时，setup 还没机会订阅；framework 缓存
- * baseline window-created 事件，setup 期间第一个 listener 注册时一次性消费
- * 整个队列（splice 0）。后续 listener 注册时队列已空，不重复 replay。
+ * If construction completes during bind, setup has not yet subscribed. The framework buffers
+ * baseline window-created events; the first setup listener drains the queue once with splice(0).
+ * Later listeners find it empty and receive no replay.
  *
- * **限制（CONTRACT）**：host 若在 setup 内注册多个 'window-created' listener，
- * 只有第一个会拿到 baseline replay；其它 listener 仅接收 runtime.windows.create()
- * 实时 emit。建议 host 用单一 listener 入口。
+ * **Constraint:** if host setup registers multiple 'window-created' listeners, only the first
+ * receives the baseline replay. Others receive only later runtime.windows.create() emissions.
+ * Hosts should use a single listener entry point.
  */
 interface PendingWindowCreated {
 	window: MinimalBrowserWindow
@@ -106,11 +105,9 @@ interface PendingWindowCreated {
 
 /**
  * Internal record for buffering load-failed events that fired before any
- * 'load-failed' listener was registered. bind 阶段
- * loadAssembledSources() 触发的 loadURL/loadFile 是异步，rejection 的 microtask
- * 可能在 setup callback 的 await 点之间先跑，listener 还没注册。framework 在
- * fwListeners 上无 'load-failed' listener 时把 payload push 进队列；第一个
- * listener 注册时 splice 消费整个队列重放。
+ * 'load-failed' listener was registered. During bind, loadAssembledSources() starts an
+ * asynchronous loadURL/loadFile; its rejection microtask can run between awaits in setup before
+ * a listener exists. The framework queues such payloads and the first listener drains them with splice(0).
  */
 interface PendingLoadFailed {
 	source: WebviewSource
@@ -138,9 +135,9 @@ export interface ViewSubstrate {
 }
 
 /**
- * Framework-internal "app" object —— `electronDeck(config)` 顶层入口的 plain-class
- * 形态，便于测试驱动 lifecycle 转换。加 wireTransport 注入
- * 后可接真 ipcMain；加 electron 注入后可装配 mainWindow。两者都不注入时退化为同进程内存 fake。
+ * Framework-internal plain-class form of the `electronDeck(config)` entry point, designed for
+ * lifecycle tests. wireTransport connects real ipcMain; electron assembles mainWindow. Without
+ * either injection, it acts as an in-memory same-process fake.
  *
  * @internal
  */
@@ -258,7 +255,7 @@ export class DeckApp {
 	 *  or un-adopted then re-adopted) never accumulates duplicate nav listeners. */
 	private readonly navHookBound = new WeakSet<MinimalWebContents>()
 	/**
-	 * slot-token registry (view-handle.md「slot-token 握手」/ capability-and-lifecycle.md「anchor slotToken 原子下发」):
+	 * slot-token registry (view-handle.md "slot-token handshake" / capability-and-lifecycle.md "anchor slotToken atomic delivery"):
 	 * each anchored `placeIn` mints an unguessable token bound to (viewId, slotId,
 	 * authorizedWcId, zone). The `__electron-deck:snapshot` apply path authorizes
 	 * each of the renderer's per-view tokens (token known AND authorized to the
@@ -362,7 +359,7 @@ export class DeckApp {
 		}
 		this.startCalled = true
 
-		// 校验在 lifecycle 转换之前；invalid config → reject，phase 不动
+		// Validate before changing lifecycle state: invalid config rejects without advancing the phase.
 		validateConfig(this.config)
 
 		// pre-ready + whenReady gate. Only runs when a real `app` surface is
@@ -498,7 +495,7 @@ export class DeckApp {
 	}
 
 	/**
-	 * @internal windows.trust() / framework 内部添加 trusted webContents.
+	 * @internal Add trusted webContents for windows.trust() or internal framework use.
 	 * Backend-owned / untracked-window fallback: there is no framework windowScope
 	 * for these (the backend manages their lifetime), so the trust lease is owned
 	 * by `rootScope` as an app-shutdown backstop. The backend still disposes the
@@ -902,7 +899,7 @@ export class DeckApp {
 		// framework's window. (`runtime.mainWindow` is unset under ownsWindows.)
 		if (this.options.backend?.ownsWindows) return
 
-		// mainWindow ── framework 不主动 load 内容，host 在 setup 里自管
+		// mainWindow: the framework does not initiate a load here; the host manages content in setup.
 		const appCfg = this.config.app ?? {}
 		const winCfg = appCfg.window ?? {}
 		// Only write keys that are actually defined: Electron distinguishes an
@@ -1086,7 +1083,7 @@ export class DeckApp {
 		})
 	}
 
-	/** 在 wireTransport.start 之后再 loadURL/loadFile，避免 preload 先于 ipcMain handler 注册触发 invoke。 */
+	/** Call loadURL/loadFile after wireTransport.start so preload cannot invoke before ipcMain handlers are registered. */
 	private loadAssembledSources(): void {
 		// config.app.source: auto-load the framework-built main window.
 		// `this.mainWindow` is null under an `ownsWindows:true` backend
@@ -1118,8 +1115,9 @@ export class DeckApp {
 	}
 
 	/**
-	 * D1 fix: load-failed 在 listener 注册之前到达时 buffer 到 pendingLoadFailed；
-	 * 第一个 listener 注册时 splice 消费整个队列。已有 listener 时直接 emit。
+	 * Buffer load-failed payloads in pendingLoadFailed until a listener exists.
+	 * The first listener drains and receives the entire queue via splice(0).
+	 * If listeners already exist, emit directly.
 	 */
 	private surfaceLoadFailed(source: WebviewSource, error: unknown): void {
 		const listeners = this.fwListeners.get('load-failed')
@@ -1147,7 +1145,7 @@ export class DeckApp {
 		//  - OVERRIDE: the consumer takes full authority for whatever it overrides.
 		//    A custom `trustedWebContents` becomes the membership source for fanout
 		//    AND (when no explicit `senderPolicy` is given) the gate derives from
-		//    that SAME closure — so policy and fanout stay同源 on the override side
+		//    that SAME closure — so policy and fanout share one source on the override side
 		//    too, never one-from-trustSet / one-from-closure. A custom `senderPolicy`
 		//    replaces the gate outright. The internal `trustSet` is simply not the
 		//    authority on the override branch (`windows.trust()` writes it but the
@@ -1697,7 +1695,7 @@ export class DeckApp {
 			this.lifecycle.enter('drain')
 			this.lifecycle.enter('cleanup')
 		} else {
-			// 紧急 shutdown（尚未到 ready）
+			// Emergency shutdown (not ready yet)
 			this.lifecycle._force('cleanup')
 		}
 
@@ -1842,9 +1840,8 @@ export class DeckApp {
 			return this.windowRegistrations.get(this.mainControlWc)?.deckWindow ?? null
 		}
 		const emitPendingFor = (event: keyof FrameworkEvents): void => {
-			// 消费式 splice(0)：第一个 listener 注册时 drain 全队列，后续 listener
-			// 注册时队列空，不重复 replay（D2 修复：避免 isFirst && inSetupPhase
-			// 多次回放同一份 baseline）。
+			// splice(0) consumes the queue: the first listener drains it; later listeners find it empty.
+			// This prevents isFirst && inSetupPhase from replaying the same baseline repeatedly.
 			if (event === 'window-created') {
 				if (this.pendingWindowCreated.length === 0) return
 				const queue = this.pendingWindowCreated.splice(0)
@@ -2000,9 +1997,9 @@ export class DeckApp {
 						if (wc && !wc.isDestroyed()) wc.close?.()
 					})
 				}
-				// keepAlive「保活寿命归 Scope、淘汰策略归 host」: destroy the backing WebContents (guarded -> idempotent,
-				// never double-closed) so a view's
-				// renderer for the app's life on detach.
+				// keepAlive: Scope owns lifetime; the host owns eviction policy. Closing the
+				// backing WebContents prevents a detached view from leaking its renderer for
+				// the app's lifetime. The guard makes repeated closes harmless.
 				const closeNativeWc = (): void => {
 					// `wc &&` guard (real-electron demo finding): a double-teardown
 					// (e.g. a session-bound view closed by both its session scope AND the
@@ -2284,7 +2281,7 @@ export class DeckApp {
 						// avoid double-handling + disposer accumulation on the long-lived
 						// rootScope.
 						disarmRootClose()
-						// slot-token (view-handle.md「slot-token 握手」): an anchored placeIn binds a DOM
+						// slot-token (view-handle.md "slot-token handshake"): an anchored placeIn binds a DOM
 						// slot in the control wc to this native view. Mint an unguessable
 						// token, register it (authorized to that wc), and PUSH a slot-grant
 						// so the renderer learns (viewId, slotId, slotToken). The token is
@@ -2406,9 +2403,9 @@ export class DeckApp {
 							// below, so the rootScope guard is now redundant — disarm + drop it
 							// (no double-close, and no disposer left on the long-lived rootScope).
 							disarmRootClose()
-							// keepAlive「保活寿命归 Scope、淘汰策略归 host」: catch-all destroy for a NEVER-PLACED view (no
-							// viewScope ran the destroy own). Guarded -> a no-op when the
-							// viewScope already closed the wc (never double-closed).
+							// keepAlive: Scope owns lifetime; the host owns eviction policy. Close a
+							// never-placed view whose WebContents was not closed by a viewScope.
+							// The guard makes this a no-op if the viewScope already closed it.
 							closeNativeWc()
 							placedSubstrate?.unregisterView(viewId)
 						} finally {
@@ -2495,11 +2492,10 @@ export class DeckApp {
 				}
 				const cast = listener as unknown as (payload: unknown) => void
 				set.add(cast)
-				// bind 期间已发生的 baseline 事件
-				// （window-created / load-failed）在第一个 listener 注册时
-				// 一次性消费式 replay。后续 listener 注册时队列空，no-op。
-				// 不再检查 inSetupPhase：host 在 ready 之后注册的 first listener
-				// 仍可拿到尚未被消费的 baseline（如果队列非空）。
+				// Replay buffered bind-time events (window-created / load-failed) once when
+				// the first listener registers; later listeners find the queue empty.
+				// Do not require inSetupPhase: a first listener added after ready still
+				// receives the baseline if it has not yet been consumed.
 				if (isFirst) emitPendingFor(event)
 				const ref = set
 				return {

@@ -1,449 +1,359 @@
-# 统一生命周期 / 信任地基契约
+# Unified lifetime and trust foundation contract
 
-本文钉死寿命与信任的统一地基：Scope 树形状、wcScope/viewScope 兄弟拓扑、wcScope 创建时机、trust 写入收敛进 Scope、Connection 与 wcScope 的并存关系、grant 绑 generation、`WindowRecord`/`WcRecord` 数据结构、control-loss 裁决。它是一切壳（ViewHandle / capability grant / tab 保活）的地基——它们都假设「每个 control wc 有一个会随其销毁而 `closed` 的 Scope」。
+This document defines the shared foundation for lifetime and trust: the Scope tree, sibling wcScope/viewScope topology, when wcScope is created, Scope-owned trust writes, coexistence of Connection and wcScope, generation-bound grants, `WindowRecord`/`WcRecord` data structures, and the control-loss decision. ViewHandle, capability grants, and tab keep-alive all depend on this foundation: **every control wc has a Scope that becomes `closed` when that wc is destroyed**.
 
-关键文件：`deck-app.ts`（窗口创建 / trust / shutdown / runtime 工厂）、`trust-set.ts`（信任成员集）、`connection.ts`（per-wc `Connection` / `ConnectionRegistry`）、`scope.ts`（嵌套寿命 + 完成栅栏 + LIFO）、`control-bus.ts`（`command/event/trust` facade）。配套契约：`compositor-and-teardown.md`（per-window teardown 顺序 + `own()` LIFO）、`capability-and-lifecycle.md`（grant 闸 + slotToken + keep-alive）。
-
----
-
-## 0. 一套寿命语义
-
-寿命与信任收敛成**一套 `Scope` 语义**（嵌套 + 完成栅栏 + LIFO，唯一够表达「窗口 ⊃ wc ⊃ view ⊃ session」嵌套关系的）。否则散落成多套并行来源（窗口寿命 / 信任集 / 连接段寿命各自维护），「关一个窗 / 导航 / quit」要同时正确触动多套，漏一套 = 泄漏或 use-after-free。
-
-总裁决：
-
-- **统一记录 = 窗口 + 受信 wc 的两层结构**：每窗口一条 `WindowRecord{ windowScope }`；每个受信 wc 一条 `WcRecord{ wcScope, leases: Set<Lease> }`，**挂在该窗口的 windowScope 之下**。全局 `Map<WebContents, WcRecord>` 以 **wc 对象身份**为键（§8）。结构上 windowScope 下允许挂多个 wcScope 兄弟（一窗多 wc），但当前框架代码里每个窗口只会把自己的 control wc（`win.webContents`）admit 进信任集一次——没有其它代码路径为同一 windowScope 建第二个不同的 wcScope。`WcRecord.leases` 是 Set，是因为**同一个 wc** 可能被多次 admit（框架 auto-trust 建窗 + host 后续显式 `runtime.windows.trust()`），而非因为一窗挂了多个 wc。
-- **trustSet 保留**为 `isTrusted` / fanout 的底层成员表，但**写入它的寿命**（何时 admit、何时移除）由 wcScope `own()` 托管，不再手工增删。
-- **Connection 与 wcScope 并存**：`Connection`（connection.ts）是 `electron-deck/main` 的已发布 API，是扁平的 per-wc registry（`acquire(wc)` 返回绑了 webContents 的段寿命门面），被下游宿主广泛消费。wcScope 是框架的嵌套寿命原语（§1 树）。二者是并存的两套 per-wc 寿命机制：Connection 扁平、按 `wc.id` 索引、`wc.once('destroyed')` 自动 close；wcScope 嵌套、随 windowScope 级联（§5）。
+Key files: `deck-app.ts` (window creation, trust, shutdown, and runtime factory), `trust-set.ts` (trusted membership), `connection.ts` (per-wc `Connection` / `ConnectionRegistry`), `scope.ts` (nested lifetimes, completion fences, and LIFO), and `control-bus.ts` (`command/event/trust` facade). Companion contracts: `compositor-and-teardown.md` (per-window teardown and `own()` LIFO) and `capability-and-lifecycle.md` (grant gates, slotToken, and keep-alive).
 
 ---
 
-## 1. 统一 Scope 树形状
+## 0. One set of lifetime semantics
 
-### 1.1 ASCII 树
+Lifetime and trust converge on **one set of `Scope` semantics**: nesting, completion fences, and LIFO. This is the only available primitive that can express the nested “window ⊃ wc ⊃ view ⊃ session” relationship. Otherwise, window lifetime, trust membership, and connection-segment lifetime become parallel sources maintained separately. Closing a window, navigating, or quitting must update all of them correctly; missing any one causes a leak or use-after-free.
+
+Overall decisions:
+
+- **Unified records have two levels: windows and trusted wc**. Each window has a `WindowRecord{ windowScope }`; each trusted wc has a `WcRecord{ wcScope, leases: Set<Lease> }` **under that window's windowScope**. A global `Map<WebContents, WcRecord>` uses **wc object identity** as its key (§8). Structurally, windowScope supports multiple sibling wcScopes (multiple wc per window), but current framework code admits only the window's own control wc (`win.webContents`) once. No other code path creates a second distinct wcScope under the same windowScope. `WcRecord.leases` is a Set because **the same wc** can be admitted repeatedly (framework auto-trust at creation plus later explicit host `runtime.windows.trust()`), not because a window has multiple wc.
+- **trustSet remains** the underlying membership table for `isTrusted` / fanout. However, **the lifetime of its writes**—admission and removal—is managed by wcScope `own()`, rather than manual insertion/deletion.
+- **Connection and wcScope coexist**. `Connection` (`connection.ts`) is a published `electron-deck/main` API: a flat per-wc registry whose `acquire(wc)` returns a webContents-bound segment-lifetime facade, widely used by downstream hosts. wcScope is the framework's nested lifetime primitive (§1). Both are per-wc lifetime mechanisms: Connection is flat, keyed by `wc.id`, and automatically closes through `wc.once('destroyed')`; wcScope is nested and cascades with windowScope (§5).
+
+---
+
+## 1. Unified Scope tree
+
+### 1.1 ASCII tree
 
 ```
-rootScope                       ← 进程级（app 寿命）；deck-app 持有；quit 时 close()
-│  own: app-级 wire / ipcMain handler、app-级 registry 残留、trustSet 成员的
-│       「框架自持」那一份（见 §4）
+rootScope                       ← process-level (app lifetime); held by deck-app; close() on quit
+│  own: app-level wire / ipcMain handlers, remaining app-level registry resources,
+│       the framework-owned share of trustSet membership (see §4)
 │
-├── windowScope (主窗口)          ← 每个 BrowserWindow 一条 WindowRecord.windowScope
-│   │  own: () => win.destroy()  （teardown 契约：最先 own ⇒ LIFO 最后跑）
+├── windowScope (main window)    ← one WindowRecord.windowScope per BrowserWindow
+│   │  own: () => win.destroy()  (teardown contract: own first ⇒ LIFO runs last)
 │   │
-│   ├── wcScope (主控制 renderer)─┐  ← win.webContents 的寿命；WcRecord{ wcScope, leases }
-│   │   │                        │    与 viewScope 都是**兄弟**
-│   │   │  own: leases (Set)      │    （不同 webContents；§2 论证 sibling）
-│   │   │  own: () => wire.dispose()（teardown 契约）
-│   │   │  on('reset'|'closed')   │  ← capability 契约的 grant 若绑这里则自动撤（§7）
+│   ├── wcScope (main control renderer)─┐ ← win.webContents lifetime; WcRecord{ wcScope, leases }
+│   │   │                              │   sibling of viewScope
+│   │   │  own: leases (Set)            │   (different webContents; sibling argument in §2)
+│   │   │  own: () => wire.dispose()    │   (teardown contract)
+│   │   │  on('reset'|'closed')         │ ← grants bound here revoke automatically (§7)
 │   │   │
-│   │   └── (导航软复用 = wcScope.reset()：换段，wcScope 对象存活，generation++)
+│   │   └── (navigation soft reuse = wcScope.reset(): new segment, same object, generation++)
 │   │
-│   ├── viewScope*  ────────────────  ← 每个原生 WebContentsView 一条（可多个）
-│   │   │                              与 wcScope **兄弟**（独立 webContents、
-│   │   │  own: () => compositor.detach(viewId)（teardown 契约）
-│   │   │  own: () => anchorSink.dispose()（teardown 契约：最后 own ⇒ 最先跑）
-│   │   │  own: nativeView 持有 / keep-alive 的 WebContents（capability 契约「保活寿命归 Scope、淘汰策略归 host」）
-│   │   └── 随窗口死（windowScope.close 级联），也可单独 close（关一个 view）
+│   ├── viewScope*  ────────────────────  ← one per native WebContentsView (possibly many)
+│   │   │                                  sibling of wcScope (independent webContents)
+│   │   │  own: () => compositor.detach(viewId) (teardown contract)
+│   │   │  own: () => anchorSink.dispose() (teardown contract: own last ⇒ run first)
+│   │   │  own: retained nativeView / keep-alive WebContents
+│   │   │       (capability contract: Scope owns lifetime; host owns eviction policy)
+│   │   └── closes with windowScope.close, or independently to close one view
 │   │
-│   └── sessionScope*  ─────────────  ← 项目会话（= 现 layout demo 的 main.scope.child）
-│       │  own: 会话寿命资源（per-app-session 绑定）
-│       └── 关项目 = sessionScope.close()；切项目 = reset()
+│   └── sessionScope*  ─────────────────  ← project sessions (= main.scope.child in layout demo)
+│       │  own: session-lifetime resources (per-app-session bindings)
+│       └── close project = sessionScope.close(); switch project = reset()
 │
-└── windowScope (popout 窗口)      ← popout / declared window，同结构
-    └── wcScope / viewScope* / sessionScope*  …（与主窗同形，独立子树；每窗恒一个 wcScope）
+└── windowScope (popout window)  ← popout / declared window; same structure
+    └── wcScope / viewScope* / sessionScope* … (independent subtree; always one wcScope per window)
 ```
 
-windowScope 下当前恒挂**一个** wcScope（该窗自己的 control wc）；viewScope* 与它平级兄弟（可有多个原生 view）。`WcRecord` 是独立于 `WindowRecord` 的记录、挂在 windowScope 之下，结构上不禁止未来出现第二个兄弟 wcScope，但目前没有代码路径会为同一窗口建第二个不同的 wc。
+Each windowScope currently has **one** wcScope for its own control wc; viewScope* are siblings at the same level (potentially multiple native views). `WcRecord` is separate from `WindowRecord` and lives under windowScope. The structure permits a second sibling wcScope in the future, but no current code path creates a second distinct wc for one window.
 
-**注**：`viewScope` 画成 windowScope 的直接子、与 wcScope 平级；当一个 view 属于
-某个会话时，可改挂 `sessionScope` 之下（`windowScope.child()` vs
-`sessionScope.child()` 由 host 装配决定）。树的**结构由 host 装配时选择父 Scope**，
-框架只保证「父 close → 子级联」。
+**Note**: the diagram places viewScope directly under windowScope, as wcScope's sibling. A view belonging to a session may instead live under `sessionScope`: the host chooses `windowScope.child()` or `sessionScope.child()` during assembly. **The host chooses the tree structure by selecting the parent Scope**; the framework only guarantees “parent close → cascade to children.”
 
-### 1.2 与兄弟契约的对齐
+### 1.2 Alignment with companion contracts
 
-- teardown 契约（compositor-and-teardown.md）的 **window-scope = 本文 windowScope**；其
-  `own()` LIFO 编码（`win.destroy()` 最先 own、anchor sink dispose 最后 own）落在
-  windowScope + viewScope 上，本文不重述、直接复用。
-- capability 契约（capability-and-lifecycle.md）要的 **「control wc 的 Scope」= 本文
-  wcScope**；grant 若把 `senderScope` 绑到 wcScope，就能复用它的 `on('reset'|'closed')`
-  自动撤销（§7）。它点名的「per-wc Scope 与 trustSet+trackedWindows 两套并行打架」问题，
-  由本文 §3/§4 的收敛消解。
+- The teardown contract's **window-scope is this document's windowScope**. Its `own()` LIFO encoding (`win.destroy()` registered first, anchor sink disposal last) applies across windowScope and viewScope; this document reuses that contract without redefining it.
+- The capability contract's **“Scope of the control wc” is wcScope**. A grant binding `senderScope` to wcScope can reuse `on('reset'|'closed')` for automatic revocation (§7). Its concern about parallel per-wc Scope and trustSet+trackedWindows mechanisms is resolved by the convergence in §3/§4.
 
 ---
 
-## 2. wcScope 与 viewScope 为何是**兄弟**而非父子
+## 2. Why wcScope and viewScope are siblings, not parent and child
 
-wcScope（控制 renderer 的寿命）与 viewScope（原生 view 的寿命）是**兄弟**——同属 windowScope，彼此不是父子。论证：
+wcScope (control-renderer lifetime) and viewScope (native-view lifetime) are **siblings** under windowScope; neither is the other's parent:
 
-1. **不同 webContents、独立销毁**：控制 renderer 是一个 webContents（主窗的
-   `win.webContents`）；每个原生 view 是另一个 webContents
-   （`WebContentsView.webContents`）。一个销毁不蕴含另一个销毁——可以关掉某个原生
-   view 而控制 renderer 还活着（compositor-and-teardown.md 的 `unmount`），也可以控制
-   renderer 导航（wcScope.reset）而原生 view 不动。若做成父子（viewScope =
-   wcScope.child），**wcScope.reset() 会级联把所有 view 也拆掉**（reset 是「dispose
-   当前段，含子 scope」，scope.ts 经 disposeSegment children-first），这与「导航不重建
-   原生 view」相悖。
+1. **Different webContents, independent destruction**. The control renderer is one webContents (`win.webContents`); each native view has another (`WebContentsView.webContents`). Destroying one does not imply destroying the other. A native view can close while the control renderer remains alive (`unmount` in compositor-and-teardown.md); the control renderer can navigate (wcScope.reset) without changing native views. If `viewScope = wcScope.child()`, **wcScope.reset() would cascade teardown to all views**: reset disposes the current segment, including child scopes (`scope.ts` disposeSegment is children-first). That contradicts “navigation does not recreate native views.”
+2. **Both die with the window through a shared parent**. Closing the window destroys both because **they share windowScope**, whose close cascades to both siblings in LIFO order (`scope.ts`), **not** because one is the other's parent. A common parent expresses a shared window lifetime; sibling scopes express independence from each other.
+3. **Lifetime events do not interfere**. Grants bind to wcScope (the control renderer's generation); native-view anchor sinks bind to viewScope. A parent-child relation would let wcScope reset incorrectly trigger viewScope teardown, or vice versa, so navigation would revoke grants and also destroy views. Sibling topology keeps the two generation sequences **independent**.
 
-2. **都随窗口死，但通过共同父 windowScope**：两者确实都随窗口关闭而销毁——但这是
-   因为它们**共享父 windowScope**，windowScope.close() 级联拆两个兄弟（LIFO，
-   scope.ts），**不是**因为一个是另一个的父。共同父表达「同生共死于窗口」，
-   兄弟表达「彼此独立」——正是需要的语义。
-
-3. **生命周期事件互不串扰**：grant 绑 wcScope（控制 renderer 的 generation）；原生
-   view 的 anchor sink 绑 viewScope。若父子，wcScope 的 reset 会误触 viewScope 的
-   teardown（或反之），导致「导航时 grant 撤了、连带把 view 也拆了」这类越级联动。
-   兄弟拓扑让两条 generation 线**正交**。
-
-> **反例校验**：是否存在「view 必须先于 wc 死」的依赖，逼成父子？没有。view 的
-> 原生 detach（teardown 契约）需要 `win.contentView` 活，而 win 由 windowScope
-> 持有、在两个兄弟都拆完后才 destroy——所以「先拆 view 再 destroy win」由
-> **windowScope 内的 LIFO 注册序**保证（teardown 契约），不需要 viewScope 当 wcScope 的
-> 子来强加顺序。兄弟拓扑 + windowScope LIFO 已足够。
+> **Counterexample check**: does a dependency require views to die before wc, forcing a parent-child relation? No. Native-view detach needs a live `win.contentView`, and windowScope holds win until both siblings are torn down. **LIFO registration order within windowScope** guarantees detach before win destruction (teardown contract); viewScope need not be wcScope's child to impose that order. Sibling topology plus windowScope LIFO is sufficient.
 
 ---
 
-## 3. per-wc Scope（wcScope）的**创建时机**
+## 3. When per-wc Scope (wcScope) is created
 
-wcScope **在 wc 被窗口系统接纳 / 信任时建，不在 view 创建时建**。论证 + 确切创建点：
+Create wcScope **when the window system admits/trusts the wc, not when a view is created**. The rationale and exact creation points follow.
 
-### 3.1 为什么不能等 view
+### 3.1 Why creation cannot wait for a view
 
-控制 renderer 可以**没有任何原生 view**仍持有 grant / 能调特权 command（它是布局
-controller，view 是它要摆的东西，不是它存在的前提）。若等到第一个 view 创建才建
-wcScope，则「无 view 的控制 renderer」这段时间没有 wcScope 可挂——grant 无处绑、
-关窗时无 Scope 可 close、trust 无 Scope 托管。**安全洞**：capability 契约的 grant
-wc.id-复用安全依赖「grant 挂的 Scope 随 wc 销毁而 closed」，没 wcScope 就没这个保证。
+A control renderer can hold grants and invoke privileged commands **without any native views**. It controls layout; views are objects it places, not a prerequisite for its existence. Waiting for the first view would leave a viewless control renderer with no wcScope: nowhere to bind grants, no Scope to close on window shutdown, and no Scope owning trust. This is a **security gap**: the capability contract's wc.id-reuse safety depends on the grant's Scope becoming closed when wc is destroyed. Without wcScope, that guarantee is absent.
 
-### 3.2 确切创建点：**trust 时**（= 框架接纳该 wc 进信任集的那一刻）
+### 3.2 Exact creation point: trust admission
 
-把 wcScope 的创建**钉在「框架决定信任这个 wc」的同一处**——现有代码里就是
-`_trustWebContents(wc)` 被调用的每个点：
+Create wcScope **at the same point where the framework decides to trust wc**—every existing call site of `_trustWebContents(wc)`:
 
-| 现有 trust 点                   | 位置                                                    | 同点建 wcScope                                                                   |
-| ------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| 主窗 auto-trust                 | `deck-app.ts` `_trustWebContentsLike(main.webContents)` | 建主窗 windowScope.child() = wcScope；trustLease = wcScope.own(trustSet.add(wc)) |
-| declared / runtime window trust | `deck-app.ts` `constructWindow(...autoTrust)`           | 每个 declared/runtime 窗建 windowScope + wcScope                                 |
-| `runtime.windows.trust(win)`    | `deck-app.ts` / control-bus `trust(wc)`                 | host 显式 trust 一个 wc 时建/取其 wcScope                                        |
+| Existing trust point            | Location                                                | wcScope creation at the same point                                                      |
+| ------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Main-window auto-trust          | `deck-app.ts` `_trustWebContentsLike(main.webContents)` | Main window's windowScope.child() = wcScope; trustLease = wcScope.own(trustSet.add(wc)) |
+| Declared / runtime window trust | `deck-app.ts` `constructWindow(...autoTrust)`           | Create windowScope + wcScope for each declared/runtime window                           |
+| `runtime.windows.trust(win)`    | `deck-app.ts` / control-bus `trust(wc)`                 | Create or retrieve wcScope when the host explicitly trusts wc                           |
 
-**裁决：「trust ⟺ 有 wcScope」是不变量**。一个 wc 进信任集**当且仅当**它有一个
-活的 wcScope；trustLease 由该 wcScope `own()`。这把「信任成员资格」与「寿命」绑成
-一件事，消灭 trustSet 与寿命两套并行（§4）。
+**Decision: “trust ⟺ wcScope exists” is an invariant**. A wc enters trusted membership **if and only if** it has a live wcScope, which owns its trustLease. This combines membership and lifetime, eliminating parallel trustSet/lifetime management (§4).
 
-> **现状**：control-bus 的 `trust(wc, owner)`（control-bus.ts）直接委托
-> `trustSet.admit(wc, owner)`——`owner` 由调用方（想用这层的 host，在自己的
-> `backend.assemble` 里）显式传入，不经 deck-app 推导或代管；deck-app 自己的
-> trust 点（§3.2 表）走的是它自持的 `trustSet`，与某个 host 是否装配了
-> ControlBus 无关。见 §4.5。
+> **Current behavior**: control-bus `trust(wc, owner)` (`control-bus.ts`) delegates directly to `trustSet.admit(wc, owner)`. The caller—the host using this layer in its `backend.assemble`—provides `owner` explicitly; deck-app neither derives nor manages it. Deck-app's own trust points (the §3.2 table) use its own trustSet, independently of whether a host assembles ControlBus. See §4.5.
 
 ---
 
-## 4. trust 写入收敛进 Scope
+## 4. Scope-owned trust writes
 
-### 4.1 trust 写入的两个来源
+### 4.1 Two sources of trust writes
 
-- **框架 auto-trust**：装配窗口时框架信任其 control wc（主窗 / declared / runtime 窗）。
-- **host 显式 trust**：经 `runtime.windows.trust` / `ControlBus.trust(wc)`。
+- **Framework auto-trust**: window assembly trusts its control wc (main / declared / runtime windows).
+- **Explicit host trust**: through `runtime.windows.trust` / `ControlBus.trust(wc)`.
 
-两者都经唯一写入门 `trustSet.admit(wc, owner)`（§4.5），同一 wc 可被多份 lease 叠加 refcount。
+Both use the sole write entry point, `trustSet.admit(wc, owner)` (§4.5). Multiple leases can increment the refcount for the same wc.
 
-### 4.2 trustLease 由 wcScope `own()`，关窗只需 `wcScope.close()`
+### 4.2 wcScope owns trustLease; closing only needs wcScope.close()
 
 ```ts
-// 建 wcScope 时（§3.2 的每个 trust 点）：
-const trustLease = trustSet.admit(wc, wcScope) // refcount++，lease refcount-- 由 wcScope own
+// When creating wcScope (every trust point in §3.2):
+const trustLease = trustSet.admit(wc, wcScope) // refcount++; wcScope owns the lease's refcount--
 ```
 
-- **写入**：`admit` 让 trustSet refcount++（trustSet 仍是 `isTrusted`/fanout 的成员表），它返回的 refcount-- Disposable 由 wcScope `own()` 托管。
-- **移除**：无手工删除门。`wcScope.close()`（关窗级联，§6）LIFO 跑所有 own，包含这条 lease → `refcount--` → 归零 → trustSet 内部 `refs.delete(wc)`。
+- **Write**: `admit` increments trustSet's refcount. trustSet remains the `isTrusted`/fanout membership table; wcScope `own()` manages the returned refcount-decrementing Disposable.
+- **Removal**: there is no manual delete entry point. `wcScope.close()` (cascaded on window close, §6) runs all owned disposers in LIFO order, including the lease: `refcount--` → zero → internal trustSet `refs.delete(wc)`.
 
-### 4.3 窗死清理为何等价 + 更强
+### 4.3 Why window-death cleanup is equivalent and stronger
 
-trust 在窗死时必须被抹掉（窗口已关，残留 trust 不再需要，且 wc.id 复用安全要求关窗后 `isTrusted` 转假）。这由 `wcScope.close()` 的 LIFO 实现，无需「无视 refcount 直接抹」的特例——因为不存在「不被 wcScope own 的游离 lease」：框架自持的 lease 与 host `windows.trust` 加的 lease 都 own 到**同一个 wcScope**（§3.2）。
+Trust must disappear when a window dies: membership is no longer needed, and wc.id-reuse safety requires `isTrusted` to become false after close. wcScope.close's LIFO handles this without an “erase regardless of refcount” exception, because **no lease exists without wcScope ownership**. Framework-owned leases and host `windows.trust` leases all belong to **the same wcScope** (§3.2).
 
-- `wcScope.close()` 一次 LIFO dispose 掉该 wc 的全部 lease → refcount 归零 → `refs.delete`。
-- **更强**：保证所有 lease 的 Disposable 真跑（不只 map 删 key），避免 lease 持有者以为自己还信任。
-- **wc.id 复用安全**：close 后 refs 无该 wc，新窗口拿到同 wc.id 时 `isTrusted` 返回 false（trust-set 按 `.id` 扫 live keys）；且新窗口建**新 wcScope**（新 generation，§7），grant 也不继承。
+- One `wcScope.close()` disposes all that wc's leases in LIFO order → zero refcount → `refs.delete`.
+- **Stronger**: every lease Disposable actually runs, rather than merely deleting a map key, so lease holders cannot mistakenly think their trust remains active.
+- **wc.id-reuse safety**: refs no longer contains that wc after close. A new window receiving the same wc.id gets false from `isTrusted` (trust-set scans live keys by `.id`). It also gets a **new wcScope** (new generation, §7), without inheriting grants.
 
-### 4.4 `senderPolicy.isTrusted` 怎么从 Scope 树读
+### 4.4 How senderPolicy.isTrusted reads from the Scope tree
 
-`isTrusted(id)` 读 `trustSet`（成员真相表）。Scope 树只管**写入这张表的寿命**：
+`isTrusted(id)` reads `trustSet`, the authoritative membership table. The Scope tree only controls **the lifetime of writes to that table**:
 
-- `wireSenderPolicy.isTrusted(id)` → `trustSet.isTrusted(id)`，读路径不变。
-- 「Scope 树」与 `isTrusted` 的关系是**间接**的：wcScope 活着 ⟺ 它 own 的 trustLease 活着 ⟺ trustSet 里有该 wc ⟺ `isTrusted` 为真。wcScope.close ⟹ lease dispose ⟹ trustSet 删 ⟹ `isTrusted` 转假。**Scope 树是 trust 的寿命权威，trustSet 是 trust 的查询索引**——读写分离，互不替代。
+- `wireSenderPolicy.isTrusted(id)` → `trustSet.isTrusted(id)`; the read path is unchanged.
+- The relationship is **indirect**: live wcScope ⟺ live owned trustLease ⟺ wc present in trustSet ⟺ `isTrusted` true. wcScope.close ⟹ lease disposal ⟹ removal from trustSet ⟹ `isTrusted` false. **The Scope tree governs trust lifetime; trustSet is its query index**. Reads and writes are separate; neither replaces the other.
 
-闸层次（trust → main-frame → grant，见 `capability-and-lifecycle.md`）的第一道 `isTrusted` 读法不变；「何时不再 trusted」由 wcScope 寿命驱动。
+The first `isTrusted` gate in trust → main-frame → grant (`capability-and-lifecycle.md`) reads as before; wcScope lifetime determines when trust ends.
 
-### 4.5 trust writer 封口：读写分离 `TrustIndex` + `admit`-only writer
+### 4.5 Restricting trust writes: read-only TrustIndex and admit-only writer
 
-trust 集做读写分离，封住「漏走 wcScope.own 直接写一条游离 lease」这条单靠 code review 防不住的洞（游离 lease = 无 Scope 托管的永生 refcount → §4.3 等价性崩、安全洞）：
+Separate trust reads and writes to prevent direct writes that bypass wcScope.own. Code review alone cannot reliably prevent such unowned leases: an unowned lease has no Scope-managed disposal, leaving an immortal refcount, breaking §4.3 equivalence and creating a security gap.
 
 ```ts
-/** 只读查询索引。无任何写入门。 */
+/** Read-only query index, with no write entry points. */
 export interface TrustIndex {
 	isTrusted(id: number): boolean
 	snapshot(): readonly MinimalWebContents[]
 }
 
-/** admit-capable 写集：唯一写入门 admit 强制传 owner Scope——返回的 lease
- *  refcount-- 由 owner own，写入与寿命托管同一处发生，无法产出游离 lease。 */
+/** Writable trust set with admit as the only entry point, requiring an owner Scope.
+ *  The owner owns the lease's refcount decrement; admission and lifetime ownership
+ *  occur together, so no unowned lease can be produced. */
 export interface TrustSet extends TrustIndex {
 	admit(wc: MinimalWebContents, owner: Scope): Disposable
 }
 ```
 
-- **唯一写入门是 `admit(wc, owner)`**（trust-set.ts），强制传 owner Scope；lease 的 refcount-- 由 `owner` 托管，调用方拿不到「不被 own 的裸 lease」。§3.2 的每个 trust 点经 `admit(wc, wcScope)`；`ControlBus.trust(wc, owner)` 的 `owner` 由调用方直接传入（不经 deck-app 推导）——ControlBus 是独立工具，deck-app 不自动接线它。
-- **无 `add` / `deleteEntry` 公开写入门**：lease 全被 wcScope `own`，`wcScope.close()` 一次 LIFO 让 refcount 归零（§4.3），既等价旧的「窗死直抹」又**更强**（保证 lease disposer 真跑），无需无视 refcount 的逃生口。
+- **`admit(wc, owner)` is the only write entry point** (`trust-set.ts`), requiring an owner Scope. `owner` manages the lease's refcount decrement; callers cannot obtain an unowned raw lease. Every §3.2 trust point uses `admit(wc, wcScope)`. `ControlBus.trust(wc, owner)` receives `owner` directly from its caller, without deck-app deriving it: ControlBus is an independent utility that deck-app does not wire automatically.
+- **No public `add` / `deleteEntry` write entry points**. wcScope owns every lease; one `wcScope.close()` brings refcount to zero in LIFO order (§4.3). This is equivalent to the old immediate erase on window death and **stronger**, because every lease disposer runs. No refcount-bypassing escape hatch is needed.
 
 ---
 
-## 5. Connection 与 wcScope
+## 5. Connection and wcScope
 
-### 5.1 Connection 是已发布 API
+### 5.1 Connection is a published API
 
-`electron-deck/main` 导出 `createConnectionRegistry` /
-`Connection` / `ConnectionRegistry`（`src/main/index.ts`）。宿主主进程用它做
-「按 webContents 归属资源、按 webContents 死亡级联清理」，典型消费形态：
-`connections.acquire(wc).own(...)`，以及软复用路径上的
-`connections.reset(wc.id)`（pool 归还前清理会话寿命资源）。
+`electron-deck/main` exports `createConnectionRegistry` / `Connection` / `ConnectionRegistry` (`src/main/index.ts`). Host main processes use them to assign resources to webContents and cascade cleanup when webContents dies. Typical usage is `connections.acquire(wc).own(...)`, plus `connections.reset(wc.id)` on soft reuse to clean session-lifetime resources before pool return.
 
-它有**精心设计的 `own()` vs `on('reset'|'closed')` 语义**（foundation.md §3）：
-会话寿命资源 → `own()`（reset+close 都清）；wc 寿命资源 → `on('closed')`（跨会话存
-活，仅 wc 真销毁才撤，如「在外部编辑器打开」这类接线）。这套语义被生产依赖。
+Its **`own()` versus `on('reset'|'closed')` semantics are deliberate** (foundation.md §3): session-lifetime resources use `own()` (both reset and close clean them); wc-lifetime resources use `on('closed')` (survive sessions and revoke only on actual wc destruction, such as wiring for “open in an external editor”). Production consumers depend on these semantics.
 
-### 5.2 Connection 与 Scope 的关系
+### 5.2 Relationship between Connection and Scope
 
-Connection 是扁平的 per-wc registry，wcScope 是嵌套寿命原语。对照：
+Connection is a flat per-wc registry; wcScope is a nested lifetime primitive:
 
-| 维度        | Connection                                                       | Scope                                                           | 谁更一般                    |
-| ----------- | ---------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------- |
-| 嵌套        | ❌ 扁平（foundation.md「不嵌套」）                               | ✅ child/adopt                                                  | **Scope**                   |
-| 段寿命 own  | ✅                                                               | ✅                                                              | 平                          |
-| reset/close | ✅（同步换段，事件在 disposeAll **开始**时 emit，connection.ts） | ✅（**完成栅栏**：事件在 disposeAll **完成**后 emit，scope.ts） | **Scope**（更强：真等拆完） |
-| 键          | `wc.id`（registry 维护 Map）                                     | 无键（裸寿命段）                                                | Connection 多一层 wc-keying |
-| 终端钩子    | `wc.once('destroyed')` 自动 close                                | 无（由持有者显式 close）                                        | Connection 多一层 wc-绑定   |
+| Dimension            | Connection                                                                              | Scope                                                                           | More general                                    |
+| -------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Nesting              | ❌ Flat (foundation.md: no nesting)                                                     | ✅ child/adopt                                                                  | **Scope**                                       |
+| Segment-lifetime own | ✅                                                                                      | ✅                                                                              | Equal                                           |
+| reset/close          | ✅ Synchronous segment switch; events emit when disposeAll **starts** (`connection.ts`) | ✅ **Completion fence**: events emit after disposeAll **finishes** (`scope.ts`) | **Scope**: stronger, waits for complete cleanup |
+| Key                  | `wc.id` (registry maintains a Map)                                                      | No key (bare lifetime segment)                                                  | Connection adds wc-keying                       |
+| Terminal hook        | Automatically closes through `wc.once('destroyed')`                                     | None (owner closes explicitly)                                                  | Connection adds wc binding                      |
 
-Connection ≈ 绑了 webContents 的扁平 registry（「绑了 webContents 的段寿命」+「按
-id 索引的 registry」）；wcScope 是嵌套寿命原语。二者并存：Connection 按 `wc.id` 索引、
-`wc.once('destroyed')` 自动 close；wcScope 随 windowScope 级联（§6），事件走完成栅栏。
+Connection is approximately a flat registry bound to webContents: webContents-bound segment lifetime plus an id-indexed registry. wcScope is a nested lifetime primitive. They coexist: Connection indexes by `wc.id` and automatically closes on `wc.once('destroyed')`; wcScope cascades with windowScope (§6) and uses completion-fence events.
 
-### 5.3 怎么选
+### 5.3 Choosing between them
 
-| 你的场景                                | 用哪个       | 为什么                                                                         |
-| --------------------------------------- | ------------ | ------------------------------------------------------------------------------ |
-| 资源寿命 = 某个 webContents 的寿命      | `Connection` | `wc.once('destroyed')` 自动 close，不用自己挂钩子；`get(wc.id)` 能按 id 找回来 |
-| 同一个 webContents 会被换人复用（池化） | `Connection` | `reset(id)` 同步换段：旧段资源清掉，连接对象保留                               |
-| 需要父子嵌套／把子寿命交给另一个父      | `Scope`      | Connection 是扁平的，没有 child/adopt                                          |
-| 监听者必须在「已经拆干净」之后才动作    | `Scope`      | Scope 的事件是完成栅栏；Connection 的事件在 `disposeAll()` **开始时**就发了    |
-| 寿命不挂在任何 webContents 上           | `Scope`      | Connection 必须有一个 wc 才能 `acquire`                                        |
+| Scenario                                                          | Use          | Reason                                                                                               |
+| ----------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------- |
+| Resource lifetime equals a webContents lifetime                   | `Connection` | Automatic `wc.once('destroyed')` close; no custom hook needed; `get(wc.id)` retrieves it by id       |
+| A webContents is reused by another consumer (pooling)             | `Connection` | `reset(id)` switches segments synchronously, cleans old resources, and retains the connection object |
+| Parent-child nesting or moving a child lifetime to another parent | `Scope`      | Connection is flat, without child/adopt                                                              |
+| Listeners must act only after cleanup is complete                 | `Scope`      | Scope events are completion fences; Connection events emit when `disposeAll()` **starts**            |
+| Lifetime is not associated with webContents                       | `Scope`      | Connection requires a wc for `acquire`                                                               |
 
-**这两个不是历史遗留的重复品，是两种语义。** 本包内部全部走 `Scope`（deck-app / view-handle /
-trust-set / control-bus / capability）；`Connection` 是给宿主用的已发布 API，**在本包内没有调用点——
-这是预期状态，不是死代码信号**。同理 `debugTap`。改动或删除前先查下游消费者。
+**These express two different semantics, rather than redundant historical APIs.** All package-internal code uses `Scope` (deck-app / view-handle / trust-set / control-bus / capability). `Connection` is the published host API and **has no internal call sites by design; that does not make it dead code**. The same applies to `debugTap`. Check downstream consumers before changing or deleting them.
 
 ---
 
-## 6. 三种 teardown 共用一套
+## 6. Three teardown paths share one mechanism
 
-popout 窗口关 / 主窗口关 / 进程 quit，**都走 `Scope.close()` 级联**：
+Closing a popout, closing the main window, and quitting the process **all cascade through Scope.close()**:
 
 ```
-关 popout 窗：     该 popout 的 windowScope.close()
-                   → LIFO: viewScope*.close → wcScope.close（trustLease 释放 §4）
-                           → sessionScope*.close → 最后 win.destroy()（teardown 契约）
-                   （rootScope 不动；其它窗不动）
+Close popout:      its windowScope.close()
+                   → LIFO: viewScope*.close → wcScope.close (trustLease release, §4)
+                           → sessionScope*.close → win.destroy() last (teardown contract)
+                   (rootScope and other windows unchanged)
 
-关主窗：           主窗 windowScope.close()（同上序）
-                   → 触发 deck-app 的 app-级 shutdown（若主窗死 = app 退，配置驱动）
+Close main:        main windowScope.close() (same order)
+                   → deck-app app-level shutdown if configured so main-window death exits app
 
-进程 quit：        rootScope.close()
-                   → LIFO 级联所有 windowScope（每个走上面单窗序）
-                   → 最后 own 的 app-级 wire/registry（rootScope 直接 own 的）
+Process quit:      rootScope.close()
+                   → LIFO cascade through all windowScopes (each uses per-window order above)
+                   → app-level wire/registry owned directly by rootScope last
 ```
 
-### 6.1 「窗口先于 registry」由 rootScope 的 own 注册序自动成立
+### 6.1 rootScope registration order ensures windows precede registry
 
-shutdown 走 `rootScope.close()`：WireTransport / app-级 registry 在 registry 里，若窗还活着时先拆 registry，renderer teardown handler 会打到已移除的 ipcMain handler。所以「窗口先于 registry」必须成立，由 **rootScope 的 own 注册序**编码：
+Shutdown uses `rootScope.close()`. WireTransport / app-level registry resources live in the registry; disposing it while windows remain alive lets renderer teardown handlers call removed ipcMain handlers. **rootScope ownership registration** encodes the required “windows before registry” order:
 
 ```ts
-// rootScope 装配（注册序 = LIFO 运行序的逆序）：
-rootScope.own(() => appLevelRegistry.disposeAll()) // 最先 own ⇒ 最后跑（app registry 殿后）
-// 每个 windowScope = rootScope.child()，作为 child 在 rootScope 段里，
-// 按「children 先于 resources」LIFO ⇒ 所有 windowScope 先拆，app-级 registry 后拆。
+// Assemble rootScope (registration order reverses LIFO execution order):
+rootScope.own(() => appLevelRegistry.disposeAll()) // own first ⇒ run last (app registry last)
+// Each windowScope = rootScope.child(), a child in the rootScope segment.
+// Children-before-resources LIFO tears down all windowScopes before the app registry.
 ```
 
-- `compositor-and-teardown.md` 规定**单窗口内**的序（anchor dispose → detach → wire dispose → win.destroy）由 windowScope 的 own LIFO 编码。本文补的是**跨窗口 + app 级**的序：rootScope 的「children（所有 windowScope）先于 resources（app registry）」复刻「窗口先于 registry」，且每窗内部还有单窗内序。
-- `backend.onShutdown()` 必须在**任何**拆除前跑（host 的「我要存盘」钩子），所以它不进 rootScope.own（那是 LIFO 拆除项），而是在 `await rootScope.close()` **之前** await：`doShutdown = await backend.onShutdown() → await rootScope.close() → app.quit()`。
+- `compositor-and-teardown.md` encodes the **within-window** order (anchor dispose → detach → wire dispose → win.destroy) with windowScope own LIFO. This document adds the **cross-window and app-level** order: rootScope's children (all windowScopes) precede resources (app registry), preserving “windows before registry” alongside each window's internal order.
+- `backend.onShutdown()` must run **before any teardown**: it is the host's save hook. It therefore does not belong in rootScope.own, which contains LIFO teardown operations. Await it **before** `await rootScope.close()`: `doShutdown = await backend.onShutdown() → await rootScope.close() → app.quit()`.
 
-> **`onShutdown` 的位置细节**：它必须在**任何**拆除前跑（它是 host 的
-> 「我要存盘」钩子）。所以它不进 rootScope.own（那是 LIFO 拆除项），而是
-> `rootScope.close()` 的**调用方**在 `await rootScope.close()` **之前** await 它。
-> 即 `doShutdown = await backend.onShutdown() → await rootScope.close() → app.quit()`。
-> 框架对这个 await **没有超时**，需要限时的 host 自己在实现里用 `Promise.race`。
+> **onShutdown placement**: this host save hook must run **before any teardown**. Do not register it in rootScope.own. The **caller** of `rootScope.close()` awaits it **before** `await rootScope.close()`: `doShutdown = await backend.onShutdown() → await rootScope.close() → app.quit()`. The framework applies **no timeout** to this await; hosts requiring a limit implement it with `Promise.race` themselves.
 
-### 6.2 quit 与 will-quit 再入（保留现有防护）
+### 6.2 quit and will-quit reentry protection remains
 
-deck-app.ts 的 `quitInitiated` 防再入（will-quit 驱动的
-shutdown 不得再 `app.quit()`）**不变**——它是 app/进程层的事，与 Scope 收敛正交。
-rootScope.close() 完成后，`if (!quitInitiated) app.quit()` 逻辑照旧。
+The `deck-app.ts` `quitInitiated` guard remains **unchanged**: shutdown driven by will-quit must not call `app.quit()` again. This is an app/process concern independent of Scope convergence. After rootScope.close completes, retain `if (!quitInitiated) app.quit()`.
 
-### 6.3 close-decision 机（keep/close）保留
+### 6.3 Keep the keep/close decision state machine
 
-deck-app.ts 的主窗 `close` 决策机（preventDefault → 问 backend keep/close
-→ 只有 close 才 destroy）**不进 Scope**——它是「**要不要**关」的策略，Scope 管的是
-「关**的时候怎么拆**」。决策为 'close' 后才触发 `windowScope.close()`。两者分层：
-决策机在上（是否关），Scope 级联在下（怎么拆）。
+The main-window close decision in `deck-app.ts`—preventDefault → ask backend keep/close → destroy only on close—**does not move into Scope**. It decides **whether** to close; Scope defines **how** teardown proceeds once closing. Only a 'close' decision triggers `windowScope.close()`. The decision sits above the Scope cascade.
 
 ---
 
-## 7. grant 绑 generation
+## 7. Generation-bound grants
 
-capability 契约（`capability.ts`）的 grant registry 是通用机制：`issue(grant)` 订阅
-`grant.senderScope` 的 `on('reset'|'closed')` 自动撤；`senderScope` 由**调用方在构造
-Grant 时提供**，不是框架自动接的——deck-app.ts 已不再有 `runtime.grants` 那层便捷包装，
-不会替 host 把某个 control wc 的 wcScope 自动填进 Grant。
+The capability contract's grant registry (`capability.ts`) is general-purpose: `issue(grant)` subscribes to `grant.senderScope` `on('reset'|'closed')` for automatic revocation. **The caller provides senderScope when constructing Grant**; the framework does not wire it automatically. `deck-app.ts` no longer has a `runtime.grants` convenience wrapper and does not fill a control wc's wcScope into Grant for the host.
 
-- 若 host 把 Grant 的 `senderScope` 绑到该 wc 的 wcScope（§3 保证它存在 ⟺ 该 wc 被
-  trust），就复现同样的自动撤销：
-  - `off1 = wcScope.on('reset',  () => revoke(grant))` ← 导航软复用 → 旧授权失效。
-  - `off2 = wcScope.on('closed', () => revoke(grant))` ← 关窗销毁 → 失效。
-- **generation 不继承**（若按上面接线）：wc 销毁 → wcScope.close（§6）→ off2 触发 →
-  revoke。新窗口拿到同 wc.id → 建**新 wcScope**（§3.2 新 trust 点）→ **新 generation**，
-  旧 grant 早已 revoke，新 wcScope 上没有旧 grant。
-- **当前框架不自带这条接线**：deck-app.ts 没有把任一 wc 的 wcScope 作为公开句柄暴露给
-  host，所以要拿到上面这条 wc.id 复用安全，host 需要自己把 Grant 的 `senderScope` 绑到
-  一个与该 wc 生命周期同步的 Scope 上；`capability.ts` 的 registry 本身只保证「senderScope
-  死 → grant 必撤」，不替 host 决定 senderScope 绑谁。
+- If the host binds Grant's `senderScope` to that wc's wcScope (§3 guarantees it exists iff wc is trusted), automatic revocation follows:
+  - `off1 = wcScope.on('reset',  () => revoke(grant))`: navigation soft reuse invalidates the old authorization.
+  - `off2 = wcScope.on('closed', () => revoke(grant))`: window destruction invalidates it.
+- **Generations are not inherited** with that wiring: wc destruction → wcScope.close (§6) → off2 fires → revoke. A new window receiving the same wc.id creates a **new wcScope** at a new §3.2 trust point, with a **new generation**. The old grant is already revoked; the new wcScope has none of the old grants.
+- **The current framework does not provide this wiring**. `deck-app.ts` exposes no public wcScope handle for any wc. To obtain this wc.id-reuse safety, hosts must bind Grant's `senderScope` to a Scope synchronized with that wc's lifetime. The `capability.ts` registry only guarantees “senderScope dies → grant revokes”; it does not choose what senderScope represents.
 
-> 注意 senderScope 的 reset/close 事件时机：grant 订阅的是 **Scope 本体**的事件
-> （完成栅栏语义，scope.ts），**不是** Connection 门面的「开始时 emit」（§5）。revoke
-> 只是从 policy 活跃集移除（同步），不依赖资源拆净，所以两种时机都安全；但绑 Scope 本体
-> 事件更直接（grant 是寿命概念，不是 Connection 的会话段概念）。
+> The reset/close events subscribed to by grants are events of **Scope itself**, with completion-fence semantics (`scope.ts`), **not** Connection's start-of-disposal events (§5). Revoke only synchronously removes a grant from the active policy set and does not require complete resource cleanup, so either timing is safe. Scope events are the more direct binding: grants represent lifetime, rather than Connection session segments.
 
-### 7.1 control-loss 策略（裁决：连带关闭 windowScope）
+### 7.1 Control-loss policy: cascade close to windowScope
 
-**问题**：控制 wc 被销毁（崩溃 / `render-process-gone`，**非**正常导航/关窗）时——
-其**兄弟** viewScope（同窗的原生 view，§2 兄弟拓扑）该怎么办？两条路：
+**Problem**: if the control wc is destroyed through a crash / `render-process-gone`, **rather than** normal navigation or window close, what should happen to its **sibling** viewScopes (native views in the same window, §2)? Two options:
 
-- **(A) 冻结 viewScope**：保留最后一次 bounds、拒绝新布局命令、等控制层重建（新
-  generation 重放）后恢复。
-- **(B) 连带关闭 windowScope**：控制层没了，整窗 windowScope.close 级联拆掉 viewScope。
+- **(A) Freeze viewScope**: retain last bounds, reject new layout commands, and resume after rebuilding the control layer with new-generation replay.
+- **(B) Close windowScope as well**: loss of control triggers windowScope.close, cascading to viewScope.
 
-**裁决：(B) 连带关闭 windowScope。** 论证：
+**Decision: (B), close windowScope as well.** Rationale:
 
-1. **本契约的兄弟拓扑只表达「彼此独立销毁」，不表达「一方死另一方续命」**——
-   viewScope 没有自己的控制源，它的 bounds/layout **全部**来自控制 renderer 下发的
-   命令。控制 wc 一死，viewScope 进入「无人驾驶」：(A) 的「冻结+重放」需要一套
-   **generation 重放协议**（谁存最后命令、新控制层如何认领旧 view、bounds 漂移如何
-   对账），这套协议本契约**没有**、也不在地基范围内。无协议的「冻结」= 一个挂在死控制
-   层上、永远拒新命令的僵尸 view。
-2. **与 §3.1「控制 renderer 是 view 存在的前提」一致**：view 是控制层要摆的东西，
-   控制层是 view 的存在前提。前提没了，被摆的东西随之拆，语义自洽。
-3. **崩溃恢复 = 重建窗口（新 windowScope + 新 wcScope + 新 generation）**，而非
-   原地复活旧 view——这与 §7「wc.id 复用建新 wcScope、不继承旧 generation」同构，
-   实现上只有「整窗重建」一条路径，没有「半死窗口续命」的特例。
+1. **Sibling topology expresses independent destruction, not survival after the other sibling dies**. viewScope has no independent control source: **all** bounds/layout arrive from control-renderer commands. Losing control leaves it unmanaged. (A)'s freeze-and-replay needs a **generation replay protocol**: who stores the last command, how new control claims old views, and how bounds drift is reconciled. This contract **has no such protocol**, and it is outside the foundation's scope. Freezing without one leaves a zombie view attached to a dead control layer, permanently rejecting new commands.
+2. **Consistent with §3.1's control-renderer prerequisite**: views are what the control layer places; control is a prerequisite for views. When it disappears, its views are torn down as well.
+3. **Crash recovery rebuilds the window** with a new windowScope, wcScope, and generation, rather than reviving old views in place. This matches §7's new wcScope on wc.id reuse without inherited generations. There is one full-window rebuild path, without a special case that preserves a partly dead window.
 
-**触发点（裁决，尚未实现）**：connection.ts 现在只听 `wc.once('destroyed')`（硬销毁）。
-control-loss 要覆盖**崩溃**，需要监听 `render-process-gone`（控制 wc 的 webContents）
-→ 触发该 wc 所属窗口的 `windowScope.close()`（与正常关窗同一条级联，§6）——**这条监听
-目前在生产代码里不存在**。仓库内唯一的 `render-process-gone` 监听在
-`src/main/overlay-panel.ts`，处理的是坏掉的 overlay 视图本身，不是本节讨论的
-windowScope 级联，不能当作本裁决已落地的依据。
+**Trigger (decision, not yet implemented)**: `connection.ts` currently only listens to `wc.once('destroyed')` for hard destruction. To cover **crashes**, listen to `render-process-gone` on the control wc's webContents and call its window's `windowScope.close()`—the same cascade as normal close (§6). **Production code currently has no such listener**. The repository's only `render-process-gone` listener is in `src/main/overlay-panel.ts`; it handles the broken overlay view itself, not this windowScope cascade, so it does not establish that this decision is implemented.
 
-> **注意区分**：`destroyed` 是 wcScope 自己的终端钩子；`render-process-gone`
-> 是**控制层崩溃**，要上抛到 **windowScope.close**（拆整窗），不是只 close 该 wcScope
-> （只 close wcScope 会留下被冻结的兄弟 viewScope —— 正是 (A) 的僵尸态，已被否决）。
+> **Distinction**: `destroyed` is wcScope's own terminal hook. `render-process-gone` means **control-layer crash**, which must escalate to **windowScope.close** (tear down the whole window), rather than merely close wcScope. Closing only wcScope leaves frozen sibling viewScopes: option (A)'s rejected zombie state.
 
-> **范围**：此裁决针对该窗口自己的 control wc（驱动该窗布局的那个 renderer，
-> `win.webContents`）崩溃。当前框架里一个窗口只有这一个受信 wc，不存在「非主控制 wc」
-> 需要单独讨论；若未来出现第二个受信 wc，其崩溃是否连带关窗需另行裁决。
+> **Scope**: this decision concerns the window's own control wc (`win.webContents`), the renderer driving its layout. Current framework windows have only that one trusted wc, with no non-primary control wc to discuss. If a second trusted wc is added in the future, whether its crash closes the window requires a separate decision.
 
 ---
 
-## 8. 统一 `WindowRecord`（`trackedWindows` 的镜像 shadow map）
+## 8. Unified WindowRecord: a shadow map of trackedWindows
 
-### 8.1 TS 数据结构
+### 8.1 TypeScript data structures
 
-两层结构：`WindowRecord{ windowScope }`（每窗一条）+ `WcRecord{ wcScope, leases: Set<Lease> }`（每受信 wc 一条，含多条 lease），全局 `Map<WebContents, WcRecord>`（对象身份键）索引所有受信 wc。当前每个窗口只 trust 一个 wc（它自己的 control wc）。
+Two levels: one `WindowRecord{ windowScope }` per window and one `WcRecord{ wcScope, leases: Set<Lease> }` per trusted wc, containing multiple leases. A global `Map<WebContents, WcRecord>` indexes all trusted wc by object identity. Each current window trusts only its own control wc.
 
 ```ts
-/** 一条 trust lease：wc 进信任集的一份 refcount-- Disposable，由其 WcRecord 的
- *  wcScope own（§4.2）。一个 wc 可被多次 trust（框架 auto-trust + host
- *  windows.trust），故 leases 是 Set。 */
+/** One trust lease: a refcount-decrementing Disposable for one admission of wc,
+ *  owned by its WcRecord's wcScope (§4.2). A wc may be trusted repeatedly
+ *  (framework auto-trust plus host windows.trust), hence a Set of leases. */
 type Lease = Disposable
 
-/** 每个**受信 webContents** 一条。它的 wcScope 挂在该窗口的 windowScope 下，与
- *  viewScope 兄弟（§2）；当前每个窗口只有一条（它自己的 control wc）。 */
+/** One record per trusted webContents. Its wcScope is under its windowScope,
+ *  sibling to viewScope (§2); currently one per window, for its control wc. */
 interface WcRecord {
-	/** 该 wc 的寿命：windowScope.child()。与同窗其它 wcScope / viewScope 兄弟（§2）。
-	 *  own: leases（§4）+ wire dispose（teardown 契约）。导航软复用 = wcScope.reset()。
-	 *  grant 若把 senderScope 绑到这里，就用其 on('reset'|'closed')（§7）。 */
+	/** This wc's lifetime: windowScope.child(), sibling to other wcScopes/viewScopes (§2).
+	 *  Owns leases (§4) and wire disposal (teardown contract). Navigation soft reuse = wcScope.reset().
+	 *  Grants binding senderScope here use on('reset'|'closed') (§7). */
 	readonly wcScope: Scope
-	/** 该 wc 进信任集的全部 lease（≥1）；都由 wcScope own（§4.2）。窗死 =
-	 *  wcScope.close → LIFO dispose 全部 lease → trustSet refcount 归零删除
-	 *  （等价旧 deleteEntry，§4.3）。Set 而非单数：支持「框架 auto-trust + host
-	 *  windows.trust 同一 wc」多份 refcount。 */
+	/** All trust leases for this wc (≥1), owned by wcScope (§4.2). Window death =
+	 *  wcScope.close → LIFO disposal of every lease → trustSet refcount zero and deletion
+	 *  (equivalent to old deleteEntry, §4.3). Set, rather than singular, supports multiple
+	 *  refcounts from framework auto-trust plus host windows.trust on the same wc. */
 	readonly leases: Set<Lease>
 }
 
-/** 每个窗口一条。`deck-app.ts` 的 `trackedWindows: Set<MinimalBrowserWindow>` 仍然存在
- *  （现有代码路径依赖它），本结构是它的**镜像** shadow map、与其保持 lock-step，不是替代。
- *  它**不直接持** wcScope——窗口的各 wc 是 WcRegistry 里挂在 windowScope 下的兄弟。 */
+/** One record per window. deck-app.ts still retains trackedWindows: Set<MinimalBrowserWindow>,
+ *  required by existing code paths. This is a shadow map kept in lockstep, not a replacement.
+ *  It does not hold wcScope directly: the window's wc are siblings under windowScope in WcRegistry. */
 interface WindowRecord {
-	/** 该窗口的根寿命：rootScope.child()。close() 级联拆整窗（含其下全部 wcScope /
-	 *  viewScope，§6）。own: () => win.destroy()（最先 own ⇒ 最后跑，teardown 契约）。 */
+	/** Root lifetime for this window: rootScope.child(). close() tears down the whole window,
+	 *  including all wcScopes/viewScopes (§6). Owns () => win.destroy(), registered first
+	 *  to run last (teardown contract). */
 	readonly windowScope: Scope
-	// 注：wcScope / viewScope* / sessionScope* 不进 WindowRecord 字段——
-	//   · wcScope：每受信 wc 一条 WcRecord，由 WcRegistry（下）按 wc 索引；
-	//   · viewScope* / sessionScope*：windowScope.child()/sessionScope，各创建处持句柄。
-	// WindowRecord 只钉「每窗唯一」的一件：窗寿命 windowScope。
+	// wcScope / viewScope* / sessionScope* are not WindowRecord fields:
+	//   · wcScope: one WcRecord per trusted wc, indexed by WcRegistry below;
+	//   · viewScope* / sessionScope*: windowScope.child()/sessionScope; creators retain handles.
+	// WindowRecord defines only the one per-window lifetime: windowScope.
 }
 
-/** 受信 wc → WcRecord 的全局索引。键用 wc（对象身份）而非 wc.id——宿主与
- *  框架大量靠对象身份归属（foundation.md 明确「传 WebContents 句柄而非 number」）。
- *  一个窗口的多个受信 wc 都在此表，各自的 wcScope 都挂该窗 windowScope。 */
+/** Global trusted wc → WcRecord index, keyed by wc object identity, not wc.id.
+ *  Hosts and framework commonly use object identity for ownership (foundation.md:
+ *  pass WebContents handles, not numbers). Multiple trusted wc in one window all
+ *  live in this table, with each wcScope under that window's windowScope. */
 type WcRegistry = Map<MinimalWebContents, WcRecord>
 
-/** 窗口 → WindowRecord。键同样用 wc 对象身份（该窗的「主控制 wc」是天然键）。 */
+/** Window → WindowRecord, also keyed by wc object identity: its primary control wc is a natural key. */
 type WindowRegistry = Map<MinimalWebContents, WindowRecord>
-//   ↑ 与 `trackedWindows: Set<MinimalBrowserWindow>`（deck-app.ts）保持 lock-step 的镜像，非替代
+//   ↑ Shadow map kept in lockstep with trackedWindows: Set<MinimalBrowserWindow> (deck-app.ts), not a replacement
 ```
 
-> **键选 `MinimalWebContents` 还是 `windowId`**：选 **wc 对象身份**。理由：(1)
-> 框架与宿主已大量用对象身份比较（`page.renderWc !== sender`、
-> foundation.md）；(2) wc.id 会复用（trust-set.ts 关注点），对象身份不会；
-> (3) Connection registry 也按 wc 索引（acquire(wc)）。WcRegistry 以**每个受信 wc**
-> 的对象身份为键；WindowRegistry 以该窗「主控制 wc」为键，两者当前指向同一个 wc。多
-> view 的窗口里，viewScope 的原生 view wc **不进** WcRegistry（它们不是受信控制面
-> renderer，是 viewScope 句柄持有的被摆放对象）。
+> **Key choice: MinimalWebContents or windowId?** Use **wc object identity**. (1) Framework and host already compare object identity extensively (`page.renderWc !== sender`, foundation.md). (2) wc.id can be reused (`trust-set.ts` concern); object identity cannot. (3) Connection registry also uses wc for acquisition (`acquire(wc)`). WcRegistry keys **every trusted wc** by identity; WindowRegistry keys the primary control wc of each window. Currently these are the same wc. In a multi-view window, native-view wc from viewScope **do not enter WcRegistry**: they are objects being positioned, held by viewScope handles, not trusted control renderers.
 
-### 8.2 WindowRegistry 用法
+### 8.2 WindowRegistry usage
 
-- 建窗：建 `WindowRecord{ windowScope }` 入 WindowRegistry；同点为该窗的 control wc 建 `WcRecord` 入 WcRegistry。
-- 子窗关：`registry.delete(wc)`（在 windowScope.close 的 own 里 / closed 钩子）。
-- shutdown：`rootScope.close()` 级联各 windowScope（每个 own 了 win.destroy），不遍历 destroy。
-- `runtime.windows.all()`：遍历 `registry.values()` 取 live win。
+- Create window: insert `WindowRecord{ windowScope }` into WindowRegistry; at the same point, create a `WcRecord` for the control wc and insert it into WcRegistry.
+- Close child window: `registry.delete(wc)` in windowScope.close's owned disposer / closed hook.
+- Shutdown: `rootScope.close()` cascades through windowScopes, each owning win.destroy; do not iterate destroy calls.
+- `runtime.windows.all()`: iterate `registry.values()` to obtain live windows.
 
 ---
 
-## 9. 寿命与信任的权威映射
+## 9. Lifetime and trust authority mapping
 
-| 关注点            | 寿命权威                                                                                                                   | 查询索引                                      |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| **窗口寿命**      | `WindowRegistry: Map<wc, WindowRecord{windowScope}>`；windowScope.close 级联拆其下全部 wcScope/viewScope，最后 win.destroy | —                                             |
-| **trust**         | 各 wc 的 `wcScope.own(lease)`（lease 入 `WcRecord.leases`）；wcScope.close → lease dispose → refcount 归零                 | trustSet（`isTrusted`/fanout，读路径见 §4.4） |
-| **per-wc 段寿命** | Connection 自管 `DisposableRegistry`（§5）                                                                                 | ConnectionRegistry 按 wc 索引                 |
-| **嵌套寿命语义**  | `Scope`：rootScope→windowScope→{wcScope, viewScope*, sessionScope*}（§1）                                                  | —                                             |
+| Concern                       | Lifetime authority                                                                                                                      | Query index                                      |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **Window lifetime**           | `WindowRegistry: Map<wc, WindowRecord{windowScope}>`; windowScope.close cascades through all wcScopes/viewScopes, then win.destroy last | —                                                |
+| **Trust**                     | Each wc's `wcScope.own(lease)`, with leases in `WcRecord.leases`; wcScope.close → lease disposal → zero refcount                        | trustSet (`isTrusted`/fanout; read path in §4.4) |
+| **Per-wc segment lifetime**   | Connection manages its own `DisposableRegistry` (§5)                                                                                    | ConnectionRegistry indexes by wc                 |
+| **Nested lifetime semantics** | `Scope`: rootScope→windowScope→{wcScope, viewScope*, sessionScope*} (§1)                                                                | —                                                |
 
 ---
 
-## 10. 装配纪律（实现时守住）
+## 10. Assembly rules
 
-- 🔒 **viewScope 必须挂 windowScope（或 sessionScope），不是 wcScope**（§2）。误把 `viewScope = wcScope.child()` 会让导航（wcScope.reset）连带拆掉原生 view，违反「导航不重建 view」。
-- 🔒 **trust lease 不留游离**：写入只经 `admit(wc, wcScope)`（§4.5），lease 必由 wcScope own；漏改残留一份永不 dispose 的 lease → wcScope.close 后 trustSet 仍有该 wc → `isTrusted` 误判真 → 已关窗的 wc 仍 trusted。
-- **键不可混用 wc.id 与对象身份**：WindowRegistry / WcRegistry 键用 wc 对象身份（§8.1，wc.id 会复用、对象身份不会）；`isTrusted` / grant 按 wc.id 命中。两者在 wc.id 复用时分叉（新窗建新 wcScope / 新 record 不继承，§4.3 + §7），但 record 键混用 wc.id 会被复用串台。
+- 🔒 **viewScope must belong to windowScope or sessionScope, not wcScope** (§2). `viewScope = wcScope.child()` would let navigation (wcScope.reset) destroy native views, violating “navigation does not recreate views.”
+- 🔒 **No unowned trust leases**: writes only use `admit(wc, wcScope)` (§4.5), with wcScope owning the lease. Leaving one lease that is never disposed lets trustSet retain wc after wcScope.close; `isTrusted` incorrectly stays true, leaving a closed window's wc trusted.
+- **Do not mix wc.id and object-identity keys**. WindowRegistry / WcRegistry use wc object identity (§8.1); wc.id can be reused, identity cannot. `isTrusted` / grants match wc.id. On reuse, the new window gets a new wcScope/record without inheritance (§4.3 + §7). Using wc.id for record keys would confuse reused identities.
 
-### 与兄弟契约的接口
+### Interfaces with companion contracts
 
-- **compositor-and-teardown.md**：windowScope / viewScope 就是其 window-scope，其 own() LIFO 编码（anchor dispose → detach → wire dispose → win.destroy）落在它们上；本文补「跨窗 + app 级」序 = rootScope children-first（§6.1）。
-- **capability-and-lifecycle.md**：wcScope = 其「control wc 的 Scope」，grant 若要拿到 wc.id 复用安全需绑它（§7）；isTrusted 闸读 trustSet（§4.4）。
+- **compositor-and-teardown.md**: windowScope / viewScope implement its window-scope; their own() LIFO encodes anchor dispose → detach → wire dispose → win.destroy. This document adds cross-window and app-level ordering through rootScope children-first (§6.1).
+- **capability-and-lifecycle.md**: wcScope is its control-wc Scope; grants requiring wc.id-reuse safety must bind to it (§7). The isTrusted gate reads trustSet (§4.4).

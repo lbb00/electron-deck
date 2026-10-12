@@ -1,9 +1,8 @@
-// CONTRACT-OBJECTION: `invokeHost` 是 framework-internal
-// async function —— 让 WireTransport 自己接 throw 转 InvokeFailure 是合理的，
-// 但同时上层 deck-app 也可能想统一 error mapping。当前 spec 让
-// WireTransport 兼做 error → wire-failure 序列化，意味着 `DeckRemoteError`
-// 类的 code-preservation 语义被分散到两处实现（deck-app 与 wire-transport），
-// 后续可以考虑抽一个 toInvokeFailure(name, err) helper 复用。
+// CONTRACT-OBJECTION: `invokeHost` is a framework-internal async function.
+// It is reasonable for WireTransport to catch its errors and convert them to InvokeFailure,
+// but deck-app may also want a shared error mapping. Having WireTransport serialize
+// errors into wire failures splits DeckRemoteError code-preservation semantics between
+// deck-app and wire-transport. A shared toInvokeFailure(name, err) helper could consolidate them.
 
 import { describe, expect, it, vi } from 'vitest'
 import { DeckRemoteError } from '../errors.js'
@@ -99,7 +98,7 @@ function makeHarness(opts: {
 		senderPolicy,
 		trustedWebContents: () => wcs,
 		invokeHost: invokeHost as WireTransportDeps['invokeHost'],
-		// 默认 fanout 测试都 publish 'e1'，统一 allowlist 让既有 case 通过。
+		// Fanout tests publish 'e1' by default, so use a shared allowlist containing it.
 		declaredEvents: opts.declaredEvents ?? (() => ['e1']),
 	})
 	return {
@@ -140,9 +139,9 @@ describe('WireTransport — start()', () => {
 		expect(() => h.transport.start()).toThrow(/already started|already/i)
 	})
 
-	// start() 中途抛错时必须回滚已注册的 handler / 已建的 bus subscription，并把
-	// state 回到 idle —— 否则遗留半状态会让 dispose() 走 "idle no-op" 分支跳过
-	// cleanup，造成 listener 泄露。
+	// If start() fails partway through, roll back registered handlers and bus subscriptions
+	// and return to idle. Otherwise partial registrations remain while dispose() takes
+	// its idle no-op branch, skipping cleanup and leaking listeners.
 	describe('start() partial-failure rollback', () => {
 		it('second ipcMain.handle throws → already-registered handler is removed + state reverts to idle', () => {
 			const ipcMain = createFakeIpcMain()
@@ -167,7 +166,7 @@ describe('WireTransport — start()', () => {
 
 			expect(() => transport.start()).toThrow(/boom/)
 
-			// 第一次成功的 channel 必须被 removeHandler 清掉。
+			// removeHandler must remove the first successfully registered channel.
 			expect(ipcMain.removeHandler).toHaveBeenCalled()
 			const firstRegisteredChannel = (ipcMain.handle as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
 			expect(
@@ -178,7 +177,7 @@ describe('WireTransport — start()', () => {
 		it('after start() failure, state is idle so start() can be re-attempted (single-use lock not engaged)', () => {
 			const ipcMain = createFakeIpcMain()
 			let callCount = 0
-			// 配置：每次第二个 handle() 都抛 —— 反复 start 都失败但状态保持自洽。
+			// Throw on every second handle() call: repeated starts fail but leave the state consistent.
 			ipcMain.handle = vi.fn((channel: string, handler: InvokeHandler) => {
 				callCount += 1
 				if (callCount % 2 === 0) {
@@ -198,8 +197,8 @@ describe('WireTransport — start()', () => {
 			})
 
 			expect(() => transport.start()).toThrow(/boom/)
-			// 状态回 idle —— 再 start() 不应抛 "already started"；mock 仍配置抛
-			// boom，因此仍抛 boom（而非 "already started"）。
+			// State returns to idle, so another start() must not throw "already started".
+			// The mock still throws boom; that must be the error from the retry.
 			expect(() => transport.start()).toThrow(/boom/)
 		})
 
@@ -228,7 +227,7 @@ describe('WireTransport — start()', () => {
 
 			expect(() => transport.start()).toThrow(/sub-boom/)
 
-			// 两个 ipc handler 都注册过 → 都应被 removeHandler 清掉。
+			// Both IPC handlers were registered; removeHandler must remove both.
 			expect(ipcMain.handle).toHaveBeenCalledTimes(2)
 			const removed = (ipcMain.removeHandler as ReturnType<typeof vi.fn>).mock.calls
 				.map(c => c[0] as string)
@@ -364,8 +363,8 @@ describe('WireTransport — invoke handler: error serialization', () => {
 		expect(res.error.message).toBe('x')
 	})
 
-	// host 抛 DeckRemoteError 重抛代理调用结果时，原 remoteName 必须被保留 ——
-	// 不能被中间环节的 invoke name 覆盖。
+	// A host rethrowing a proxied call's DeckRemoteError must preserve the original
+	// remoteName rather than replace it with the intermediary's invoke name.
 	it('host throwing DeckRemoteError preserves original remoteName + code', async () => {
 		const h = makeHarness({
 			trustedIds: [1],
@@ -385,8 +384,8 @@ describe('WireTransport — invoke handler: error serialization', () => {
 		expect(res.error.message).toBe('upstream failed')
 	})
 
-	// DeckRemoteError 携带显式空字符串 remoteName 时表达 "未知来源" 的意图，
-	// 不能被 invokeName 友好覆盖（`||` → `??`）。
+	// An explicitly empty DeckRemoteError remoteName means "unknown origin".
+	// Preserve it instead of substituting invokeName (`??`, not `||`).
 	it('host throwing DeckRemoteError with empty remoteName preserves "" (?? over ||)', async () => {
 		const h = makeHarness({
 			trustedIds: [1],
@@ -566,9 +565,9 @@ describe('WireTransport — event push', () => {
 		})
 	})
 
-	// declaredEvents allowlist —— wire transport 不能把任何 bus.publish 都跨进程
-	// 推；未声明 event name 必须 drop（防 framework 内部误用 bus.publish 时 leak
-	// 到 webview）。
+	// The declaredEvents allowlist prevents arbitrary bus.publish calls from crossing
+	// process boundaries. Drop undeclared names so accidental internal publishes
+	// do not leak events to webviews.
 	it('publish on undeclared event name is dropped (declaredEvents allowlist)', () => {
 		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 		try {

@@ -68,24 +68,24 @@ cannot prove or disprove a memory leak.
 
 ## Native view lifecycle probe
 
-`electron-native-lifecycle.js` 运行真实 Electron，检查 WebContentsView 的显示→隐藏→再显示、跨窗口 `moveTo()`、session `dispose()` 和 `keepAlive` 的 LRU 淘汰。它在每个检查点记录 `app.getAppMetrics()` 的 PID、创建时间、工作集（KiB）以及两次采样间的 CPU 平均值，并记录销毁耗时。结果写到仓库外；可这样运行：
+`electron-native-lifecycle.js` runs real Electron to check WebContentsView show → hide → show transitions, cross-window `moveTo()`, session `dispose()`, and `keepAlive` LRU eviction. At each checkpoint it records PID, creation time, working set (KiB), and average CPU usage between two `app.getAppMetrics()` samples. It also records how long destruction takes. Results are written outside the repository. Run it with:
 
 ```sh
 DECK_NATIVE_LIFECYCLE_OUTPUT=/tmp/electron-deck-native-lifecycle.json \
   electron bench/electron-native-lifecycle.js
 ```
 
-结果中的 `backgroundThrottling` 会在两个独立宿主窗口中，比较隐藏视图的计时器回调次数。一个视图关闭后台节流会影响同窗口的所有 WebContents，因此两组不能放在同一窗口。这个短实验只能说明本机这次运行的计时器行为，不能证明 CPU 或内存会改善。脚本结束前会清理窗口、视图和 framework runtime；若失败，检查结果文件旁的 `.trace.log`。协议断言可用 `node --test bench/electron-native-lifecycle.test.js` 运行。
+The report's `backgroundThrottling` section compares timer callback counts for hidden views in two separate host windows. Disabling background throttling for one view affects all WebContents in its window, so the two groups must use different windows. This short experiment shows only timer behavior on this machine during this run; it does not prove reduced CPU or memory usage. The script cleans up windows, views, and the framework runtime before exiting. On failure, check the `.trace.log` beside the result file. Run protocol assertions with `node --test bench/electron-native-lifecycle.test.js`.
 
-生命周期轮数和隐藏停留时间可配置，但都有上限：`DECK_NATIVE_LIFECYCLE_ROUNDS` 最多 100 轮，`DECK_NATIVE_HIDDEN_DWELL_MS` 限制在 20–1000ms（默认 40ms）。报告会记录实际使用的 `hiddenDwellMs`。
+Lifecycle rounds and the time spent hidden are configurable within limits: `DECK_NATIVE_LIFECYCLE_ROUNDS` allows at most 100 rounds, and `DECK_NATIVE_HIDDEN_DWELL_MS` ranges from 20 to 1000 ms (default: 40 ms). The report records the actual `hiddenDwellMs` used.
 
-## Dockable demo 尾延迟
+## Dockable demo tail latency
 
-先运行 `pnpm run build` 和 `node examples/dockable-demo/bundle.js`，再执行：
+First run `pnpm run build` and `node examples/dockable-demo/bundle.js`, then execute:
 
 ```sh
 DECK_DEMO_LAG=1 DECK_DEMO_SHOTS_DIR=/tmp/electron-deck-lag \
   electron examples/dockable-demo/main.js
 ```
 
-`lag-report.json` 记录真实拖动中的 DOM 帧间隔、DOM 宽度变化到 native view 跟随的延迟，以及主进程事件循环延迟。报告给出 P95/P99、样本数和 P99 是否少于 100 个样本；未能在下次 DOM 变化前追上的次数单独记录。单次运行只能作为诊断，不应当作优化收益或性能门槛。
+`lag-report.json` records DOM frame intervals during real dragging, the delay between a DOM width change and the native view following it, and main-process event-loop delay. It reports P95/P99, sample counts, and whether the P99 estimate has fewer than 100 samples. Misses where the native view fails to catch up before the next DOM change are counted separately. A single run is diagnostic evidence only; it should not be treated as proof of an optimization gain or as a performance gate.

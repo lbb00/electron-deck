@@ -1,11 +1,11 @@
 ---
-"electron-deck": patch
+'electron-deck': patch
 ---
 
-包描述和 keywords 改用 host shell 口径
+Describe the package and its keywords as a host-shell framework
 
-`description` 原来只说「dockable panels」，把这个包描述成一个停靠布局库。实际上 dock 只是它的一个面：多窗口编排、原生 `WebContentsView` 跟住 DOM、浮层与 popout、跨进程 IPC 才是主体；`/layout` 和 `/dock-react` 是另一个正交的、不依赖 Electron 的面，纯浏览器项目能单独用。
+The previous `description` mentioned only “dockable panels”, presenting the package as a docking layout library. Docking is one part of it: multi-window orchestration, native `WebContentsView` instances following the DOM, overlays and popouts, and cross-process IPC are its main purpose. `/layout` and `/dock-react` provide a separate, orthogonal interface without an Electron dependency, usable independently in browser projects.
 
-npm 页面和搜索结果直接读这两个字段，所以它们决定了别人第一眼以为这个包是干什么的。两个 README 的摘要行和 banner 文案也已经对齐同一套说法。
+The npm page and search results read these fields directly, so they shape a consumer's first impression. Both README summaries and the banner text use the same description.
 
-keywords 补上 `host-shell`、`framework`、`multi-window`、`ipc`。
+Add `host-shell`, `framework`, `multi-window`, and `ipc` to the keywords.

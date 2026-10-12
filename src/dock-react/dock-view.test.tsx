@@ -470,8 +470,8 @@ describe('<DockView> stale-tab safety (M3)', () => {
 
 describe('<DockView> resize write-back to the model (M1)', () => {
 	// BUG (M1) — dragging a split separator must drive an engine mutation that
-	// writes the new sizes back to the model ("拖分隔 → 调引擎 mutation → model 更
-	// 新"). The current impl wires NO layout-change callback on the rrp Group
+	// writes the new sizes back to the model ("drag separator → invoke an engine mutation → update model").
+	// The current impl wires NO layout-change callback on the rrp Group
 	// (no onLayoutChange / onLayoutChanged) — it only sets uncontrolled
 	// `defaultSize` per Panel — so a real drag NEVER round-trips into the model.
 	//
