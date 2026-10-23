@@ -1,5 +1,12 @@
 # electron-deck
 
+## 1.0.0-beta.1
+
+### Patch Changes
+
+- 899dab5: Remove the bundle-size gate and its CI and prepack commands while keeping the tree-shaking checks.
+- 899dab5: Upgrade to stable `view-anchor` 1.0.0, preserve frame-by-frame following during Dock splitter drags, and document layout epoch timing and anchor remeasurement.
+
 ## 1.0.0-beta.0
 
 ### Major Changes
