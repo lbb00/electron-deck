@@ -168,10 +168,11 @@ startElectronDeck({
 - [连接层](./docs/foundation.md) —— `Connection`、资源归属、`debugTap`
 - [横切契约](./docs/contracts/) —— capability 授权与 grants、统一生命周期、view handle、view-anchor 跟随
 - [Dock 布局 epoch 与 view-anchor](./docs/contracts/dock-layout-epoch.md) —— Dock 提交布局的时机，以及何时重新测量原生视图锚点
+- [形式化验证 (TLA+)](./specs/README.md) —— Scope 作用域层级、信任租约生命周期与布局对齐的形式化规格与 TLC 模型检验
 
 ## 贡献
 
-欢迎提 issue 和 PR。提交前请在本地依次运行 `pnpm lint`、`pnpm check-types`、`pnpm test`、`pnpm build`；构建完成后运行 `pnpm check:tree-shaking` 和 `pnpm check:e2e`。Electron 交互检查需要图形会话；无界面的 Linux 环境可运行 `xvfb-run --auto-servernum pnpm check:e2e`。
+欢迎提 issue 和 PR。提交前请在本地依次运行 `pnpm lint`、`pnpm check-types`、`pnpm test`、`pnpm tla:check`、`pnpm build`；构建完成后运行 `pnpm check:tree-shaking` 和 `pnpm check:e2e`。Electron 交互检查需要图形会话；无界面的 Linux 环境可运行 `xvfb-run --auto-servernum pnpm check:e2e`。
 
 ## License
 

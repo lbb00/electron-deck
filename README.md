@@ -108,10 +108,11 @@ It currently has no production consumers outside this repo's examples — treat 
 - [Connection layer](./docs/foundation.md) — `Connection`, resource ownership, `debugTap`
 - [Cross-cutting contracts](./docs/contracts/) — capability gating and grants, unified lifetimes, view handles, view-anchor following
 - [Dock layout epoch and view-anchor](./docs/contracts/dock-layout-epoch.md) — when dock mutations commit and when to remeasure an anchored native view
+- [Formal verification (TLA+)](./specs/README.md) — formal specifications of Scope hierarchy, trust leases, and placement reconciliation with TLC model checking
 
 ## Contributing
 
-Issues and pull requests are welcome. Before submitting, run `pnpm lint`, `pnpm check-types`, `pnpm test`, then `pnpm build`. After the build, run `pnpm check:tree-shaking` and `pnpm check:e2e`. The Electron interaction check needs a graphical session; on headless Linux, run it with `xvfb-run --auto-servernum pnpm check:e2e`.
+Issues and pull requests are welcome. Before submitting, run `pnpm lint`, `pnpm check-types`, `pnpm test`, `pnpm tla:check`, then `pnpm build`. After the build, run `pnpm check:tree-shaking` and `pnpm check:e2e`. The Electron interaction check needs a graphical session; on headless Linux, run it with `xvfb-run --auto-servernum pnpm check:e2e`.
 
 ## License
 
