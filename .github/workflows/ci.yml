@@ -133,3 +133,30 @@ jobs:
           name: dockable-e2e-diagnostics-${{ matrix.os }}
           path: ${{ runner.temp }}/dockable-e2e
           if-no-files-found: ignore
+
+  tla-verification:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Cache TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: .tla-cache
+          key: tla2tools-v1.7.4
+
+      - name: Run TLA+ model checking
+        run: node scripts/verify-tla.js
